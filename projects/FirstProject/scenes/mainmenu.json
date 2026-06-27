@@ -1,0 +1,113 @@
+{
+    "scene_name": "Main Menu",
+    "script_attached": "scripts/MainMenuScript.cpp",
+    "entities": [
+        {
+            "components": {
+                "Metadata": { "name": "Background Panel" },
+                "Position": { "x": 20.0, "y": 20.0 },
+                "RectangleShape": { "w": 1340.0, "h": 640.0 },
+                "ZIndex": { "z": 0 }
+            }
+        },
+        {
+            "components": {
+                "Metadata": { "name": "Title Block" },
+                "Position": { "x": 460.0, "y": 50.0 },
+                "RectangleShape": { "w": 420.0, "h": 80.0 },
+                "ZIndex": { "z": 1 }
+            }
+        },
+        {
+            "components": {
+                "Metadata": { "name": "Player" },
+                "Position": { "x": 150.0, "y": 280.0 },
+                "RectangleShape": { "w": 60.0, "h": 90.0 },
+                "ZIndex": { "z": 2 },
+                "Velocity": { "x": 0.0, "y": 0.0 },
+                "Acceleration": { "x": 0.0, "y": 0.0 }
+            }
+        },
+        {
+            "components": {
+                "Metadata": { "name": "Enemy A" },
+                "Position": { "x": 900.0, "y": 180.0 },
+                "RectangleShape": { "w": 50.0, "h": 50.0 },
+                "ZIndex": { "z": 2 },
+                "Velocity": { "x": 20.0, "y": 0.0 },
+                "Acceleration": { "x": 0.0, "y": 0.0 }
+            }
+        },
+        {
+            "components": {
+                "Metadata": { "name": "Coin" },
+                "Position": { "x": 600.0, "y": 350.0 },
+                "RectangleShape": { "w": 30.0, "h": 30.0 },
+                "ZIndex": { "z": 1 },
+                "Velocity": { "x": 0.0, "y": 0.0 },
+                "Acceleration": { "x": 0.0, "y": 0.0 }
+            }
+        },
+        {
+            "components": {
+                "Metadata": { "name": "Platform" },
+                "Position": { "x": 300.0, "y": 480.0 },
+                "RectangleShape": { "w": 300.0, "h": 24.0 },
+                "ZIndex": { "z": 1 }
+            }
+        }
+    ],
+    "gui_elements": [
+        {
+            "type": "Panel",
+            "x": 560.0, "y": 155.0,
+            "w": 280.0, "h": 440.0,
+            "bg_color": [28, 28, 38, 235],
+            "children": [
+                {
+                    "type": "Button",
+                    "x": 20.0, "y": 20.0,
+                    "w": 220.0, "h": 52.0,
+                    "text": "Play Game"
+                },
+                {
+                    "type": "Button",
+                    "x": 20.0, "y": 84.0,
+                    "w": 220.0, "h": 52.0,
+                    "text": "Options"
+                },
+                {
+                    "type": "Button",
+                    "x": 20.0, "y": 148.0,
+                    "w": 220.0, "h": 52.0,
+                    "text": "Load Game"
+                },
+                {
+                    "type": "Button",
+                    "x": 20.0, "y": 212.0,
+                    "w": 220.0, "h": 52.0,
+                    "text": "Credits"
+                },
+                {
+                    "type": "LineEdit",
+                    "x": 20.0, "y": 282.0,
+                    "w": 220.0, "h": 38.0,
+                    "placeholder": "Enter player name..."
+                },
+                {
+                    "type": "SpinBox",
+                    "x": 20.0, "y": 334.0,
+                    "w": 220.0, "h": 38.0,
+                    "min": 1.0, "max": 10.0,
+                    "initial": 3.0, "step": 1.0
+                },
+                {
+                    "type": "Button",
+                    "x": 20.0, "y": 386.0,
+                    "w": 220.0, "h": 52.0,
+                    "text": "Quit"
+                }
+            ]
+        }
+    ]
+}

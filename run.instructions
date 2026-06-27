@@ -1,0 +1,15 @@
+quick edit build:
+fast_build.bat --windows-only   :: skip the web build
+fast_build.bat --web-only       :: skip the windows build
+
+full build/rebuild:
+build.bat
+
+web:
+cd build_windows/path_to_exe
+myprogram.exe 
+
+html:
+cd emsdk
+emrun build_web/path_to_html
+

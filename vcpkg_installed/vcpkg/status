@@ -1,0 +1,264 @@
+Package: vcpkg-cmake-config
+Version: 2024-05-23
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 5f3db1d357aa5f722d1334813d1b2b6a655ada40ddeb87bc2196a8903e1375b5
+Status: install ok installed
+
+Package: vcpkg-cmake
+Version: 2024-04-23
+Architecture: x64-windows
+Multi-Arch: same
+Abi: f39da2a02b503c72eab439b10b501841738967f54d434177d1b89ab2aa1169e5
+Status: install ok installed
+
+Package: box2d
+Version: 3.1.1
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: c7d13cb6417d7a813c1b10ac02b1ebd976b658a2841a8153a44cf0b31d6c96ec
+Description: An open source C++ engine for simulating rigid bodies in 2D
+Status: purge ok not-installed
+
+Package: sdl3
+Version: 3.4.4
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: acd97ce9d5148e15394535aa7d804a86af903ba0e3138d5369832a3acc3bda46
+Description: Simple DirectMedia Layer is a cross-platform development library designed to provide low level access to audio, keyboard, mouse, joystick, and graphics hardware via OpenGL and Direct3D.
+Status: purge ok not-installed
+
+Package: sdl3-mixer
+Version: 3.2.0
+Port-Version: 1
+Depends: sdl3, vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 2830ab8b468f43f9e566c0d2be71c2b48967de560cf26e6912376bbceebcdc42
+Description: An audio mixer that supports various file formats for Simple Directmedia Layer.
+Status: purge ok not-installed
+
+Package: zlib
+Version: 1.3.1
+Depends: vcpkg-cmake
+Architecture: x64-windows
+Multi-Arch: same
+Abi: fdb3b5c2d9b7eac0a19650d94304e11133b429ffaac0dfa886097ed0e3d14092
+Description: A compression library
+Status: purge ok not-installed
+
+Package: libpng
+Version: 1.6.58
+Depends: vcpkg-cmake, vcpkg-cmake-config, zlib
+Architecture: x64-windows
+Multi-Arch: same
+Abi: f635b7a556280eb164d693eda8e0182c2177759520c7fdbdb82b8ec2c34265db
+Description: libpng is a library implementing an interface for reading and writing PNG (Portable Network Graphics) format files
+Status: purge ok not-installed
+
+Package: bzip2
+Version: 1.0.8
+Port-Version: 6
+Depends: vcpkg-cmake
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 5c8aecab85231874d046bd326a921305b890922cccd3ef085138a1cf18b89041
+Description: bzip2 is a freely available, patent free, high-quality data compressor. It typically compresses files to within 10% to 15% of the best available techniques (the PPM family of statistical compressors), whilst being around twice as fast at compression and six times faster at decompression.
+Default-Features: tool
+Status: purge ok not-installed
+
+Package: bzip2
+Feature: tool
+Architecture: x64-windows
+Multi-Arch: same
+Description: Builds bzip2 executable
+Status: purge ok not-installed
+
+Package: brotli
+Version: 1.2.0
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: ea472133ac4d8de350bae1ede7e41f07d7fe636e12e97313006fd11b05fafaf7
+Description: a generic-purpose lossless compression algorithm that compresses data using a combination of a modern variant of the LZ77 algorithm, Huffman coding and 2nd order context modeling.
+Status: purge ok not-installed
+
+Package: freetype
+Version: 2.14.3
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 85725f6707b766514323bd489f56c5571d6d294577e003bd3e06b2dcfee47c64
+Description: A library to render fonts.
+Default-Features: brotli, bzip2, png, zlib
+Status: purge ok not-installed
+
+Package: freetype
+Feature: brotli
+Depends: brotli
+Architecture: x64-windows
+Multi-Arch: same
+Description: Support decompression of WOFF2 streams
+Status: purge ok not-installed
+
+Package: freetype
+Feature: bzip2
+Depends: bzip2
+Architecture: x64-windows
+Multi-Arch: same
+Description: Support bzip2 compressed fonts.
+Status: purge ok not-installed
+
+Package: freetype
+Feature: png
+Depends: libpng
+Architecture: x64-windows
+Multi-Arch: same
+Description: Support PNG compressed OpenType embedded bitmaps.
+Status: purge ok not-installed
+
+Package: freetype
+Feature: zlib
+Depends: zlib
+Architecture: x64-windows
+Multi-Arch: same
+Description: Use zlib instead of internal library for DEFLATE
+Status: purge ok not-installed
+
+Package: sdl3-ttf
+Version: 3.2.2
+Port-Version: 1
+Depends: freetype, sdl3, vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 579cd42a08e65a16894a800481b542c145fa616135fc9e0d4da894d00f890ff2
+Description: A library for rendering TrueType fonts with SDL
+Status: purge ok not-installed
+
+Package: box2d
+Version: 3.1.1
+Depends: vcpkg-cmake:x64-windows, vcpkg-cmake-config:x64-windows
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Abi: 5199e82a1ef9a2dba93aa10b45d0104447f14c243f519aa1aa413077450c5743
+Description: An open source C++ engine for simulating rigid bodies in 2D
+Status: install ok installed
+
+Package: sdl3
+Version: 3.4.4
+Depends: vcpkg-cmake:x64-windows, vcpkg-cmake-config:x64-windows
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Abi: 4e7c3e7c746e96b3350e9d52d37a492fef5c6d1c9c7acae45e4c5ef2503e1d1a
+Description: Simple DirectMedia Layer is a cross-platform development library designed to provide low level access to audio, keyboard, mouse, joystick, and graphics hardware via OpenGL and Direct3D.
+Status: install ok installed
+
+Package: sdl3-mixer
+Version: 3.2.0
+Port-Version: 1
+Depends: sdl3, vcpkg-cmake:x64-windows, vcpkg-cmake-config:x64-windows
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Abi: 7e823f69658e25bb1b02e594eeec3b004b019bff3a47e3195b0714f7d39a8021
+Description: An audio mixer that supports various file formats for Simple Directmedia Layer.
+Status: install ok installed
+
+Package: zlib
+Version: 1.3.1
+Depends: vcpkg-cmake:x64-windows
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Abi: a871662817a2798be9ea2ed38d268fcb8b0db79bd100ae15349a600e3a232f71
+Description: A compression library
+Status: install ok installed
+
+Package: libpng
+Version: 1.6.58
+Depends: vcpkg-cmake:x64-windows, vcpkg-cmake-config:x64-windows, zlib
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Abi: 9f5b25d2fbe572ff58accd5eb31ab92badac00707c09af6ad856ef886c332f6a
+Description: libpng is a library implementing an interface for reading and writing PNG (Portable Network Graphics) format files
+Status: install ok installed
+
+Package: bzip2
+Version: 1.0.8
+Port-Version: 6
+Depends: vcpkg-cmake:x64-windows
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Abi: dde53523736876cfa1b852a8f89898b563c70223cafabf726766e023a4af875c
+Description: bzip2 is a freely available, patent free, high-quality data compressor. It typically compresses files to within 10% to 15% of the best available techniques (the PPM family of statistical compressors), whilst being around twice as fast at compression and six times faster at decompression.
+Default-Features: tool
+Status: install ok installed
+
+Package: bzip2
+Feature: tool
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Description: Builds bzip2 executable
+Status: install ok installed
+
+Package: brotli
+Version: 1.2.0
+Depends: vcpkg-cmake:x64-windows, vcpkg-cmake-config:x64-windows
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Abi: 0bf2497eaf87a233a6faea26e16fff7ed8f1c963c14b0230cd5fe8d62b0f5fe7
+Description: a generic-purpose lossless compression algorithm that compresses data using a combination of a modern variant of the LZ77 algorithm, Huffman coding and 2nd order context modeling.
+Status: install ok installed
+
+Package: freetype
+Version: 2.14.3
+Depends: vcpkg-cmake:x64-windows, vcpkg-cmake-config:x64-windows
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Abi: 3803a7c8dc10f27962f0af258bdc80bd824084c928c36dfc5c12f16ca45c3a5b
+Description: A library to render fonts.
+Default-Features: brotli, bzip2, png, zlib
+Status: install ok installed
+
+Package: freetype
+Feature: brotli
+Depends: brotli
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Description: Support decompression of WOFF2 streams
+Status: install ok installed
+
+Package: freetype
+Feature: bzip2
+Depends: bzip2
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Description: Support bzip2 compressed fonts.
+Status: install ok installed
+
+Package: freetype
+Feature: png
+Depends: libpng
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Description: Support PNG compressed OpenType embedded bitmaps.
+Status: install ok installed
+
+Package: freetype
+Feature: zlib
+Depends: zlib
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Description: Use zlib instead of internal library for DEFLATE
+Status: install ok installed
+
+Package: sdl3-ttf
+Version: 3.2.2
+Port-Version: 1
+Depends: freetype, sdl3, vcpkg-cmake:x64-windows, vcpkg-cmake-config:x64-windows
+Architecture: wasm32-emscripten
+Multi-Arch: same
+Abi: 8039ad7c6b3e8a01f8bfc3ad18a841a5607b1552cd313fc4282d6983f283bbe9
+Description: A library for rendering TrueType fonts with SDL
+Status: install ok installed
+

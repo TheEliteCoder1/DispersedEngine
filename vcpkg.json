@@ -1,0 +1,11 @@
+{
+  "name": "dispersed-engine",
+  "version": "1.0.0",
+  "dependencies": [
+    "sdl3",
+    "sdl3-image",
+    "sdl3-mixer",
+    "sdl3-ttf",
+    "box2d"
+  ]
+}

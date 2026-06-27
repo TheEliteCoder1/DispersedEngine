@@ -1,0 +1,20 @@
+{
+  "C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.50.35717/bin/Hostx64/x64/cl.exe" : 
+  {
+    "hash" : "775b18172d903633ca920127a8a1f02950513204",
+    "size" : 682568,
+    "timestamp" : 1775013640
+  },
+  "C:/Users/daeli/Documents/Dispersed2D/emsdk/upstream/emscripten/em++.exe" : 
+  {
+    "hash" : "f489eb49559d47e288564e283bfa2bcc3fc944d9",
+    "size" : 5632,
+    "timestamp" : 1781543251
+  },
+  "C:/Users/daeli/Documents/Dispersed2D/emsdk/upstream/emscripten/emcc.exe" : 
+  {
+    "hash" : "f489eb49559d47e288564e283bfa2bcc3fc944d9",
+    "size" : 5632,
+    "timestamp" : 1781543251
+  }
+}

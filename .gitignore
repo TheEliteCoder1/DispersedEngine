@@ -1,0 +1,65 @@
+# ── Build output directories ──────────────────────────────────────────────
+build/
+build_windows/
+build_web/
+out/
+.cache/
+
+# ── CMake generated files ─────────────────────────────────────────────────
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+_deps/
+
+# ── Compiled binaries ─────────────────────────────────────────────────────
+*.exe
+*.dll
+*.so
+*.dylib
+*.o
+*.obj
+*.a
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# ── Web build output ──────────────────────────────────────────────────────
+*.html
+*.js
+*.wasm
+*.data
+
+# ── VS / VS Code generated ────────────────────────────────────────────────
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+ipch/
+
+# ── OS noise ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── ──────────────────────────────────────────────────────────────────────
+# KEEP (do NOT ignore):
+#   vcpkg_installed/   — pre-built vcpkg packages; committed so CI/teammates
+#                        don't need to re-install on every clone.
+#                        If your repo becomes too large, switch to vcpkg
+#                        manifest mode and add vcpkg_installed/ here instead.
+#   emsdk/             — Emscripten SDK; kept so web builds work offline.
+#   src/               — engine source
+#   projects/          — all game projects
+#   *.bat              — build helper scripts (build.bat, fast_build.bat)
+#   CMakeLists.txt     — all cmake files (root + subdirs)
+#   vcpkg.json         — vcpkg manifest
+#   run.instructions   — developer notes
+# ── ──────────────────────────────────────────────────────────────────────
