@@ -1,4 +1,4 @@
-# DispersedEngine
+<h1 align="center">DispersedEngine<h1>
 
 <p align="center">C++ SDL3 game engine for Windows and Web with controller support.</p>
 
