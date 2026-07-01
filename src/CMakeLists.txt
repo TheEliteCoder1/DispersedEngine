@@ -47,9 +47,11 @@ if(BUILD_ENGINE)
             "-sUSE_WEBGL2=1"
             "-sASYNCIFY"
             "--preload-file=${CMAKE_CURRENT_SOURCE_DIR}/assets@/assets"
-            "--shell-file=${CMAKE_SOURCE_DIR}/emsdk/minimal_shell.html"
+            "--preload-file=${CMAKE_SOURCE_DIR}/projects@/projects"
+            "--shell-file=${CMAKE_SOURCE_DIR}/minimal_shell.html"
+            "-sFORCE_FILESYSTEM"
         )
-    else()
+        else()
         set_target_properties(Editor PROPERTIES
             SUFFIX          ".exe"
             WIN32_EXECUTABLE TRUE

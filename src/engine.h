@@ -1,5 +1,4 @@
 #pragma once
-
 #include <SDL3/SDL.h>
 #include <SDL3_ttf/SDL_ttf.h>
 #include <SDL3_image/SDL_image.h>
@@ -14,16 +13,118 @@
 #include <json.hpp>
 #include <fstream>
 #include <memory>
+#include <cstdio>
+#include <stdexcept>
+#include <array>
+#include <stdio.h>
 
+// ============================================================
+// Platform Detection and Path Helpers
+// ============================================================
+#ifdef __EMSCRIPTEN__
+#define PLATFORM_EMSCRIPTEN 1
+#ifdef PROJECT_SCRIPT_BUILD
+    // Project scripts on web: mounted at /FirstProject/
+    const std::string PATH_PREFIX_PROJECTS = "/";
+    const std::string PATH_PREFIX_ASSETS = "/";
+    const std::string PATH_PREFIX_ENGINE = "/";
+#else
+    // Editor on web: projects mounted at /projects/, assets at /assets/
+    const std::string PATH_PREFIX_PROJECTS = "/projects/";
+    const std::string PATH_PREFIX_ASSETS = "/assets/";
+    const std::string PATH_PREFIX_ENGINE = "/";
+#endif
 
-namespace Tools {
-    void executeCommand() {
-        std::cout << std::filesystem::current_path();
+#elif defined(_WIN32) || defined(_WIN64)
+#define PLATFORM_WINDOWS 1
+#ifdef PROJECT_SCRIPT_BUILD
+    // Project executable has the folder copied next to it, so use ./
+    const std::string PATH_PREFIX_PROJECTS = "./";
+    const std::string PATH_PREFIX_ASSETS = "./";
+    const std::string PATH_PREFIX_ENGINE = "./";
+#else
+    // Editor needs to reach the source 'projects/' folder from build_windows/src/Release/
+    const std::string PATH_PREFIX_PROJECTS = "../../../projects/";
+    const std::string PATH_PREFIX_ASSETS = "../../../src/assets/";
+    const std::string PATH_PREFIX_ENGINE = "../../../";
+#endif
+
+#elif defined(__linux__)
+#define PLATFORM_LINUX 1
+#ifdef PROJECT_SCRIPT_BUILD
+    const std::string PATH_PREFIX_PROJECTS = "./";
+    const std::string PATH_PREFIX_ASSETS = "./";
+    const std::string PATH_PREFIX_ENGINE = "./";
+#else
+    const std::string PATH_PREFIX_PROJECTS = "./projects/"; // Adjust if your Linux build dir is different
+    const std::string PATH_PREFIX_ASSETS = "./assets/";
+    const std::string PATH_PREFIX_ENGINE = "./";
+#endif
+
+#elif defined(__APPLE__)
+#define PLATFORM_MACOS 1
+#ifdef PROJECT_SCRIPT_BUILD
+    const std::string PATH_PREFIX_PROJECTS = "./";
+    const std::string PATH_PREFIX_ASSETS = "./";
+    const std::string PATH_PREFIX_ENGINE = "./";
+#else
+    const std::string PATH_PREFIX_PROJECTS = "./projects/"; // Adjust if your Mac build dir is different
+    const std::string PATH_PREFIX_ASSETS = "./assets/";
+    const std::string PATH_PREFIX_ENGINE = "./";
+#endif
+
+#else
+#error "Unsupported platform"
+#endif
+
+// Update the helper functions to handle Emscripten's virtual FS better:
+inline std::string getProjectsPath(const std::string& relativePath = "") {
+#ifdef EMSCRIPTEN
+    return PATH_PREFIX_PROJECTS + relativePath;
+#else
+    return PATH_PREFIX_PROJECTS + relativePath;
+#endif
+}
+
+inline const std::filesystem::path getProjectsRootForScripts() {
+#ifdef __EMSCRIPTEN__
+    // On Emscripten, project scripts use root paths
+    return std::filesystem::path("/");
+#else
+    return std::filesystem::path(PATH_PREFIX_PROJECTS);
+#endif
+}
+
+inline std::string getAssetsPath(const std::string& relativePath = "") {
+#ifdef EMSCRIPTEN
+    // On Emscripten, assets are preloaded to /assets/
+    if (!relativePath.empty() && relativePath[0] == '/') {
+        return "/assets/" + relativePath.substr(1);
     }
+    return "/assets/" + relativePath;
+#else
+    return PATH_PREFIX_ASSETS + relativePath;
+#endif
+}
+
+inline std::string getEnginePath(const std::string& relativePath = "") {
+#ifdef EMSCRIPTEN
+    if (!relativePath.empty() && relativePath[0] == '/') {
+        return "/" + relativePath.substr(1);
+    }
+    return "/" + relativePath;
+#else
+    return PATH_PREFIX_ENGINE + relativePath;
+#endif
+}
+
+inline std::filesystem::path getProjectsPathFS(const std::string& relativePath = "") {
+    return std::filesystem::path(getProjectsPath(relativePath));
 }
 
 using Entity = uint32_t;
 const size_t MAX_ENTITIES = 1000000;
+Entity lastSelectedEntity = (Entity)-1;
 
 enum EditMode {
     Select = 0,
@@ -40,11 +141,19 @@ enum SelectionMode {
 };
 SelectionMode currentSelectionmode = SelectionMode::SingleSelect;
 
-SDL_FRect editorCanvasRect = { 105, 105, 1390, 690 };
+// Editor scroll offsets and viewport (updated each frame in main.cpp)
+float editorScrollX = 0.0f;
+float editorScrollY = 0.0f;
+bool inspectorVisible = true;
+
+float canvasViewX = 105.0f;
+float canvasViewY = 105.0f;
+float canvasViewW = 1390.0f;
+float canvasViewH = 690.0f;
 
 inline bool isInsideCanvas(float x, float y) {
-    return x >= editorCanvasRect.x && x <= editorCanvasRect.x + editorCanvasRect.w &&
-           y >= editorCanvasRect.y && y <= editorCanvasRect.y + editorCanvasRect.h;
+    return x >= canvasViewX && x <= canvasViewX + canvasViewW &&
+           y >= canvasViewY && y <= canvasViewY + canvasViewH;
 }
 
 bool isDraggingLeftMouse = false;
@@ -69,11 +178,23 @@ namespace Components {
     struct Acceleration { float x = 0.0f, y = 0.0f; };
 }
 
+const float LOGICAL_CANVAS_WIDTH  = 1390.0f;
+const float LOGICAL_CANVAS_HEIGHT = 690.0f;
+
 inline void clamp_entity_position_to_canvas(Components::Position& pos, float entityWidth = 50.0f, float entityHeight = 50.0f) {
     float minX = 0.0f;
     float minY = 0.0f;
-    float maxX = editorCanvasRect.w - entityWidth;
-    float maxY = editorCanvasRect.h - entityHeight;
+    float maxX = LOGICAL_CANVAS_WIDTH - entityWidth;
+    float maxY = LOGICAL_CANVAS_HEIGHT - entityHeight;
+    pos.x = std::clamp(pos.x, minX, maxX);
+    pos.y = std::clamp(pos.y, minY, maxY);
+}
+
+inline void clamp_guiElem_position_to_canvas(SDL_FPoint& pos, float guiElemWidth, float guiElemHeight) {
+    float minX = 0.0f;
+    float minY = 0.0f;
+    float maxX = LOGICAL_CANVAS_WIDTH - guiElemWidth;
+    float maxY = LOGICAL_CANVAS_HEIGHT - guiElemHeight;
     pos.x = std::clamp(pos.x, minX, maxX);
     pos.y = std::clamp(pos.y, minY, maxY);
 }
@@ -176,234 +297,6 @@ struct ECSWorld {
     void add_acceleration(Entity id) { if (id < entity_count) has_acceleration[id] = 1; }
 };
 
-
-// Scene and SceneParser are defined after the Gui namespace (at the bottom of this file).
-
-void movement_system(ECSWorld& world, float dt) {
-    for (Entity i = 0; i < world.entity_count; ++i) {
-        if (world.has_position[i] && world.has_velocity[i] && world.has_acceleration[i]) {
-            world.velocity_pool[i].x += world.acceleration_pool[i].x * dt;
-            world.velocity_pool[i].y += world.acceleration_pool[i].y * dt;
-            world.position_pool[i].x += world.velocity_pool[i].x * dt;
-            world.position_pool[i].y += world.velocity_pool[i].y * dt;
-        }
-    }
-}
-
-void deselect_all(ECSWorld& world) {
-    for (Entity i = 0; i < world.entity_count; i++) {
-        if (world.has_selection[i]) world.selection_pool[i].isSelected = false;
-    }
-}
-
-void render_system_in_editor(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font, const ECSWorld& world) {
-    for (Entity i = 0; i < world.entity_count; ++i) {
-        if (world.has_position[i]) {
-            SDL_FRect outlineRect = { world.position_pool[i].x + 105, world.position_pool[i].y + 105, 50, 50 };
-            if (world.has_rectangle_shape[i]) {
-                outlineRect.w = world.rectangle_shape_pool[i].w;
-                outlineRect.h = world.rectangle_shape_pool[i].h;
-            }
-            if (world.has_selection[i] && world.selection_pool[i].isSelected) {
-                SDL_SetRenderDrawColor(renderer, world.selection_pool[i].selectionColor.r,
-                                       world.selection_pool[i].selectionColor.g,
-                                       world.selection_pool[i].selectionColor.b,
-                                       world.selection_pool[i].selectionColor.a);
-            } else {
-                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-            }
-            if (world.has_metadata[i]) {
-                TTF_Text* textObj = TTF_CreateText(textEngine, font, world.metadata_pool[i].name.c_str(), 0);
-                TTF_SetTextColor(textObj, 255, 255, 255, 255);
-                TTF_DrawRendererText(textObj, world.position_pool[i].x + 105, world.position_pool[i].y + 105);
-                TTF_DestroyText(textObj);
-            }
-            SDL_RenderRect(renderer, &outlineRect);
-        }
-    }
-}
-
-void edit_object_with_editor_mouse(SDL_Renderer* renderer, ECSWorld& world, const SDL_Event& e) {
-    if (currentEditMode == EditMode::Dialog) return;
-    if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) {
-        isDraggingLeftMouse = false;
-    }
-    if (currentEditMode == EditMode::Select) {
-        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
-            SDL_Point mpos = { static_cast<int>(e.button.x), static_cast<int>(e.button.y) };
-            Entity topmostEntity = (Entity)-1;
-            int maxZ = 0;
-            bool found = false;
-            for (Entity i = 0; i < world.entity_count; i++) {
-                if (world.has_position[i] && world.has_selection[i]) {
-                    SDL_Rect entityrect = {
-                        static_cast<int>(world.position_pool[i].x + 105),
-                        static_cast<int>(world.position_pool[i].y + 105),
-                        50, 50
-                    };
-                    if (SDL_PointInRect(&mpos, &entityrect)) {
-                        int currentZ = world.has_z_index[i] ? world.z_index_pool[i].z : 0;
-                        if (!found || currentZ > maxZ) {
-                            maxZ = currentZ;
-                            topmostEntity = i;
-                            found = true;
-                        }
-                    }
-                }
-            }
-            if (topmostEntity != (Entity)-1) {
-                if (currentSelectionmode == SelectionMode::SingleSelect) {
-                    bool wasSelected = world.selection_pool[topmostEntity].isSelected;
-                    for (Entity i = 0; i < world.entity_count; i++) {
-                        if (world.has_selection[i]) world.selection_pool[i].isSelected = false;
-                    }
-                    if (!wasSelected) world.selection_pool[topmostEntity].isSelected = true;
-                } else if (currentSelectionmode == SelectionMode::MultiSelect) {
-                    world.selection_pool[topmostEntity].isSelected = !world.selection_pool[topmostEntity].isSelected;
-                }
-            }
-        }
-    } else if (currentEditMode == EditMode::MoveWithMouse) {
-        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
-            if (isInsideCanvas(e.button.x, e.button.y)) {
-                isDraggingLeftMouse = true;
-                lastDragX = e.button.x;
-                lastDragY = e.button.y;
-            }
-        } else if (e.type == SDL_EVENT_MOUSE_MOTION && isDraggingLeftMouse) {
-            if (isInsideCanvas(e.motion.x, e.motion.y)) {
-                int dx = e.motion.x - lastDragX;
-                int dy = e.motion.y - lastDragY;
-                if (dx != 0 || dy != 0) {
-                    for (Entity i = 0; i < world.entity_count; i++) {
-                        if (world.has_position[i] && world.has_selection[i] && world.selection_pool[i].isSelected) {
-                            world.position_pool[i].x += dx;
-                            world.position_pool[i].y += dy;
-                            if (world.has_rectangle_shape[i]) {
-                                clamp_entity_position_to_canvas(world.position_pool[i],
-                                    world.rectangle_shape_pool[i].w,
-                                    world.rectangle_shape_pool[i].h);
-                            } else {
-                                clamp_entity_position_to_canvas(world.position_pool[i]);
-                            }
-                        }
-                    }
-                    lastDragX = e.motion.x;
-                    lastDragY = e.motion.y;
-                }
-            } else {
-                isDraggingLeftMouse = false;
-            }
-        }
-    } else if (currentEditMode == EditMode::Delete) {
-        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
-            SDL_Point mpos = { static_cast<int>(e.button.x), static_cast<int>(e.button.y) };
-            Entity topmostEntity = (Entity)-1;
-            int maxZ = 0;
-            bool found = false;
-            for (Entity i = 0; i < world.entity_count; i++) {
-                if (world.has_position[i] && world.has_selection[i]) {
-                    SDL_Rect entityrect = {
-                        static_cast<int>(world.position_pool[i].x + 105),
-                        static_cast<int>(world.position_pool[i].y + 105),
-                        50, 50
-                    };
-                    if (SDL_PointInRect(&mpos, &entityrect)) {
-                        int currentZ = world.has_z_index[i] ? world.z_index_pool[i].z : 0;
-                        if (!found || currentZ > maxZ) {
-                            maxZ = currentZ;
-                            topmostEntity = i;
-                            found = true;
-                        }
-                    }
-                }
-            }
-            if (topmostEntity != (Entity)-1) world.delete_entity(topmostEntity);
-        }
-    }
-}
-
-void edit_object_with_editor_gamepad(ECSWorld& world, float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame) {
-    if (currentEditMode == EditMode::Dialog) return;
-    if (!confirmDown) isGamepadDragging = false;
-
-    Entity topmostEntity = (Entity)-1;
-    int maxZ = -1;
-    bool found = false;
-    for (Entity i = 0; i < world.entity_count; i++) {
-        if (world.has_position[i] && world.has_selection[i]) {
-            SDL_FRect entityrect = {
-                world.position_pool[i].x + 105.0f,
-                world.position_pool[i].y + 105.0f,
-                50.0f, 50.0f
-            };
-            if (cursorX >= entityrect.x && cursorX <= entityrect.x + entityrect.w &&
-                cursorY >= entityrect.y && cursorY <= entityrect.y + entityrect.h) {
-                int currentZ = world.has_z_index[i] ? world.z_index_pool[i].z : 0;
-                if (!found || currentZ > maxZ) {
-                    maxZ = currentZ;
-                    topmostEntity = i;
-                    found = true;
-                }
-            }
-        }
-    }
-
-    if (currentEditMode == EditMode::Select) {
-        if (!confirmDown && confirmDownLastFrame && !gamepadDidDrag) {
-            if (topmostEntity != (Entity)-1) {
-                if (currentSelectionmode == SelectionMode::SingleSelect) {
-                    bool wasSelected = world.selection_pool[topmostEntity].isSelected;
-                    for (Entity i = 0; i < world.entity_count; i++) {
-                        if (world.has_selection[i]) world.selection_pool[i].isSelected = false;
-                    }
-                    if (!wasSelected) world.selection_pool[topmostEntity].isSelected = true;
-                } else if (currentSelectionmode == SelectionMode::MultiSelect) {
-                    world.selection_pool[topmostEntity].isSelected = !world.selection_pool[topmostEntity].isSelected;
-                }
-            }
-        }
-        if (!confirmDown) gamepadDidDrag = false;
-    } else if (currentEditMode == EditMode::MoveWithMouse) {
-        if (confirmDown && !confirmDownLastFrame) {
-            if (isInsideCanvas(cursorX, cursorY)) {
-                isGamepadDragging = true;
-                gamepadDidDrag = false;
-                lastGamepadCursorX = cursorX;
-                lastGamepadCursorY = cursorY;
-            }
-        } else if (confirmDown && isGamepadDragging) {
-            if (isInsideCanvas(cursorX, cursorY)) {
-                float dx = cursorX - lastGamepadCursorX;
-                float dy = cursorY - lastGamepadCursorY;
-                if (dx != 0.0f || dy != 0.0f) {
-                    for (Entity i = 0; i < world.entity_count; i++) {
-                        if (world.has_position[i] && world.has_selection[i] && world.selection_pool[i].isSelected) {
-                            world.position_pool[i].x += dx;
-                            world.position_pool[i].y += dy;
-                            clamp_entity_position_to_canvas(world.position_pool[i]);
-                        }
-                    }
-                    gamepadDidDrag = true;
-                    lastGamepadCursorX = cursorX;
-                    lastGamepadCursorY = cursorY;
-                }
-            } else {
-                isGamepadDragging = false;
-            }
-        }
-    } else if (currentEditMode == EditMode::Delete) {
-        if (!confirmDown && confirmDownLastFrame) {
-            if (topmostEntity != (Entity)-1) world.delete_entity(topmostEntity);
-        }
-    }
-}
-
-void render_editor_canvas(SDL_Renderer* renderer) {
-    SDL_SetRenderDrawColor(renderer, 125, 125, 125, 255);
-    SDL_RenderRect(renderer, &editorCanvasRect);
-}
-
 enum DialogState { Closed = 0, Opening, Opened, Closing };
 
 namespace Gui {
@@ -417,12 +310,34 @@ namespace Gui {
         virtual float getY() const = 0;
         virtual float getWidth() const = 0;
         virtual float getHeight() const = 0;
+        virtual void setPos(SDL_Point p) = 0;
         virtual void setRect(SDL_FRect r) = 0;
+
+
+        // Editor selection
+        bool editorSelected = false;
 
         // Unified Lifecycle (Signatures must match exactly)
         virtual void render(float offsetY = 0.0f) = 0;
         virtual bool handleEvent(const SDL_Event& e, SDL_Window* window, float offsetY = 0.0f) = 0;
         virtual void handleGamepad(float cursorX, float cursorY, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) = 0;
+
+        // Draw a selection highlight around this element (called by editor)
+        void renderSelectionOutline(SDL_Renderer* renderer) const {
+            if (!editorSelected) return;
+            SDL_FRect r = { getX() - 2, getY() - 2, getWidth() + 4, getHeight() + 4 };
+            SDL_SetRenderDrawColor(renderer, 255, 200, 0, 255);
+            SDL_RenderRect(renderer, &r);
+            // corner handles
+            const float hs = 6.0f;
+            SDL_FRect corners[4] = {
+                {r.x - hs*0.5f,           r.y - hs*0.5f,           hs, hs},
+                {r.x + r.w - hs*0.5f,     r.y - hs*0.5f,           hs, hs},
+                {r.x - hs*0.5f,           r.y + r.h - hs*0.5f,     hs, hs},
+                {r.x + r.w - hs*0.5f,     r.y + r.h - hs*0.5f,     hs, hs},
+            };
+            for (auto& c : corners) SDL_RenderFillRect(renderer, &c);
+        }
     };
     struct ITextInput {
         virtual void appendText(const std::string& str) = 0;
@@ -435,60 +350,74 @@ namespace Gui {
     };
 
     // ----------------------------------------------------------------
-    // Scrollbar — vertical, draggable thumb, fires onChange(newOffset)
-    // Not an IGuiElement: it is owned and driven by Panel internally.
+    // Scrollbar — supports both vertical and horizontal orientation
     // ----------------------------------------------------------------
+    enum class ScrollOrientation { Vertical, Horizontal };
+
     class Scrollbar {
     public:
         float trackX = 0, trackY = 0, trackW = 10, trackH = 100;
-        float contentHeight = 0;   // total scrollable content height
-        float viewHeight    = 0;   // visible area height
-        float offset        = 0;   // current scroll offset (0 = top)
+        float contentSize = 0;   // total scrollable content size (width or height)
+        float viewSize    = 0;   // visible area size
+        float offset      = 0;   // current scroll offset
+        ScrollOrientation orientation = ScrollOrientation::Vertical;
         std::function<void(float)> onChange;
 
+        void setOrientation(ScrollOrientation o) { orientation = o; }
+
         void setGeometry(float x, float y, float w, float h,
-                         float contentH, float viewH) {
+                        float contentSz, float viewSz) {
             trackX = x; trackY = y; trackW = w; trackH = h;
-            contentHeight = contentH; viewHeight = viewH;
+            contentSize = contentSz; viewSize = viewSz;
             offset = std::clamp(offset, 0.0f, maxOffset());
         }
 
         float maxOffset() const {
-            return std::max(0.0f, contentHeight - viewHeight);
+            return std::max(0.0f, contentSize - viewSize);
         }
 
-        // returns true if the event was consumed
         bool handleEvent(const SDL_Event& ev) {
             if (maxOffset() <= 0) return false;
             if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                 float mx = ev.button.x, my = ev.button.y;
                 SDL_FRect thumb = thumbRect();
-                if (inRect(mx, my, thumb)) { dragging = true; dragStartY = my; dragStartOffset = offset; return true; }
+                if (inRect(mx, my, thumb)) {
+                    dragging = true;
+                    dragStart = (orientation == ScrollOrientation::Vertical) ? my : mx;
+                    dragStartOffset = offset;
+                    return true;
+                }
             }
             if (ev.type == SDL_EVENT_MOUSE_BUTTON_UP)   { dragging = false; }
             if (ev.type == SDL_EVENT_MOUSE_MOTION && dragging) {
-                float dy = ev.motion.y - dragStartY;
-                float ratio = dy / (trackH - thumbHeight());
+                float d = (orientation == ScrollOrientation::Vertical)
+                        ? ev.motion.y - dragStart
+                        : ev.motion.x - dragStart;
+                float trackSize = (orientation == ScrollOrientation::Vertical)
+                                ? trackH - thumbSize()
+                                : trackW - thumbSize();
+                float ratio = trackSize > 0 ? d / trackSize : 0;
                 setOffset(dragStartOffset + ratio * maxOffset());
                 return true;
             }
             if (ev.type == SDL_EVENT_MOUSE_WHEEL) {
                 float mx, my; SDL_GetMouseState(&mx, &my);
                 SDL_FRect track = { trackX, trackY, trackW, trackH };
-                // caller clips wheel events to panel bounds; we just consume
-                setOffset(offset + (ev.wheel.y > 0 ? -40.f : 40.f));
+                if (!inRect(mx, my, track)) return false;
+                float delta = (orientation == ScrollOrientation::Vertical)
+                            ? (ev.wheel.y > 0 ? -40.f : 40.f)
+                            : (ev.wheel.x > 0 ? -40.f : 40.f);
+                setOffset(offset + delta);
                 return true;
             }
             return false;
         }
 
         void render(SDL_Renderer* renderer) {
-            // track
             SDL_FRect track = { trackX, trackY, trackW, trackH };
-            SDL_SetRenderDrawColor(renderer, 45, 45, 45, 200);
+            SDL_SetRenderDrawColor(renderer, 45, 45, 45, 255);
             SDL_RenderFillRect(renderer, &track);
             if (maxOffset() <= 0) return;
-            // thumb
             SDL_FRect thumb = thumbRect();
             bool hov = false;
             float mx, my; SDL_GetMouseState(&mx, &my);
@@ -499,21 +428,29 @@ namespace Gui {
 
     private:
         bool  dragging = false;
-        float dragStartY = 0, dragStartOffset = 0;
+        float dragStart = 0, dragStartOffset = 0;
 
-        float thumbHeight() const {
-            if (contentHeight <= 0) return trackH;
-            return std::max(20.0f, trackH * (viewHeight / contentHeight));
+        float thumbSize() const {
+            if (contentSize <= 0) return (orientation == ScrollOrientation::Vertical) ? trackH : trackW;
+            float trackSize = (orientation == ScrollOrientation::Vertical) ? trackH : trackW;
+            return std::max(20.0f, trackSize * (viewSize / contentSize));
         }
+
         SDL_FRect thumbRect() const {
             float ratio = (maxOffset() > 0) ? offset / maxOffset() : 0;
-            float ty = trackY + ratio * (trackH - thumbHeight());
-            return { trackX, ty, trackW, thumbHeight() };
+            float trackSize = (orientation == ScrollOrientation::Vertical) ? trackH : trackW;
+            float pos = ratio * (trackSize - thumbSize());
+            if (orientation == ScrollOrientation::Vertical)
+                return { trackX, trackY + pos, trackW, thumbSize() };
+            else
+                return { trackX + pos, trackY, thumbSize(), trackH };
         }
+
         void setOffset(float v) {
             offset = std::clamp(v, 0.0f, maxOffset());
             if (onChange) onChange(offset);
         }
+
         static bool inRect(float x, float y, SDL_FRect r) {
             return x >= r.x && x <= r.x+r.w && y >= r.y && y <= r.y+r.h;
         }
@@ -536,9 +473,14 @@ namespace Gui {
         float getWidth() const override { return rect.w; }
         float getHeight() const override { return rect.h; }
         void setRect(SDL_FRect r) override { rect = r; }
+        void setPos(SDL_Point p) override {rect.x = p.x; rect.y = p.y;};
         float getMin() const { return minVal; }
         float getMax() const { return maxVal; }
         float getStep() const { return step; }
+        void setMin(float v)  { minVal = v; value = std::clamp(value, minVal, maxVal); rebuildDisplayStr(); }
+        void setMax(float v)  { maxVal = v; value = std::clamp(value, minVal, maxVal); rebuildDisplayStr(); }
+        void setStep(float v) { step = v; }
+        void setValue(float v){ value = snapToDecimal(std::clamp(v, minVal, maxVal)); rebuildDisplayStr(); }
 
         SpinBox(const SpinBox&) = delete;
         SpinBox& operator=(const SpinBox&) = delete;
@@ -558,7 +500,7 @@ namespace Gui {
         const SDL_FRect& getRect() const override { return rect; }
         bool isNumericOnly() const override { return true; }
 
-        bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetY) {
+        bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetY) override {
             SDL_FRect originalRect = rect;
             rect.y -= offsetY;
             auto restore = [&]() { rect = originalRect; };
@@ -592,7 +534,7 @@ namespace Gui {
             restore(); return false;
         }
 
-        void handleGamepad(float cursorX, float cursorY, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) {
+        void handleGamepad(float cursorX, float cursorY, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
             SDL_FRect dec = decBtn(); dec.y -= offsetY;
             SDL_FRect inc = incBtn(); inc.y -= offsetY;
             SDL_FRect ta = fieldTextArea(); ta.y -= offsetY;
@@ -610,7 +552,7 @@ namespace Gui {
             }
         }
 
-        void render(float offsetY) {
+        void render(float offsetY) override {
             SDL_FRect originalRect = rect;
             rect.y -= offsetY;
             float mx, my;
@@ -722,7 +664,9 @@ namespace Gui {
         float getWidth() const override { return rect.w; }
         float getHeight() const override { return rect.h; }
         void setRect(SDL_FRect r) override { rect = r; }
+        void setPos(SDL_Point p) override {rect.x = p.x; rect.y = p.y;};
         const std::string& getPlaceholder() const { return placeholder; }
+        void setPlaceholder(const std::string& p) { placeholder = p; }
 
         bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetY) override {
             SDL_FRect originalRect = rect;
@@ -745,7 +689,7 @@ namespace Gui {
             restore(); return false;
         }
 
-        void handleGamepad(float cursorX, float cursorY, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) {
+        void handleGamepad(float cursorX, float cursorY, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
             SDL_FRect r = rect; r.y -= offsetY;
             bool hit = cursorX >= r.x && cursorX <= r.x + r.w && cursorY >= r.y && cursorY <= r.y + r.h;
             if (confirmDown && !confirmDownLastFrame) {
@@ -757,7 +701,7 @@ namespace Gui {
             }
         }
 
-        void render(float offsetY) {
+        void render(float offsetY) override {
             SDL_FRect originalRect = rect;
             rect.y -= offsetY; // Temporarily offset
             SDL_Color bg = active ? SDL_Color{255,255,255,255} : SDL_Color{245,245,245,255};
@@ -1001,21 +945,18 @@ namespace Gui {
         float getY() const override { return position.y; }
         float getWidth() const override { return width; }
         float getHeight() const override { return height; }
+        void setPos(SDL_Point p) override {position.x = p.x; position.y = p.y;};
         void setRect(SDL_FRect r) override { position = {r.x, r.y}; width = r.w; height = r.h; }
         const std::string& getText() const { return textStr; }
+        void setText(const std::string& t) { textStr = t; updateTextTexture(); }
 
         // IGuiElement pure virtual overrides — delegate to Impl helpers
         void render(float offsetY = 0.0f) override { renderImpl(offsetY); }
-        bool handleEvent(const SDL_Event& e, SDL_Window* /*window*/, float offsetY = 0.0f) override {
-            handleEventImpl(e, offsetY); return false;
-        }
         void handleGamepad(float cursorX, float cursorY, float offsetY, SDL_Window* /*window*/,
                            bool confirmDown, bool confirmDownLastFrame) override {
             handleGamepadImpl(cursorX, cursorY, offsetY, confirmDown, confirmDownLastFrame);
         }
 
-        // Old-signature overloads called directly from main.cpp
-        void handleEvent(const SDL_Event& e, float offsetY) { handleEventImpl(e, offsetY); }
         void handleGamepad(float cursorX, float cursorY, float offsetY, bool confirmDown, bool confirmDownLastFrame) {
             handleGamepadImpl(cursorX, cursorY, offsetY, confirmDown, confirmDownLastFrame);
         }
@@ -1035,6 +976,8 @@ namespace Gui {
         SDL_Color idleColor, hoverColor, pressColor, textColor, currentColor;
         bool isHovered = false, isPressed = false;
         SDL_Texture* textTexture = nullptr;
+
+    public:
 
         void handleEventImpl(const SDL_Event& e, float offsetY) {
             if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
@@ -1057,6 +1000,27 @@ namespace Gui {
                     if (!isPressed) currentColor = hoverColor;
                 }
             }
+        }
+
+        bool handleEvent(const SDL_Event & ev, SDL_Window* window, float offsetY) override {
+            handleEventImpl(ev, offsetY);
+            
+            // Consume the event if the mouse is inside the button to prevent 
+            // it from falling through to the editor and causing accidental deselections.
+            if (ev.type == SDL_EVENT_MOUSE_MOTION || 
+                ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN || 
+                ev.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                
+                float mouseX = (ev.type == SDL_EVENT_MOUSE_MOTION) ? ev.motion.x : ev.button.x;
+                float mouseY = (ev.type == SDL_EVENT_MOUSE_MOTION) ? ev.motion.y : ev.button.y;
+                
+                float visualY = position.y - offsetY;
+                bool inside = (mouseX >= position.x) && (mouseX <= position.x + width) &&
+                            (mouseY >= visualY) && (mouseY <= visualY + height);
+                            
+                if (inside) return true;
+            }
+            return false;
         }
 
         void handleGamepadImpl(float cursorX, float cursorY, float offsetY, bool confirmDown, bool confirmDownLastFrame) {
@@ -1137,6 +1101,7 @@ namespace Gui {
             rect = r;
             refreshScrollbarGeometry();
         }
+        void setPos(SDL_Point p) override {rect.x = p.x; rect.y = p.y; refreshScrollbarGeometry();};
 
         // Children are owned by the Panel
         void addChild(std::unique_ptr<IGuiElement> child) {
@@ -1144,6 +1109,23 @@ namespace Gui {
             refreshScrollbarGeometry();
         }
         const std::vector<std::unique_ptr<IGuiElement>>& getChildren() const { return children; }
+        std::vector<std::unique_ptr<IGuiElement>>& getChildrenMutable() { return children; }
+
+        // Returns the child (or this panel) that the screen-space point hits, for editor picking.
+        // Children are tested first (they're on top visually).
+        IGuiElement* hitTest(float screenX, float screenY) {
+            if (!inRect(screenX, screenY, rect)) return nullptr;
+            // Test children in reverse order (last added = topmost visually)
+            for (int i = (int)children.size() - 1; i >= 0; --i) {
+                auto* c = children[i].get();
+                // Child positions are absolute screen coords; their Y is unscrolled here
+                // because we want editor picking to always work regardless of panel scroll.
+                SDL_FRect cr = { c->getX(), c->getY() - panelScrollOffset,
+                                 c->getWidth(), c->getHeight() };
+                if (inRect(screenX, screenY, cr)) return c;
+            }
+            return this; // hit the panel itself
+        }
 
         // ------------------------------------------------------------------
         // render — Panel ignores the caller's offsetY completely; it is always
@@ -1175,6 +1157,11 @@ namespace Gui {
 
             // Scrollbar drawn on top (outside clip so thumb isn't cut)
             scrollbar.render(renderer);
+
+            // Editor selection outlines drawn outside the clip rect so they're always visible
+            for (auto& child : children)
+                child->renderSelectionOutline(renderer);
+            renderSelectionOutline(renderer);
         }
 
         // ------------------------------------------------------------------
@@ -1261,6 +1248,116 @@ namespace Gui {
         }
     };
 
+    // ----------------------------------------------------------------
+    // Base Container – manages children layout
+    // ----------------------------------------------------------------
+    class Container : public IGuiElement {
+    public:
+        virtual ~Container() = default;
+
+        void addChild(std::unique_ptr<IGuiElement> child) {
+            children.push_back(std::move(child));
+            layoutChildren();
+        }
+
+        void setPadding(float p) { padding = p; layoutChildren(); }
+        void setSpacing(float s) { spacing = s; layoutChildren(); }
+
+        std::string getType() const override { return "Container"; }
+        float getX() const override { return rect.x; }
+        float getY() const override { return rect.y; }
+        float getWidth() const override { return rect.w; }
+        float getHeight() const override { return rect.h; }
+        void setRect(SDL_FRect r) override {
+            rect = r;
+            layoutChildren();
+        }
+        void setPos(SDL_Point p) override {
+            rect.x = p.x; 
+            rect.y = p.y;
+            layoutChildren();
+        }
+
+        void render(float offsetY) override {
+            for (auto& child : children)
+                child->render(offsetY);
+        }
+
+        bool handleEvent(const SDL_Event& e, SDL_Window* window, float offsetY) override {
+            bool consumed = false;
+            for (auto& child : children)
+                if (child->handleEvent(e, window, offsetY))
+                    consumed = true;
+            return consumed;
+        }
+
+        void handleGamepad(float cursorX, float cursorY, float offsetY, SDL_Window* window,
+                        bool confirmDown, bool confirmDownLastFrame) override {
+            for (auto& child : children)
+                child->handleGamepad(cursorX, cursorY, offsetY, window, confirmDown, confirmDownLastFrame);
+        }
+
+        const std::vector<std::unique_ptr<IGuiElement>>& getChildren() const { return children; }
+
+    protected:
+        std::vector<std::unique_ptr<IGuiElement>> children;
+        SDL_FRect rect = {0, 0, 0, 0};
+        float padding = 5.0f;
+        float spacing = 5.0f;
+
+        virtual void layoutChildren() = 0;
+    };
+
+    // ----------------------------------------------------------------
+    // HBoxContainer – arranges children horizontally without resizing them
+    // ----------------------------------------------------------------
+    class HBoxContainer : public Container {
+    public:
+        std::string getType() const override { return "HBox"; }
+
+    protected:
+        void layoutChildren() override {
+            if (children.empty()) return;
+            float x = rect.x + padding;
+            float y = rect.y + padding;
+            float maxHeight = 0;
+            for (auto& child : children)
+                maxHeight = std::max(maxHeight, child->getHeight());
+            for (auto& child : children) {
+                float childW = child->getWidth();
+                float childH = child->getHeight();
+                float childY = y + (maxHeight - childH) * 0.5f;
+                child->setRect({ x, childY, childW, childH });
+                x += childW + spacing;
+            }
+        }
+    };
+
+    // ----------------------------------------------------------------
+    // VBoxContainer – arranges children vertically without resizing them
+    // ----------------------------------------------------------------
+    class VBoxContainer : public Container {
+    public:
+        std::string getType() const override { return "VBox"; }
+
+    protected:
+        void layoutChildren() override {
+            if (children.empty()) return;
+            float x = rect.x + padding;
+            float y = rect.y + padding;
+            float maxWidth = 0;
+            for (auto& child : children)
+                maxWidth = std::max(maxWidth, child->getWidth());
+            for (auto& child : children) {
+                float childW = child->getWidth();
+                float childH = child->getHeight();
+                float childX = x + (maxWidth - childW) * 0.5f;
+                child->setRect({ childX, y, childW, childH });
+                y += childH + spacing;
+            }
+        }
+    };
+    
     class Dialog {
     public:
         enum class Action { None, Confirm, Cancel };
@@ -1420,6 +1517,795 @@ namespace Gui {
         static SDL_FRect confirmBtnRect(SDL_FRect w) { return { w.x+w.w-120, w.y+w.h-50, 106, 36 }; }
         static SDL_FRect cancelBtnRect(SDL_FRect w) { return { w.x+14, w.y+w.h-50, 106, 36 }; }
     };
+
+    // ----------------------------------------------------------------
+    // SceneInspector — right-side panel that shows editable properties
+    // for whichever IGuiElement (or entity) is currently selected.
+    // Lives entirely in screen-space; does not scroll with the editor.
+    // ----------------------------------------------------------------
+    class SceneInspector {
+    public:
+        static constexpr float PANEL_W = 260.0f;
+
+        // Computed from real window width so resizing works correctly.
+        float panelX() const {
+            int w, h; SDL_GetWindowSize(window, &w, &h);
+            return (float)w - PANEL_W;
+        }
+
+        SceneInspector(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f, SDL_Window* w)
+            : renderer(r), textEngine(te), font(f), window(w)
+        {}
+
+        // Called once per frame — pass the scene GUI elements so the
+        // inspector can both read and write their properties.
+        void setTarget(IGuiElement* elem) {
+            if (target == elem) return;
+            commitAllFields(); // flush any pending edits when switching
+            target = elem;
+            rebuildFields();
+        }
+
+        void handleGamepad(float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame) {
+            if (!target) return;
+            for (auto& f : fields) {
+                // LineEdit::handleGamepad signature: (float, float, float, SDL_Window*, bool, bool)
+                f.edit.handleGamepad(cursorX, cursorY, 0.0f, window, confirmDown, confirmDownLastFrame);
+            }
+        }
+
+        IGuiElement* getTarget() const { return target; }
+
+        // Returns true if the event was consumed by the inspector
+        bool handleEvent(const SDL_Event& ev) {
+            if (!target) return false;
+            bool consumed = false;
+            for (auto& f : fields)
+                if (f.edit.handleEvent(ev, window, 0.0f)) consumed = true;
+            // Commit on Enter/Tab
+            if (ev.type == SDL_EVENT_KEY_DOWN &&
+                (ev.key.key == SDLK_RETURN || ev.key.key == SDLK_TAB)) {
+                commitAllFields();
+            }
+            return consumed;
+        }
+
+        void render(float windowHeight) {
+            if (!target) {
+                // Draw empty panel with hint
+                SDL_FRect bg = { panelX(), 0, PANEL_W, windowHeight };
+                SDL_SetRenderDrawColor(renderer, 28, 28, 35, 245);
+                SDL_RenderFillRect(renderer, &bg);
+                SDL_SetRenderDrawColor(renderer, 60, 60, 75, 255);
+                SDL_RenderRect(renderer, &bg);
+                drawLabel("Inspector", panelX() + 10, 10, {180,180,200,255});
+                drawLabel("Click a GUI element", panelX() + 10, 40, {100,100,120,255});
+                return;
+            }
+
+            SDL_FRect bg = { panelX(), 0, PANEL_W, windowHeight };
+            SDL_SetRenderDrawColor(renderer, 28, 28, 35, 245);
+            SDL_RenderFillRect(renderer, &bg);
+            SDL_SetRenderDrawColor(renderer, 60, 60, 75, 255);
+            SDL_RenderRect(renderer, &bg);
+
+            float y = 10.0f;
+            drawLabel("Inspector", panelX() + 10, y, {200,200,220,255}); y += 22;
+            drawLabel(("[" + target->getType() + "]").c_str(), panelX() + 10, y, {140,140,180,255}); y += 22;
+
+            // Divider
+            SDL_SetRenderDrawColor(renderer, 60, 60, 80, 255);
+            SDL_FRect div = { panelX() + 5, y, PANEL_W - 10, 1 };
+            SDL_RenderFillRect(renderer, &div); y += 8;
+
+            for (auto& f : fields) {
+                drawLabel(f.label.c_str(), panelX() + 8, y, {160,160,190,255});
+                y += 32;
+                f.edit.setRect({ panelX() + 8, y, PANEL_W - 20, 26 });
+                f.edit.render(0.0f);
+                y += 32;
+            }
+
+            // Hint
+            drawLabel("Enter = commit changes", panelX() + 8, y + 4, {80, 80, 100, 255});
+        }
+
+        // Flush all field values into the target element right now.
+        // Called from the Save button handler in main.cpp too.
+        void commitAllFields() {
+            if (!target) return;
+            applyFields();
+        }
+
+    private:
+        struct Field {
+            std::string label;
+            std::string key;   // identifies which property this maps to
+            LineEdit    edit;
+            Field(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f,
+                  const std::string& lbl, const std::string& k, const std::string& val)
+                : label(lbl), key(k),
+                  edit(r, te, f, {0,0,1,1}, "")
+            {
+                // Pre-fill with current value
+                for (char c : val) edit.appendText(std::string(1,c));
+            }
+            // disable copy so vector moves correctly
+            Field(const Field&) = delete;
+            Field& operator=(const Field&) = delete;
+            Field(Field&&) = default;
+            Field& operator=(Field&&) = default;
+        };
+
+        SDL_Renderer*    renderer;
+        TTF_TextEngine*  textEngine;
+        TTF_Font*        font;
+        SDL_Window*      window;
+        IGuiElement*     target = nullptr;
+        std::vector<Field> fields;
+
+        void rebuildFields() {
+            fields.clear();
+            if (!target) return;
+
+            // Common geometry fields for every element type
+            auto addF = [&](const std::string& lbl, const std::string& key, float val) {
+                char buf[32]; std::snprintf(buf, sizeof(buf), "%.1f", val);
+                fields.emplace_back(renderer, textEngine, font, lbl, key, buf);
+            };
+            addF("X",      "x", target->getX());
+            addF("Y",      "y", target->getY());
+            addF("Width",  "w", target->getWidth());
+            addF("Height", "h", target->getHeight());
+
+            // Type-specific fields
+            if (target->getType() == "Button") {
+                auto* b = static_cast<Button*>(target);
+                fields.emplace_back(renderer, textEngine, font, "Text", "btn_text", b->getText());
+            } else if (target->getType() == "LineEdit") {
+                auto* le = static_cast<LineEdit*>(target);
+                fields.emplace_back(renderer, textEngine, font, "Placeholder", "le_placeholder", le->getPlaceholder());
+            } else if (target->getType() == "SpinBox") {
+                auto* sb = static_cast<SpinBox*>(target);
+                addF("Min",     "sb_min",  sb->getMin());
+                addF("Max",     "sb_max",  sb->getMax());
+                addF("Step",    "sb_step", sb->getStep());
+                addF("Value",   "sb_val",  sb->getValue());
+            } else if (target->getType() == "Panel") {
+                auto* p = static_cast<Panel*>(target);
+                // bg_color r g b a
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "%d", (int)p->bgColor.r);
+                fields.emplace_back(renderer, textEngine, font, "BG Red",   "panel_r", buf);
+                std::snprintf(buf, sizeof(buf), "%d", (int)p->bgColor.g);
+                fields.emplace_back(renderer, textEngine, font, "BG Green", "panel_g", buf);
+                std::snprintf(buf, sizeof(buf), "%d", (int)p->bgColor.b);
+                fields.emplace_back(renderer, textEngine, font, "BG Blue",  "panel_b", buf);
+                std::snprintf(buf, sizeof(buf), "%d", (int)p->bgColor.a);
+                fields.emplace_back(renderer, textEngine, font, "BG Alpha", "panel_a", buf);
+            }
+        }
+
+        void applyFields() {
+            if (!target) return;
+
+            auto fval = [&](const std::string& key) -> float {
+                for (auto& f : fields) {
+                    if (f.key == key) {
+                        try { return std::stof(f.edit.getText()); } catch (...) {}
+                    }
+                }
+                return 0.0f;
+            };
+            auto fstr = [&](const std::string& key) -> std::string {
+                for (auto& f : fields)
+                    if (f.key == key) return f.edit.getText();
+                return "";
+            };
+
+            // Apply common geometry
+            SDL_FRect r = {
+                fval("x"), fval("y"), fval("w"), fval("h")
+            };
+            if (r.w > 0 && r.h > 0) target->setRect(r);
+
+            // Apply type-specific
+            if (target->getType() == "Button") {
+                std::string t = fstr("btn_text");
+                if (!t.empty()) static_cast<Button*>(target)->setText(t);
+            } else if (target->getType() == "LineEdit") {
+                static_cast<LineEdit*>(target)->setPlaceholder(fstr("le_placeholder"));
+            } else if (target->getType() == "SpinBox") {
+                auto* sb = static_cast<SpinBox*>(target);
+                sb->setMin(fval("sb_min"));
+                sb->setMax(fval("sb_max"));
+                sb->setStep(fval("sb_step"));
+                sb->setValue(fval("sb_val"));
+            } else if (target->getType() == "Panel") {
+                auto* p = static_cast<Panel*>(target);
+                p->bgColor.r = (Uint8)std::clamp((int)fval("panel_r"), 0, 255);
+                p->bgColor.g = (Uint8)std::clamp((int)fval("panel_g"), 0, 255);
+                p->bgColor.b = (Uint8)std::clamp((int)fval("panel_b"), 0, 255);
+                p->bgColor.a = (Uint8)std::clamp((int)fval("panel_a"), 0, 255);
+            }
+        }
+
+        void drawLabel(const char* s, float x, float y, SDL_Color c) {
+            TTF_Text* t = TTF_CreateText(textEngine, font, s, 0);
+            if (!t) return;
+            TTF_SetTextColor(t, c.r, c.g, c.b, c.a);
+            TTF_DrawRendererText(t, x, y);
+            TTF_DestroyText(t);
+        }
+    };
+
+    class EntityInspector {
+    public:
+        static constexpr float PANEL_W = 260.0f;
+
+        float panelX() const {
+            int w, h; SDL_GetWindowSize(window, &w, &h);
+            return (float)w - PANEL_W;
+        }
+
+        EntityInspector(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f, SDL_Window* w)
+            : renderer(r), textEngine(te), font(f), window(w) {}
+
+        void setTarget(ECSWorld& w, Entity e) {
+            if (world == &w && targetEntity == e) return;
+            commitAllFields();
+            world = &w;
+            targetEntity = e;
+            rebuildFields();
+        }
+
+        void clearTarget() {
+            commitAllFields();
+            world = nullptr;
+            targetEntity = (Entity)-1;
+            fields.clear();
+        }
+
+        bool handleEvent(const SDL_Event& ev) {
+            if (!world || targetEntity == (Entity)-1) return false;
+            bool consumed = false;
+            for (auto& f : fields) {
+                if (f.widget->handleEvent(ev, window, 0.0f)) consumed = true;
+            }
+            if (ev.type == SDL_EVENT_KEY_DOWN &&
+                (ev.key.key == SDLK_RETURN || ev.key.key == SDLK_TAB)) {
+                commitAllFields();
+            }
+            return consumed;
+        }
+
+        void handleGamepad(float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame) {
+            if (!world || targetEntity == (Entity)-1) return;
+            for (auto& f : fields) {
+                f.widget->handleGamepad(cursorX, cursorY, 0.0f, window, confirmDown, confirmDownLastFrame);
+            }
+        }
+
+        void render(float windowHeight) {
+            if (!world || targetEntity == (Entity)-1) {
+                drawEmptyPanel(windowHeight);
+                return;
+            }
+
+            SDL_FRect bg = { panelX(), 0, PANEL_W, windowHeight };
+            SDL_SetRenderDrawColor(renderer, 28, 28, 35, 245);
+            SDL_RenderFillRect(renderer, &bg);
+            SDL_SetRenderDrawColor(renderer, 60, 60, 75, 255);
+            SDL_RenderRect(renderer, &bg);
+
+            float y = 10.0f;
+            drawLabel("Entity Inspector", panelX() + 10, y, {200,200,220,255}); y += 24;
+            drawLabel(("ID: " + std::to_string(targetEntity)).c_str(), panelX() + 10, y, {140,140,180,255}); y += 22;
+
+            SDL_SetRenderDrawColor(renderer, 60, 60, 80, 255);
+            SDL_FRect div = { panelX() + 5, y, PANEL_W - 10, 1 };
+            SDL_RenderFillRect(renderer, &div); y += 8;
+
+            for (auto& f : fields) {
+                drawLabel(f.label.c_str(), panelX() + 8, y, {160,160,190,255});
+                y += 32;
+                f.widget->setRect({ panelX() + 8, y, PANEL_W - 20, 26 });
+                f.widget->render(0.0f);
+                y += 32;
+            }
+
+            drawLabel("Enter = commit changes", panelX() + 8, y + 4, {80, 80, 100, 255});
+        }
+
+        // Only writes to the world if the user actually modified the value
+        void commitAllFields() {
+            if (!world || targetEntity == (Entity)-1) return;
+            Entity e = targetEntity;
+            for (auto& f : fields) {
+                if (f.widget->getType() == "SpinBox") {
+                    auto* sb = static_cast<Gui::SpinBox*>(f.widget.get());
+                    float val = sb->getValue();
+                    if (val != f.lastSyncedValue) {
+                        if (f.key == "pos_x") world->position_pool[e].x = val;
+                        else if (f.key == "pos_y") world->position_pool[e].y = val;
+                        else if (f.key == "rect_w") world->rectangle_shape_pool[e].w = val;
+                        else if (f.key == "rect_h") world->rectangle_shape_pool[e].h = val;
+                        else if (f.key == "z_index") world->z_index_pool[e].z = (int)val;
+                        else if (f.key == "vel_x") world->velocity_pool[e].x = val;
+                        else if (f.key == "vel_y") world->velocity_pool[e].y = val;
+                        else if (f.key == "acc_x") world->acceleration_pool[e].x = val;
+                        else if (f.key == "acc_y") world->acceleration_pool[e].y = val;
+                        
+                        f.lastSyncedValue = val;
+                    }
+                } else if (f.widget->getType() == "LineEdit") {
+                    auto* le = static_cast<Gui::LineEdit*>(f.widget.get());
+                    std::string text = le->getText();
+                    if (text != f.lastSyncedText) {
+                        if (f.key == "metadata_name") {
+                            world->metadata_pool[e].name = text;
+                            f.lastSyncedText = text;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Updates the inspector fields to match the world (e.g. after a manual drag)
+        void syncFromWorld() {
+            if (!world || targetEntity == (Entity)-1) return;
+            Entity e = targetEntity;
+            for (auto& f : fields) {
+                if (f.widget->getType() == "SpinBox") {
+                    auto* sb = static_cast<Gui::SpinBox*>(f.widget.get());
+                    // Don't overwrite the field if the user is currently typing in it
+                    if (!sb->isActive()) {
+                        float worldVal = 0.0f;
+                        if (f.key == "pos_x") worldVal = world->position_pool[e].x;
+                        else if (f.key == "pos_y") worldVal = world->position_pool[e].y;
+                        else if (f.key == "rect_w") worldVal = world->rectangle_shape_pool[e].w;
+                        else if (f.key == "rect_h") worldVal = world->rectangle_shape_pool[e].h;
+                        else if (f.key == "z_index") worldVal = (float)world->z_index_pool[e].z;
+                        else if (f.key == "vel_x") worldVal = world->velocity_pool[e].x;
+                        else if (f.key == "vel_y") worldVal = world->velocity_pool[e].y;
+                        else if (f.key == "acc_x") worldVal = world->acceleration_pool[e].x;
+                        else if (f.key == "acc_y") worldVal = world->acceleration_pool[e].y;
+
+                        if (worldVal != f.lastSyncedValue) {
+                            sb->setValue(worldVal);
+                            f.lastSyncedValue = worldVal;
+                        }
+                    }
+                } else if (f.widget->getType() == "LineEdit") {
+                    auto* le = static_cast<Gui::LineEdit*>(f.widget.get());
+                    if (!le->isActive()) {
+                        std::string worldText = "";
+                        if (f.key == "metadata_name") worldText = world->metadata_pool[e].name;
+                        
+                        if (worldText != f.lastSyncedText) {
+                            le->clear();
+                            for (char c : worldText) {
+                                le->appendText(std::string(1, c));
+                            }
+                            f.lastSyncedText = worldText;
+                        }
+                    }
+                }
+            }
+        }
+
+    private:
+        struct Field {
+            std::string label;
+            std::string key;
+            std::unique_ptr<Gui::IGuiElement> widget;
+            float lastSyncedValue = 0.0f;      // Tracks the last value we read/wrote
+            std::string lastSyncedText = "";
+        };
+
+        SDL_Renderer* renderer;
+        TTF_TextEngine* textEngine;
+        TTF_Font* font;
+        SDL_Window* window;
+        ECSWorld* world = nullptr;
+        Entity targetEntity = (Entity)-1;
+        std::vector<Field> fields;
+
+        void rebuildFields() {
+            fields.clear();
+            if (!world || targetEntity == (Entity)-1) return;
+            Entity e = targetEntity;
+
+            auto addSpinBox = [&](const std::string& label, const std::string& key, float val,
+                                float min=0.0f, float max=9999.0f, float step=0.5f) {
+                auto sb = std::make_unique<Gui::SpinBox>(
+                    renderer, textEngine, font, SDL_FRect{0,0,1,1}, min, max, val, step);
+                Field f;
+                f.label = label;
+                f.key = key;
+                f.widget = std::move(sb);
+                f.lastSyncedValue = val; // Initialize sync tracker
+                fields.push_back(std::move(f));
+            };
+
+            auto addLineEdit = [&](const std::string & label, const std::string & key, const std::string & val) {
+                auto le = std::make_unique<Gui::LineEdit>(
+                    renderer, textEngine, font, SDL_FRect{0,0,1,1}, "Type here...");
+                for (char c : val) {
+                    le->appendText(std::string(1, c));
+                }
+                Field f;
+                f.label = label;
+                f.key = key;
+                f.widget = std::move(le);
+                f.lastSyncedText = val; // Initialize sync tracker
+                fields.push_back(std::move(f));
+            };
+            
+            if (world->has_metadata[e])
+                addLineEdit("Name", "metadata_name", world->metadata_pool[e].name);
+
+            if (world->has_position[e]) {
+                addSpinBox("X", "pos_x", world->position_pool[e].x, -9999.0f, 9999.0f);
+                addSpinBox("Y", "pos_y", world->position_pool[e].y, -9999.0f, 9999.0f);
+            }
+
+            if (world->has_rectangle_shape[e]) {
+                addSpinBox("Width",  "rect_w", world->rectangle_shape_pool[e].w, 1.0f, 9999.0f);
+                addSpinBox("Height", "rect_h", world->rectangle_shape_pool[e].h, 1.0f, 9999.0f);
+            }
+
+            if (world->has_z_index[e])
+                addSpinBox("Z-Index", "z_index", (float)world->z_index_pool[e].z, 0, 1000, 1.0f);
+
+            if (world->has_velocity[e]) {
+                addSpinBox("Vel X", "vel_x", world->velocity_pool[e].x, -9999.0f, 9999.0f);
+                addSpinBox("Vel Y", "vel_y", world->velocity_pool[e].y, -9999.0f, 9999.0f);
+            }
+
+            if (world->has_acceleration[e]) {
+                addSpinBox("Acc X", "acc_x", world->acceleration_pool[e].x, -9999.0f, 9999.0f);
+                addSpinBox("Acc Y", "acc_y", world->acceleration_pool[e].y, -9999.0f, 9999.0f);
+            }
+        }
+
+        void drawEmptyPanel(float windowHeight) {
+            SDL_FRect bg = { panelX(), 0, PANEL_W, windowHeight };
+            SDL_SetRenderDrawColor(renderer, 28, 28, 35, 245);
+            SDL_RenderFillRect(renderer, &bg);
+            SDL_SetRenderDrawColor(renderer, 60, 60, 75, 255);
+            SDL_RenderRect(renderer, &bg);
+            drawLabel("Entity Inspector", panelX() + 10, 10, {180,180,200,255});
+            drawLabel("Click an entity", panelX() + 10, 40, {100,100,120,255});
+        }
+
+        void drawLabel(const char* s, float x, float y, SDL_Color c) {
+            TTF_Text* t = TTF_CreateText(textEngine, font, s, 0);
+            if (!t) return;
+            TTF_SetTextColor(t, c.r, c.g, c.b, c.a);
+            TTF_DrawRendererText(t, x, y);
+            TTF_DestroyText(t);
+        }
+    };
+
+
+} // end namespace Gui
+
+
+// Scene and SceneParser are defined after the Gui namespace (at the bottom of this file).
+
+void movement_system(ECSWorld& world, float dt) {
+    for (Entity i = 0; i < world.entity_count; ++i) {
+        if (world.has_position[i] && world.has_velocity[i] && world.has_acceleration[i]) {
+            world.velocity_pool[i].x += world.acceleration_pool[i].x * dt;
+            world.velocity_pool[i].y += world.acceleration_pool[i].y * dt;
+            world.position_pool[i].x += world.velocity_pool[i].x * dt;
+            world.position_pool[i].y += world.velocity_pool[i].y * dt;
+        }
+    }
+}
+
+void deselect_all(ECSWorld& world) {
+    for (Entity i = 0; i < world.entity_count; i++) {
+        if (world.has_selection[i]) world.selection_pool[i].isSelected = false;
+    }
+}
+
+void render_system_in_editor(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
+                             const ECSWorld& world, float viewX, float viewY,
+                             float scrollX, float scrollY) {
+    for (Entity i = 0; i < world.entity_count; ++i) {
+        if (world.has_position[i]) {
+            float logicalX = world.position_pool[i].x;
+            float logicalY = world.position_pool[i].y;
+            float screenX = viewX + logicalX - scrollX;
+            float screenY = viewY + logicalY - scrollY;
+            SDL_FRect outlineRect = { screenX, screenY, 50, 50 };
+            if (world.has_rectangle_shape[i]) {
+                outlineRect.w = world.rectangle_shape_pool[i].w;
+                outlineRect.h = world.rectangle_shape_pool[i].h;
+            }
+            if (world.has_selection[i] && world.selection_pool[i].isSelected) {
+                SDL_SetRenderDrawColor(renderer, world.selection_pool[i].selectionColor.r,
+                                       world.selection_pool[i].selectionColor.g,
+                                       world.selection_pool[i].selectionColor.b,
+                                       world.selection_pool[i].selectionColor.a);
+            } else {
+                SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            }
+            if (world.has_metadata[i]) {
+                TTF_Text* textObj = TTF_CreateText(textEngine, font, world.metadata_pool[i].name.c_str(), 0);
+                TTF_SetTextColor(textObj, 255, 255, 255, 255);
+                TTF_DrawRendererText(textObj, screenX, screenY);
+                TTF_DestroyText(textObj);
+            }
+            SDL_RenderRect(renderer, &outlineRect);
+        }
+    }
+}
+
+// 2. Pure Game Render System (NO editor canvas offset)
+// This replaces render_system_in_editor by removing the "+ 105" offset
+void render_system_game(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font, const ECSWorld& world) {
+    for (Entity i = 0; i < world.entity_count; ++i) {
+        if (world.has_position[i]) {
+            // Pure position, NO + 105 offset!
+            SDL_FRect outlineRect = { 
+                world.position_pool[i].x, 
+                world.position_pool[i].y, 
+                50.0f, 50.0f 
+            };
+            if (world.has_rectangle_shape[i]) {
+                outlineRect.w = world.rectangle_shape_pool[i].w;
+                outlineRect.h = world.rectangle_shape_pool[i].h;
+            }
+            
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            
+            if (world.has_metadata[i]) {
+                TTF_Text* textObj = TTF_CreateText(textEngine, font, world.metadata_pool[i].name.c_str(), 0);
+                if (textObj) {
+                    TTF_SetTextColor(textObj, 255, 255, 255, 255);
+                    TTF_DrawRendererText(textObj, world.position_pool[i].x, world.position_pool[i].y);
+                    TTF_DestroyText(textObj);
+                }
+            }
+            SDL_RenderRect(renderer, &outlineRect);
+        }
+    }
+}
+
+void edit_object_with_editor_mouse(SDL_Renderer* renderer, ECSWorld & world, const std::vector<std::unique_ptr<Gui::IGuiElement>>& guiElements, const SDL_Event & e) {
+    if (currentEditMode == EditMode::Dialog) return;
+    if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) {
+        isDraggingLeftMouse = false;
+    }
+    if (currentEditMode == EditMode::Select) {
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
+            // Convert screen click to logical canvas coordinates
+            float logicalX = e.button.x - canvasViewX + editorScrollX;
+            float logicalY = e.button.y - canvasViewY + editorScrollY;
+            Entity topmostEntity = (Entity)-1;
+            int maxZ = 0;
+            bool found = false;
+            for (Entity i = 0; i < world.entity_count; i++) {
+                if (world.has_position[i] && world.has_selection[i]) {
+                    float entityW = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f;
+                    float entityH = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f;
+                    // Check if logical click is inside entity's logical rectangle
+                    if (logicalX >= world.position_pool[i].x && logicalX <= world.position_pool[i].x + entityW &&
+                        logicalY >= world.position_pool[i].y && logicalY <= world.position_pool[i].y + entityH) {
+                        int currentZ = world.has_z_index[i] ? world.z_index_pool[i].z : 0;
+                        if (!found || currentZ > maxZ) {
+                            maxZ = currentZ;
+                            topmostEntity = i;
+                            found = true;
+                        }
+                    }
+                }
+            }
+            if (topmostEntity != (Entity)-1) {
+                if (currentSelectionmode == SelectionMode::SingleSelect) {
+                    bool wasSelected = world.selection_pool[topmostEntity].isSelected;
+                    for (Entity i = 0; i < world.entity_count; i++) {
+                        if (world.has_selection[i]) world.selection_pool[i].isSelected = false;
+                    }
+                    if (!wasSelected) {
+                        world.selection_pool[topmostEntity].isSelected = true;
+                        lastSelectedEntity = topmostEntity;
+                    } else {
+                        lastSelectedEntity = (Entity)-1;
+                    }
+                } else if (currentSelectionmode == SelectionMode::MultiSelect) {
+                    world.selection_pool[topmostEntity].isSelected = !world.selection_pool[topmostEntity].isSelected;
+                    if (world.selection_pool[topmostEntity].isSelected)
+                        lastSelectedEntity = topmostEntity;
+                    else
+                        lastSelectedEntity = (Entity)-1;
+                }
+            } else {
+                // Click on empty canvas -> deselect all
+                // Only deselect if the click was actually inside the canvas bounds.
+                // This prevents clicking toolbar buttons (like "Move") from clearing the selection.
+                bool insideCanvas = (e.button.y >= canvasViewY) && 
+                                    (e.button.x >= canvasViewX) && 
+                                    (e.button.x <= canvasViewX + canvasViewW);
+                                    
+                if (currentSelectionmode == SelectionMode::SingleSelect && insideCanvas) {
+                    deselect_all(world);
+                    lastSelectedEntity = (Entity)-1;
+                }
+            }
+        }
+    } else if (currentEditMode == EditMode::MoveWithMouse) {
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
+            if (isInsideCanvas(e.button.x, e.button.y)) {
+                isDraggingLeftMouse = true;
+                lastDragX = e.button.x;
+                lastDragY = e.button.y;
+            }
+        } else if (e.type == SDL_EVENT_MOUSE_MOTION && isDraggingLeftMouse) {
+            if (isInsideCanvas(e.motion.x, e.motion.y)) {
+                int dx = e.motion.x - lastDragX;
+                int dy = e.motion.y - lastDragY;
+                if (dx != 0 || dy != 0) {
+                    for (Entity i = 0; i < world.entity_count; i++) {
+                        if (world.has_position[i] && world.has_selection[i] && world.selection_pool[i].isSelected) {
+                            world.position_pool[i].x += dx;
+                            world.position_pool[i].y += dy;
+                            if (world.has_rectangle_shape[i]) {
+                                clamp_entity_position_to_canvas(world.position_pool[i],
+                                    world.rectangle_shape_pool[i].w,
+                                    world.rectangle_shape_pool[i].h);
+                            } else {
+                                clamp_entity_position_to_canvas(world.position_pool[i]);
+                            }
+                        }
+                    }
+                    for (const auto & elem : guiElements)
+                    {
+                        auto guiElem = elem.get();
+                        if (guiElem->editorSelected) {
+                            SDL_FPoint newPos = {guiElem->getX() + dx, guiElem->getY() + dy};
+                            clamp_guiElem_position_to_canvas(newPos, guiElem->getWidth(), guiElem->getHeight());
+                            guiElem->setPos({static_cast<int>(newPos.x), static_cast<int>(newPos.y)});
+                        }
+                    }
+                    lastDragX = e.motion.x;
+                    lastDragY = e.motion.y;
+                }
+            } else {
+                isDraggingLeftMouse = false;
+            }
+        }
+    } else if (currentEditMode == EditMode::Delete) {
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
+            float logicalX = e.button.x - canvasViewX + editorScrollX;
+            float logicalY = e.button.y - canvasViewY + editorScrollY;
+            Entity topmostEntity = (Entity)-1;
+            int maxZ = 0;
+            bool found = false;
+            for (Entity i = 0; i < world.entity_count; i++) {
+                if (world.has_position[i] && world.has_selection[i]) {
+                    float entityW = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f;
+                    float entityH = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f;
+                    if (logicalX >= world.position_pool[i].x && logicalX <= world.position_pool[i].x + entityW &&
+                        logicalY >= world.position_pool[i].y && logicalY <= world.position_pool[i].y + entityH) {
+                        int currentZ = world.has_z_index[i] ? world.z_index_pool[i].z : 0;
+                        if (!found || currentZ > maxZ) {
+                            maxZ = currentZ;
+                            topmostEntity = i;
+                            found = true;
+                        }
+                    }
+                }
+            }
+            if (topmostEntity != (Entity)-1) world.delete_entity(topmostEntity);
+        }
+    }
+}
+
+
+void edit_object_with_editor_gamepad(ECSWorld& world, float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame) {
+    if (currentEditMode == EditMode::Dialog) return;
+    if (!confirmDown) isGamepadDragging = false;
+
+    // Convert screen cursor to logical canvas coordinates
+    float logicalX = cursorX - canvasViewX + editorScrollX;
+    float logicalY = cursorY - canvasViewY + editorScrollY;
+
+    Entity topmostEntity = (Entity)-1;
+    int maxZ = -1;
+    bool found = false;
+    for (Entity i = 0; i < world.entity_count; i++) {
+        if (world.has_position[i] && world.has_selection[i]) {
+            float entityW = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f;
+            float entityH = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f;
+            if (logicalX >= world.position_pool[i].x && logicalX <= world.position_pool[i].x + entityW &&
+                logicalY >= world.position_pool[i].y && logicalY <= world.position_pool[i].y + entityH) {
+                int currentZ = world.has_z_index[i] ? world.z_index_pool[i].z : 0;
+                if (!found || currentZ > maxZ) {
+                    maxZ = currentZ;
+                    topmostEntity = i;
+                    found = true;
+                }
+            }
+        }
+    }
+
+    if (currentEditMode == EditMode::Select) {
+        if (!confirmDown && confirmDownLastFrame && !gamepadDidDrag) {
+            if (topmostEntity != (Entity)-1) {
+                if (currentSelectionmode == SelectionMode::SingleSelect) {
+                    bool wasSelected = world.selection_pool[topmostEntity].isSelected;
+                    for (Entity i = 0; i < world.entity_count; i++) {
+                        if (world.has_selection[i]) world.selection_pool[i].isSelected = false;
+                    }
+                    if (!wasSelected) {
+                        world.selection_pool[topmostEntity].isSelected = true;
+                        lastSelectedEntity = topmostEntity;
+                    } else {
+                        lastSelectedEntity = (Entity)-1;
+                    }
+                } else if (currentSelectionmode == SelectionMode::MultiSelect) {
+                    world.selection_pool[topmostEntity].isSelected = !world.selection_pool[topmostEntity].isSelected;
+                    if (world.selection_pool[topmostEntity].isSelected)
+                        lastSelectedEntity = topmostEntity;
+                    else
+                        lastSelectedEntity = (Entity)-1;
+                }
+            } else {
+                // Same bounds check for gamepad cursor
+                bool insideCanvas = (cursorY >= canvasViewY) && 
+                                    (cursorX >= canvasViewX) && 
+                                    (cursorX <= canvasViewX + canvasViewW);
+                                    
+                if (currentSelectionmode == SelectionMode::SingleSelect && insideCanvas) {
+                    deselect_all(world);
+                    lastSelectedEntity = (Entity)-1;
+                }
+            }
+        }
+        if (!confirmDown) gamepadDidDrag = false;
+    } else if (currentEditMode == EditMode::MoveWithMouse) {
+        if (confirmDown && !confirmDownLastFrame) {
+            if (isInsideCanvas(cursorX, cursorY)) {
+                isGamepadDragging = true;
+                gamepadDidDrag = false;
+                lastGamepadCursorX = cursorX;
+                lastGamepadCursorY = cursorY;
+            }
+        } else if (confirmDown && isGamepadDragging) {
+            if (isInsideCanvas(cursorX, cursorY)) {
+                float dx = cursorX - lastGamepadCursorX;
+                float dy = cursorY - lastGamepadCursorY;
+                if (dx != 0.0f || dy != 0.0f) {
+                    for (Entity i = 0; i < world.entity_count; i++) {
+                        if (world.has_position[i] && world.has_selection[i] && world.selection_pool[i].isSelected) {
+                            world.position_pool[i].x += dx;
+                            world.position_pool[i].y += dy;
+                            clamp_entity_position_to_canvas(world.position_pool[i]);
+                        }
+                    }
+                    gamepadDidDrag = true;
+                    lastGamepadCursorX = cursorX;
+                    lastGamepadCursorY = cursorY;
+                }
+            } else {
+                isGamepadDragging = false;
+            }
+        }
+    } else if (currentEditMode == EditMode::Delete) {
+        if (!confirmDown && confirmDownLastFrame) {
+            if (topmostEntity != (Entity)-1) world.delete_entity(topmostEntity);
+        }
+    }
+}
+
+void render_editor_canvas(SDL_Renderer* renderer) {
+    SDL_FRect rect = { canvasViewX, canvasViewY, canvasViewW, canvasViewH };
+    SDL_SetRenderDrawColor(renderer, 125, 125, 125, 255);
+    SDL_RenderRect(renderer, &rect);
 }
 
 // ============================================================
@@ -1430,10 +2316,10 @@ namespace Gui {
 class ScriptBase {
 public:
     virtual ~ScriptBase() = default;
-    virtual void onStart()            {}
-    virtual void onUpdate(float /*dt*/) {}
-    virtual void onDraw()             {}
-    virtual void onEnd()              {}
+    virtual void onStart(){}
+    virtual void onUpdate(float /*dt*/){}
+    virtual void onDraw(){}
+    virtual void onEnd(){}
     virtual std::string getName() const { return "ScriptBase"; }
 };
 
@@ -1453,6 +2339,13 @@ struct Scene {
     std::vector<std::unique_ptr<Gui::IGuiElement>> guiElements;
 };
 
+
+
+TTF_Font* ProjectScript_TTF_OpenFont(const char* file, float ptsize)
+{
+    return TTF_OpenFont((getProjectsRootForScripts() / std::filesystem::path(file)).string().c_str(), (int)ptsize);
+}
+
 class SceneParser {
 private:
     SDL_Renderer* renderer;
@@ -1464,14 +2357,138 @@ public:
     SceneParser(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f, SDL_Window* w)
         : renderer(r), textEngine(te), font(f), window(w) {}
 
+    std::string engine_root = getEnginePath();
+    std::string projects_root = getProjectsPath();
+
     // ==========================================
     // LOAD SCENE
     // ==========================================
     Scene loadFromFile(const std::string& filepath) {
+        
         Scene scene;
-        std::ifstream file(filepath);
+        
+        #ifdef EMSCRIPTEN
+            // On Emscripten, use the path as-is (it's already in virtual FS format)
+            std::string fullPath = filepath;
+            // Ensure it starts with / for virtual FS
+            if (!fullPath.empty() && fullPath[0] != '/') {
+                fullPath = "/" + fullPath;
+            }
+        #else
+            // On native platforms, use engine_root
+            std::string fullPath = engine_root + filepath;
+        #endif
+            
+            std::ifstream file(fullPath);
+            if (!file.is_open()) {
+                SDL_Log("Current Working Directory: %s\n", std::filesystem::current_path().string().c_str());
+                SDL_Log("Failed to open scene file: %s (tried: %s)\n", filepath.c_str(), fullPath.c_str());
+                scene.scriptValid = false;
+                return scene;
+            }
+
+            nlohmann::json j;
+            file >> j;
+
+            scene.name = j.value("scene_name", "Untitled");
+
+            // --- 0. Script attachment (required) ---
+            scene.scriptAttached = j.value("script_attached", "");
+            if (scene.scriptAttached.empty()) {
+                std::cerr << "[Editor] WARNING: Scene '" << scene.name
+                        << "' has no script_attached — scene marked INVALID.\n";
+                scene.scriptValid = false;
+            } else {
+        #ifdef EMSCRIPTEN
+                // On Emscripten, check in virtual FS
+                std::string trueScriptAttached = scene.scriptAttached;
+                if (!trueScriptAttached.empty() && trueScriptAttached[0] != '/') {
+                    trueScriptAttached = "/projects/" + trueScriptAttached;
+                }
+        #else
+                // On native, use projects_root
+                std::string trueScriptAttached = projects_root + scene.scriptAttached;
+        #endif
+                scene.scriptValid = std::filesystem::exists(trueScriptAttached);
+                if (!scene.scriptValid)
+                    std::cerr << "[Editor] WARNING: script_attached '"
+                            << scene.scriptAttached
+                            << "' not found on disk (tried: " << trueScriptAttached << ") — scene marked INVALID.\n";
+                else
+                    std::cout << "[Editor] Scene '" << scene.name
+                            << "' — script '" << scene.scriptAttached << "' OK.\n";
+            }
+
+            // --- 1. Parse ECS Entities ---
+            if (j.contains("entities")) {
+                for (const auto& entityJson : j["entities"]) {
+                    Entity id = scene.world.create_entity();
+                    scene.world.add_selection(id);
+                    scene.world.selection_pool[id].isSelected = false;
+                    scene.world.selection_pool[id].selectionColor = {0, 255, 0, 255};
+
+                    const auto& comps = entityJson["components"];
+
+                    if (comps.contains("Metadata")) {
+                        scene.world.add_metadata(id);
+                        scene.world.metadata_pool[id].name = comps["Metadata"].value("name", "");
+                    }
+                    if (comps.contains("Position")) {
+                        scene.world.add_position(id);
+                        scene.world.position_pool[id].x = comps["Position"].value("x", 0.0f);
+                        scene.world.position_pool[id].y = comps["Position"].value("y", 0.0f);
+                    }
+                    if (comps.contains("RectangleShape")) {
+                        scene.world.add_rectangle_shape(id);
+                        scene.world.rectangle_shape_pool[id].w = comps["RectangleShape"].value("w", 50.0f);
+                        scene.world.rectangle_shape_pool[id].h = comps["RectangleShape"].value("h", 50.0f);
+                    }
+                    if (comps.contains("ZIndex")) {
+                        scene.world.add_z_index(id);
+                        scene.world.z_index_pool[id].z = comps["ZIndex"].value("z", 0);
+                    }
+                    if (comps.contains("Velocity")) {
+                        scene.world.add_velocity(id);
+                        scene.world.velocity_pool[id].x = comps["Velocity"].value("x", 0.0f);
+                        scene.world.velocity_pool[id].y = comps["Velocity"].value("y", 0.0f);
+                    }
+                    if (comps.contains("Acceleration")) {
+                        scene.world.add_acceleration(id);
+                        scene.world.acceleration_pool[id].x = comps["Acceleration"].value("x", 0.0f);
+                        scene.world.acceleration_pool[id].y = comps["Acceleration"].value("y", 0.0f);
+                    }
+                }
+            }
+
+            // --- 2. Parse GUI Elements (top-level and Panels) ---
+            if (j.contains("gui_elements")) {
+                for (const auto& elemJson : j["gui_elements"]) {
+                    auto elem = parseGuiElement(elemJson);
+                    if (elem) scene.guiElements.push_back(std::move(elem));
+                }
+            }
+            return scene;
+    }
+
+    Scene ProjectScript_loadFromFile(const std::string& filepath) 
+    {
+        Scene scene;
+        
+    #ifdef __EMSCRIPTEN__
+        // On Emscripten, prepend / to make it absolute path
+        std::string fullPath = filepath;
+        if (!fullPath.empty() && fullPath[0] != '/') {
+            fullPath = "/" + fullPath;
+        }
+    #else
+        // On native, use the projects root
+        std::string fullPath = (getProjectsRootForScripts() / std::filesystem::path(filepath)).string();
+    #endif
+        
+        std::ifstream file(fullPath);
         if (!file.is_open()) {
-            std::cerr << "Failed to open scene file: " << filepath << "\n";
+            SDL_Log("Current Working Directory: %s\n", std::filesystem::current_path().string().c_str());
+            SDL_Log("Failed to open scene file: %s (tried: %s)\n", filepath.c_str(), fullPath.c_str());
             scene.scriptValid = false;
             return scene;
         }
@@ -1485,24 +2502,38 @@ public:
         scene.scriptAttached = j.value("script_attached", "");
         if (scene.scriptAttached.empty()) {
             std::cerr << "[Editor] WARNING: Scene '" << scene.name
-                      << "' has no script_attached — scene marked INVALID.\n";
+                    << "' has no script_attached — scene marked INVALID.\n";
             scene.scriptValid = false;
         } else {
-            // Check that the referenced script file actually exists
-            scene.scriptValid = std::filesystem::exists(scene.scriptAttached);
+    #ifdef __EMSCRIPTEN__
+            // On Emscripten, we can't check for .cpp files at runtime since they're compiled in.
+            // Just mark as valid if a script is attached.
+            scene.scriptValid = true;
+            std::cout << "[Editor] Scene '" << scene.name
+                    << "' — script '" << scene.scriptAttached << "' OK (compiled in).\n";
+    #else
+            // On native, check that the referenced script file actually exists
+            std::string trueScriptAttached = (getProjectsRootForScripts() / std::filesystem::path(scene.scriptAttached)).string();
+            scene.scriptValid = std::filesystem::exists(trueScriptAttached);
             if (!scene.scriptValid)
                 std::cerr << "[Editor] WARNING: script_attached '"
-                          << scene.scriptAttached
-                          << "' not found on disk — scene marked INVALID.\n";
+                        << scene.scriptAttached
+                        << "' not found (tried: " << trueScriptAttached << ") — scene marked INVALID.\n";
             else
                 std::cout << "[Editor] Scene '" << scene.name
-                          << "' — script '" << scene.scriptAttached << "' OK.\n";
+                        << "' — script '" << scene.scriptAttached << "' OK.\n";
+    #endif
         }
 
         // --- 1. Parse ECS Entities ---
         if (j.contains("entities")) {
             for (const auto& entityJson : j["entities"]) {
+
                 Entity id = scene.world.create_entity();
+                scene.world.add_selection(id);
+                scene.world.selection_pool[id].isSelected = false;
+                scene.world.selection_pool[id].selectionColor = {0, 255, 0, 255};
+
                 const auto& comps = entityJson["components"];
 
                 if (comps.contains("Metadata")) {
@@ -1596,7 +2627,7 @@ private:
     // ------------------------------------------------------------------
     // Helpers: parse / serialize a single IGuiElement (handles Panel recursion)
     // ------------------------------------------------------------------
-    std::unique_ptr<Gui::IGuiElement> parseGuiElement(const nlohmann::json& elemJson) {
+    std::unique_ptr<Gui::IGuiElement> parseGuiElement(const nlohmann::json & elemJson) {
         std::string type = elemJson.value("type", "");
         float x = elemJson.value("x", 0.0f);
         float y = elemJson.value("y", 0.0f);
@@ -1677,4 +2708,5 @@ private:
             j["children"] = childArr;
         }
         return j;
-    }};
+    }
+};

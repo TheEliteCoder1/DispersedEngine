@@ -1,52 +1,30 @@
 # projects/FirstProject/CMakeLists.txt
-# ─────────────────────────────────────────────────────────────────────────────
-# Builds the FirstProject runtime executable.
-#
-# Entry point  : scripts/MainMenuScript.cpp
-#   • #include "engine.h"  works because DispersedEngine adds src/ to the
-#     include path via its INTERFACE.
-#   • src/main.cpp is NOT compiled here — it belongs to the Editor only.
-#
-# Assets / scenes are kept inside this project folder and are copied next
-# to the executable after build so relative paths like "scenes/mainmenu.json"
-# work at runtime without any hardcoded absolute paths.
-# ─────────────────────────────────────────────────────────────────────────────
 
 cmake_minimum_required(VERSION 3.20)
 
-# ── Collect all script sources in this project ────────────────────────────
-# Add more scripts here as your project grows:
-#   set(PROJECT_SOURCES scripts/MainMenuScript.cpp scripts/GameplayScript.cpp)
 set(PROJECT_SOURCES
     scripts/MainMenuScript.cpp
 )
 
 add_executable(FirstProject ${PROJECT_SOURCES})
 
-# Inherit engine headers (src/) + all SDL3/box2d links
+# Tell engine.h we are building a project script
+target_compile_definitions(FirstProject PRIVATE PROJECT_SCRIPT_BUILD=1)
+
 target_link_libraries(FirstProject PRIVATE DispersedEngine)
 
-# The project's own scripts/ and assets/ directories are also on the
-# include path so scripts can do: #include "SomeHelper.h"
 target_include_directories(FirstProject PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/scripts
 )
 
-# ── Post-build: copy project assets + scenes next to the executable ────────
-# This means at runtime the exe can open "assets/fredoka.ttf",
-# "scenes/mainmenu.json", etc. using plain relative paths.
+# ── Post-build: copy the ENTIRE project folder next to the executable ────────
+# This creates Release/FirstProject/ containing assets/, scenes/, scripts/, etc.
+# Now the exe can just use "./FirstProject/..." to find everything!
 add_custom_command(TARGET FirstProject POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/assets
-        $<TARGET_FILE_DIR:FirstProject>/assets
-    COMMENT "Copying FirstProject assets"
-)
-
-add_custom_command(TARGET FirstProject POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/scenes
-        $<TARGET_FILE_DIR:FirstProject>/scenes
-    COMMENT "Copying FirstProject scenes"
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        $<TARGET_FILE_DIR:FirstProject>/FirstProject
+    COMMENT "Copying entire FirstProject folder next to executable"
 )
 
 # ── Platform settings ──────────────────────────────────────────────────────
@@ -56,18 +34,13 @@ if(EMSCRIPTEN)
         "-sALLOW_MEMORY_GROWTH=1"
         "-sUSE_WEBGL2=1"
         "-sASYNCIFY"
-        "--preload-file=${CMAKE_CURRENT_SOURCE_DIR}/assets@/assets"
-        "--preload-file=${CMAKE_CURRENT_SOURCE_DIR}/scenes@/scenes"
-        "--shell-file=${CMAKE_SOURCE_DIR}/emsdk/minimal_shell.html"
+        "-sFORCE_FILESYSTEM"
+        # Mount the entire project folder to /FirstProject in the virtual FS
+        "--preload-file=${CMAKE_CURRENT_SOURCE_DIR}@/FirstProject"
+        "--shell-file=${CMAKE_SOURCE_DIR}/minimal_shell.html"
     )
 else()
     set_target_properties(FirstProject PROPERTIES
         SUFFIX ".exe"
-        # Remove WIN32_EXECUTABLE / ENTRY if you want a console window
-        # during development for SDL_Log output.
-        # WIN32_EXECUTABLE TRUE
     )
-    # Uncomment the two lines below when releasing (hides the console):
-    # set_target_properties(FirstProject PROPERTIES WIN32_EXECUTABLE TRUE)
-    # target_link_options(FirstProject PRIVATE "/SUBSYSTEM:WINDOWS" "/ENTRY:mainCRTStartup")
 endif()

@@ -1,3 +1,2 @@
-if(BUILD_PROJECT_A)
-    add_subdirectory(FirstProject)
-endif()
+# projects/CMakeLists.txt
+add_subdirectory(FirstProject)

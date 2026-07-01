@@ -26,8 +26,7 @@ _deps/
 *.ilk
 *.exp
 
-# ── Web build output ──────────────────────────────────────────────────────
-*.html
+# ── Web build output (exclude html to upload minimal_shell.html) ──────────────────────────────────────────────────────
 *.js
 *.wasm
 *.data

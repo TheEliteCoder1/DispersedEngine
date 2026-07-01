@@ -1,4 +1,4 @@
-makelists · TXT
+# root CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
 project(DispersedEngine VERSION 1.0.0 LANGUAGES CXX)
  
@@ -21,6 +21,4 @@ add_subdirectory(src)
 # ── Projects ───────────────────────────────────────────────────────────────
 # Each project under projects/ has its own CMakeLists.txt that decides
 # which script(s) to compile into its executable.
-add_subdirectory(projects/FirstProject)
-# add_subdirectory(projects/SecondProject)  ← add more projects here
- 
+add_subdirectory(projects)
