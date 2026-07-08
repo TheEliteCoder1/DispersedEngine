@@ -1,24 +1,5 @@
 {
-    "entities": [
-        {
-            "components": {
-                "Metadata": {
-                    "name": "Ent_A"
-                },
-                "Position": {
-                    "x": 1048.0,
-                    "y": 389.0
-                },
-                "RectangleShape": {
-                    "h": 50.0,
-                    "w": 100.0
-                },
-                "ZIndex": {
-                    "z": 1
-                }
-            }
-        }
-    ],
+    "entities": [],
     "gui_elements": [
         {
             "bg_color": [
@@ -118,8 +99,8 @@
             "h": 700.0,
             "type": "Panel",
             "w": 300.0,
-            "x": 650.0,
-            "y": 120.0
+            "x": 654.0,
+            "y": 62.0
         }
     ],
     "scene_name": "Main Menu",

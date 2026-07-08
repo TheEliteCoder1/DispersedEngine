@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <box2d/box2d.h>
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <vector>
 #include <json.hpp>
@@ -16,6 +17,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <array>
+#include <tuple>
 #include <stdio.h>
 
 // ============================================================
@@ -134,6 +136,11 @@ enum EditMode {
 };
 
 EditMode currentEditMode = EditMode::Select;
+// Remembers the mode that was active before a Dialog was opened, so it can be
+// restored once the dialog closes (otherwise the editor gets stuck in Dialog
+// mode forever, and edit_object_with_editor_mouse/gamepad both bail out early
+// whenever currentEditMode == Dialog, silently disabling select/move/delete).
+EditMode modeBeforeDialog = EditMode::Select;
 
 enum SelectionMode {
     SingleSelect = 0,
@@ -186,8 +193,13 @@ inline void clamp_entity_position_to_canvas(Components::Position& pos, float ent
     float minY = 0.0f;
     float maxX = LOGICAL_CANVAS_WIDTH - entityWidth;
     float maxY = LOGICAL_CANVAS_HEIGHT - entityHeight;
-    pos.x = std::clamp(pos.x, minX, maxX);
-    pos.y = std::clamp(pos.y, minY, maxY);
+    // If the entity is larger than the canvas on an axis, maxX/maxY can end up
+    // below minX/minY. std::clamp requires lo <= hi (UB otherwise), and in
+    // practice that collapses the result to a fixed value every call -
+    // permanently freezing that axis regardless of movement. Skip clamping on
+    // an axis that can't fit rather than pinning it to a bogus position.
+    if (maxX >= minX) pos.x = std::clamp(pos.x, minX, maxX);
+    if (maxY >= minY) pos.y = std::clamp(pos.y, minY, maxY);
 }
 
 inline void clamp_guiElem_position_to_canvas(SDL_FPoint& pos, float guiElemWidth, float guiElemHeight) {
@@ -195,8 +207,12 @@ inline void clamp_guiElem_position_to_canvas(SDL_FPoint& pos, float guiElemWidth
     float minY = 0.0f;
     float maxX = LOGICAL_CANVAS_WIDTH - guiElemWidth;
     float maxY = LOGICAL_CANVAS_HEIGHT - guiElemHeight;
-    pos.x = std::clamp(pos.x, minX, maxX);
-    pos.y = std::clamp(pos.y, minY, maxY);
+    // Same fix as clamp_entity_position_to_canvas: don't clamp an axis the
+    // element can't possibly fit on (e.g. a Panel taller than the canvas),
+    // or std::clamp's undefined behavior with lo > hi will freeze that axis
+    // at a single fixed value forever.
+    if (maxX >= minX) pos.x = std::clamp(pos.x, minX, maxX);
+    if (maxY >= minY) pos.y = std::clamp(pos.y, minY, maxY);
 }
 
 struct ECSWorld {
@@ -318,14 +334,14 @@ namespace Gui {
         bool editorSelected = false;
 
         // Unified Lifecycle (Signatures must match exactly)
-        virtual void render(float offsetY = 0.0f) = 0;
-        virtual bool handleEvent(const SDL_Event& e, SDL_Window* window, float offsetY = 0.0f) = 0;
-        virtual void handleGamepad(float cursorX, float cursorY, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) = 0;
+        virtual void render(float offsetX = 0.0f, float offsetY = 0.0f) = 0;
+        virtual bool handleEvent(const SDL_Event& e, SDL_Window* window, float offsetX = 0.0f, float offsetY = 0.0f) = 0;
+        virtual void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) = 0;
 
         // Draw a selection highlight around this element (called by editor)
-        void renderSelectionOutline(SDL_Renderer* renderer) const {
+        void renderSelectionOutline(SDL_Renderer* renderer, float offsetX = 0.0f, float offsetY = 0.0f) const {
             if (!editorSelected) return;
-            SDL_FRect r = { getX() - 2, getY() - 2, getWidth() + 4, getHeight() + 4 };
+            SDL_FRect r = { getX() - offsetX - 2, getY() - offsetY - 2, getWidth() + 4, getHeight() + 4 };
             SDL_SetRenderDrawColor(renderer, 255, 200, 0, 255);
             SDL_RenderRect(renderer, &r);
             // corner handles
@@ -364,6 +380,10 @@ namespace Gui {
         std::function<void(float)> onChange;
 
         void setOrientation(ScrollOrientation o) { orientation = o; }
+
+        void setOffsetNoCallback(float v) {
+            offset = std::clamp(v, 0.0f, maxOffset());
+        }
 
         void setGeometry(float x, float y, float w, float h,
                         float contentSz, float viewSz) {
@@ -413,17 +433,30 @@ namespace Gui {
             return false;
         }
 
-        void render(SDL_Renderer* renderer) {
-            SDL_FRect track = { trackX, trackY, trackW, trackH };
-            SDL_SetRenderDrawColor(renderer, 45, 45, 45, 255);
+        void render(SDL_Renderer* renderer, float offsetX = 0.0f, float offsetY = 0.0f) {
+            SDL_FRect track = { trackX - offsetX, trackY - offsetY, trackW, trackH };
+            // Track background – slightly lighter so it stands out
+            SDL_SetRenderDrawColor(renderer, 80, 80, 90, 255);
             SDL_RenderFillRect(renderer, &track);
+            // Track border – a thin line for visibility
+            SDL_SetRenderDrawColor(renderer, 120, 120, 140, 255);
+            SDL_RenderRect(renderer, &track);
+
             if (maxOffset() <= 0) return;
             SDL_FRect thumb = thumbRect();
-            bool hov = false;
-            float mx, my; SDL_GetMouseState(&mx, &my);
-            hov = inRect(mx, my, thumb) || dragging;
-            SDL_SetRenderDrawColor(renderer, hov ? 160 : 110, hov ? 160 : 110, hov ? 160 : 110, 255);
+            thumb.x -= offsetX;
+            thumb.y -= offsetY;
+            // Thumb – bright and with a slight border
+            SDL_SetRenderDrawColor(renderer, 180, 180, 200, 255);
             SDL_RenderFillRect(renderer, &thumb);
+            SDL_SetRenderDrawColor(renderer, 220, 220, 240, 255);
+            SDL_RenderRect(renderer, &thumb);
+        }
+
+            
+        void setOffset(float v) {
+            offset = std::clamp(v, 0.0f, maxOffset());
+            if (onChange) onChange(offset);
         }
 
     private:
@@ -444,11 +477,6 @@ namespace Gui {
                 return { trackX, trackY + pos, trackW, thumbSize() };
             else
                 return { trackX + pos, trackY, thumbSize(), trackH };
-        }
-
-        void setOffset(float v) {
-            offset = std::clamp(v, 0.0f, maxOffset());
-            if (onChange) onChange(offset);
         }
 
         static bool inRect(float x, float y, SDL_FRect r) {
@@ -500,8 +528,9 @@ namespace Gui {
         const SDL_FRect& getRect() const override { return rect; }
         bool isNumericOnly() const override { return true; }
 
-        bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetY) override {
+        bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetX, float offsetY) override {
             SDL_FRect originalRect = rect;
+            rect.x -= offsetX;
             rect.y -= offsetY;
             auto restore = [&]() { rect = originalRect; };
 
@@ -534,10 +563,10 @@ namespace Gui {
             restore(); return false;
         }
 
-        void handleGamepad(float cursorX, float cursorY, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
-            SDL_FRect dec = decBtn(); dec.y -= offsetY;
-            SDL_FRect inc = incBtn(); inc.y -= offsetY;
-            SDL_FRect ta = fieldTextArea(); ta.y -= offsetY;
+        void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
+            SDL_FRect dec = decBtn(); dec.x -= offsetX; dec.y -= offsetY;
+            SDL_FRect inc = incBtn(); inc.x -= offsetX; inc.y -= offsetY;
+            SDL_FRect ta = fieldTextArea(); ta.x -= offsetX; ta.y -= offsetY;
             bool inDec = inRect(cursorX, cursorY, dec);
             bool inInc = inRect(cursorX, cursorY, inc);
             bool inTa = inRect(cursorX, cursorY, ta);
@@ -552,8 +581,9 @@ namespace Gui {
             }
         }
 
-        void render(float offsetY) override {
+        void render(float offsetX, float offsetY) override {
             SDL_FRect originalRect = rect;
+            rect.x -= offsetX; // ADD THIS
             rect.y -= offsetY;
             float mx, my;
             SDL_GetMouseState(&mx, &my);
@@ -628,6 +658,8 @@ namespace Gui {
             active = false;
             SDL_StopTextInput(window);
         }
+
+        
         SDL_FRect decBtn() const { return { rect.x, rect.y, rect.h, rect.h }; }
         SDL_FRect incBtn() const { return { rect.x + rect.w - rect.h, rect.y, rect.h, rect.h }; }
         SDL_FRect fieldTextArea() const {
@@ -644,6 +676,157 @@ namespace Gui {
             TTF_DrawRendererText(t, r.x + r.w * 0.35f, r.y + (r.h - 20.0f) * 0.5f);
             TTF_DestroyText(t);
         }
+    };
+    
+    class OptionBox : public IGuiElement {
+    private:
+        SDL_Renderer* renderer;
+        TTF_TextEngine* textEngine;
+        TTF_Font* font;
+        SDL_FRect optionRect;
+        const std::vector<std::string>& options;
+        int currentOption = 0;
+
+    public:
+        OptionBox(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font, 
+                SDL_FRect rect, const std::vector<std::string>& options) 
+                : renderer(renderer), textEngine(textEngine), font(font), optionRect(rect),
+                    options(options) 
+        {
+        }
+
+        std::string getType() const override { return "OptionBox"; }
+        float getX() const override { return optionRect.x; }
+        float getY() const override { return optionRect.y; }
+        float getWidth() const override { return optionRect.w; }
+        float getHeight() const override { return optionRect.h; }
+        void setRect(SDL_FRect r) override { optionRect = r; }
+        void setPos(SDL_Point p) override { optionRect.x = p.x; optionRect.y = p.y; }
+
+        
+
+        SDL_FRect decBtn() const { return { optionRect.x, optionRect.y, optionRect.h, optionRect.h }; }
+        SDL_FRect incBtn() const { return { optionRect.x + optionRect.w - optionRect.h, optionRect.y, optionRect.h, optionRect.h }; }
+        SDL_FRect fieldLabel() const {
+            float bw = optionRect.h;
+            return { optionRect.x + bw, optionRect.y, optionRect.w - bw * 2.0f, optionRect.h };
+        }
+
+        static bool inRect(float x, float y, SDL_FRect r) {
+            return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+        }
+
+        void drawCentredText(const char* str, SDL_FRect r, SDL_Color c) {
+            TTF_Text* t = TTF_CreateText(textEngine, font, str, 0);
+            if (!t) return;
+            TTF_SetTextColor(t, c.r, c.g, c.b, c.a);
+            TTF_DrawRendererText(t, r.x + r.w * 0.35f, r.y + (r.h - 20.0f) * 0.5f);
+            TTF_DestroyText(t);
+        }
+
+        bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetX, float offsetY) override {
+            SDL_FRect originalRect = optionRect;
+            originalRect.x -= offsetX;
+            originalRect.y -= offsetY;
+            auto restore = [&]() { optionRect = originalRect; };
+            
+            if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                float mx = ev.button.x, my = ev.button.y;
+                
+                if (inRect(mx, my, decBtn())) { 
+                    restore(); 
+                    if (currentOption > 0) {
+                        currentOption -= 1; 
+                    }
+                    return true; 
+                }
+                if (inRect(mx, my, incBtn())) { 
+                    restore();
+                    // FIX 1: Prevent out-of-bounds. Valid indices are 0 to size()-1
+                    if (currentOption < (int)options.size() - 1) {
+                        currentOption += 1;
+                    }
+                    // FIX 2: Must return true to consume the event and prevent fall-through!
+                    return true; 
+                }
+            }
+            restore(); 
+            return false;
+        }
+
+        void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
+            SDL_FRect dec = decBtn(); dec.y -= offsetY;
+            SDL_FRect inc = incBtn(); inc.y -= offsetY;
+            bool inDec = inRect(cursorX, cursorY, dec);
+            bool inInc = inRect(cursorX, cursorY, inc);
+            
+            if (confirmDown && !confirmDownLastFrame) {
+                if (inDec) {
+                    if (currentOption > 0) {
+                        currentOption -= 1; 
+                    }
+                }
+                else if (inInc) {
+                    // FIX 1 applied here too
+                    if (currentOption < (int)options.size() - 1) {
+                        currentOption += 1;
+                    }
+                }
+            }
+        }
+
+        void render(float offsetX, float offsetY) override {
+            SDL_FRect originalRect = optionRect;
+            optionRect.y -= offsetY;
+            
+            float mx, my;
+            SDL_GetMouseState(&mx, &my);
+            
+            SDL_FRect dec = decBtn(), inc = incBtn();
+            auto btnCol = [&](SDL_FRect b) -> SDL_Color {
+                return inRect(mx, my, b) ? SDL_Color{80,80,80,255} : SDL_Color{60,60,60,255};
+            };
+            
+            SDL_SetRenderDrawColor(renderer, btnCol(dec).r, btnCol(dec).g, btnCol(dec).b, 255);
+            SDL_RenderFillRect(renderer, &dec);
+            SDL_SetRenderDrawColor(renderer, btnCol(inc).r, btnCol(inc).g, btnCol(inc).b, 255);
+            SDL_RenderFillRect(renderer, &inc);
+            
+            drawCentredText("-", dec, {220,220,220,255});
+            drawCentredText("+", inc, {220,220,220,255});
+            
+            SDL_FRect lbl = fieldLabel();
+            SDL_Color bg = SDL_Color{255,255,255,255};
+            SDL_Color brd = SDL_Color{130,130,130,255};
+            
+            // FIX 3: Actually draw the background and border for the label area!
+            SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, bg.a);
+            SDL_RenderFillRect(renderer, &lbl);
+            SDL_SetRenderDrawColor(renderer, brd.r, brd.g, brd.b, brd.a);
+            SDL_RenderRect(renderer, &lbl);
+            
+            SDL_Color tc = SDL_Color{20,20,20,255};
+            
+            // FIX 4: Handle empty options safely to prevent crashes
+            std::string displayText = options.empty() ? "[Empty]" : options[currentOption];
+            
+            TTF_Text* t = TTF_CreateText(textEngine, font, displayText.c_str(), 0);
+            if (t) {
+                TTF_SetTextColor(t, tc.r, tc.g, tc.b, tc.a);
+                TTF_DrawRendererText(t, lbl.x + 6.0f, lbl.y + (lbl.h - 20.0f) * 0.5f);
+                TTF_DestroyText(t);
+            }
+            
+            optionRect = originalRect;
+        }
+
+        // Returns the currently selected string safely
+        std::string getCurrentOption() const { 
+            return options.empty() ? "" : options[currentOption]; 
+        }
+        
+        // Helper to get the raw index if needed
+        int getCurrentIndex() const { return currentOption; }
     };
 
     class LineEdit : public ITextInput, public IGuiElement {
@@ -668,8 +851,9 @@ namespace Gui {
         const std::string& getPlaceholder() const { return placeholder; }
         void setPlaceholder(const std::string& p) { placeholder = p; }
 
-        bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetY) override {
+        bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetX, float offsetY) override {
             SDL_FRect originalRect = rect;
+            rect.x -= offsetX;
             rect.y -= offsetY;
             auto restore = [&]() { rect = originalRect; };
 
@@ -689,8 +873,8 @@ namespace Gui {
             restore(); return false;
         }
 
-        void handleGamepad(float cursorX, float cursorY, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
-            SDL_FRect r = rect; r.y -= offsetY;
+        void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
+            SDL_FRect r = rect; r.x -= offsetX; r.y -= offsetY; 
             bool hit = cursorX >= r.x && cursorX <= r.x + r.w && cursorY >= r.y && cursorY <= r.y + r.h;
             if (confirmDown && !confirmDownLastFrame) {
                 if (hit) {
@@ -701,30 +885,101 @@ namespace Gui {
             }
         }
 
-        void render(float offsetY) override {
+        void render(float offsetX, float offsetY) override {
             SDL_FRect originalRect = rect;
-            rect.y -= offsetY; // Temporarily offset
-            SDL_Color bg = active ? SDL_Color{255,255,255,255} : SDL_Color{245,245,245,255};
+            rect.x -= offsetX;
+            rect.y -= offsetY;
+            
+            SDL_Color bg = active ? SDL_Color{255,255,255,255} : SDL_Color{245,245,255,255};
             SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, bg.a);
             SDL_RenderFillRect(renderer, &rect);
             SDL_Color border = active ? SDL_Color{52,110,235,255} : SDL_Color{130,130,130,255};
             SDL_SetRenderDrawColor(renderer, border.r, border.g, border.b, border.a);
             SDL_RenderRect(renderer, &rect);
-            if (!font || !textEngine) return;
+            
+            if (!font || !textEngine) {
+                rect = originalRect;
+                return;
+            }
+            
             bool showPlaceholder = text.empty() && !active;
             const std::string& display = showPlaceholder ? placeholder : text;
             SDL_Color col = showPlaceholder ? SDL_Color{150,150,150,255} : SDL_Color{20,20,20,255};
+            
             std::string rendered = display;
             if (active) {
                 Uint64 ticks = SDL_GetTicks();
                 if ((ticks / 500) % 2 == 0) rendered += "|";
             }
-            TTF_Text* t = TTF_CreateText(textEngine, font, rendered.c_str(), 0);
-            if (t) {
-                TTF_SetTextColor(t, col.r, col.g, col.b, col.a);
-                TTF_DrawRendererText(t, rect.x + 8.0f, rect.y + (rect.h - 20.0f) * 0.5f);
-                TTF_DestroyText(t);
+            
+            // Calculate text width
+            int textWidth = 0, textHeight = 0;
+            TTF_GetStringSize(font, rendered.c_str(), rendered.size(), &textWidth, &textHeight);
+            
+            float availableWidth = rect.w - 16.0f; // padding on both sides
+            float textStartX = rect.x + 8.0f;
+            float renderX = textStartX;
+            
+            // Horizontal scrolling logic
+            if (textWidth > availableWidth && !rendered.empty()) {
+                // Need to scroll - find the right starting position
+                int visibleStart = 0;
+                int accumulatedWidth = 0;
+                
+                // Measure characters to find where to start displaying
+                for (size_t i = 0; i < rendered.size(); ++i) {
+                    int charW = 0, charH = 0;
+                    std::string ch = rendered.substr(i, 1);
+                    TTF_GetStringSize(font, ch.c_str(), 1, &charW, &charH);
+                    
+                    if (i < rendered.size() - 1) { // Don't count cursor for scroll calculation
+                        accumulatedWidth += charW;
+                    }
+                    
+                    // If we've exceeded available width, start from here
+                    if (accumulatedWidth > availableWidth) {
+                        visibleStart = (int)i;
+                        break;
+                    }
+                }
+                
+                // If text still doesn't fit, show the end of the text
+                if (visibleStart == 0 && accumulatedWidth > availableWidth) {
+                    // Work backwards to find what fits
+                    visibleStart = 0;
+                    accumulatedWidth = 0;
+                    for (int i = (int)rendered.size() - 1; i >= 0; --i) {
+                        int charW = 0, charH = 0;
+                        std::string ch = rendered.substr(i, 1);
+                        TTF_GetStringSize(font, ch.c_str(), 1, &charW, &charH);
+                        accumulatedWidth += charW;
+                        if (accumulatedWidth > availableWidth) {
+                            visibleStart = i + 1;
+                            break;
+                        }
+                    }
+                }
+                
+                // Render visible portion
+                if (visibleStart < (int)rendered.size()) {
+                    std::string visibleText = rendered.substr(visibleStart);
+                    TTF_Text* t = TTF_CreateText(textEngine, font, visibleText.c_str(), 0);
+                    if (t) {
+                        TTF_SetTextColor(t, col.r, col.g, col.b, col.a);
+                        TTF_DrawRendererText(t, textStartX, rect.y + (rect.h - 20.0f) * 0.5f);
+                        TTF_DestroyText(t);
+                    }
+                }
+            } else {
+                // Text fits - render normally
+                TTF_Text* t = TTF_CreateText(textEngine, font, rendered.c_str(), 0);
+                if (t) {
+                    TTF_SetTextColor(t, col.r, col.g, col.b, col.a);
+                    TTF_DrawRendererText(t, textStartX, rect.y + (rect.h - 20.0f) * 0.5f);
+                    TTF_DestroyText(t);
+                }
             }
+            
             rect = originalRect;
         }
 
@@ -951,16 +1206,16 @@ namespace Gui {
         void setText(const std::string& t) { textStr = t; updateTextTexture(); }
 
         // IGuiElement pure virtual overrides — delegate to Impl helpers
-        void render(float offsetY = 0.0f) override { renderImpl(offsetY); }
-        void handleGamepad(float cursorX, float cursorY, float offsetY, SDL_Window* /*window*/,
-                           bool confirmDown, bool confirmDownLastFrame) override {
-            handleGamepadImpl(cursorX, cursorY, offsetY, confirmDown, confirmDownLastFrame);
+        void render(float offsetX = 0.0f, float offsetY = 0.0f) override { renderImpl(offsetX, offsetY); }
+        void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY, SDL_Window* /*window*/,
+                        bool confirmDown, bool confirmDownLastFrame) override {
+            handleGamepadImpl(cursorX, cursorY, offsetX, offsetY, confirmDown, confirmDownLastFrame);
         }
 
-        void handleGamepad(float cursorX, float cursorY, float offsetY, bool confirmDown, bool confirmDownLastFrame) {
-            handleGamepadImpl(cursorX, cursorY, offsetY, confirmDown, confirmDownLastFrame);
+        void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY, bool confirmDown, bool confirmDownLastFrame) {
+            handleGamepadImpl(cursorX, cursorY, offsetX, offsetY, confirmDown, confirmDownLastFrame);
         }
-        void render(float offsetY, float /*cursorX*/, float /*cursorY*/) { renderImpl(offsetY); }
+        void render(float offsetX, float offsetY, float /*cursorX*/, float /*cursorY*/) { renderImpl(offsetX, offsetY); }
 
         std::function<void()> onClicked;
 
@@ -979,14 +1234,15 @@ namespace Gui {
 
     public:
 
-        void handleEventImpl(const SDL_Event& e, float offsetY) {
+        void handleEventImpl(const SDL_Event& e, float offsetX, float offsetY) {
             if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) {
                 float mouseX, mouseY;
                 if (e.type == SDL_EVENT_MOUSE_MOTION) { mouseX = e.motion.x; mouseY = e.motion.y; }
                 else { mouseX = e.button.x; mouseY = e.button.y; }
+                float visualX = position.x - offsetX;
                 float visualY = position.y - offsetY;
-                bool inside = (mouseX >= position.x) && (mouseX <= position.x + width) &&
-                              (mouseY >= visualY) && (mouseY <= visualY + height);
+                bool inside = (mouseX >= visualX) && (mouseX <= visualX + width) &&
+                            (mouseY >= visualY) && (mouseY <= visualY + height);
                 if (!inside) {
                     isHovered = false; isPressed = false; currentColor = idleColor;
                 } else {
@@ -1002,31 +1258,25 @@ namespace Gui {
             }
         }
 
-        bool handleEvent(const SDL_Event & ev, SDL_Window* window, float offsetY) override {
-            handleEventImpl(ev, offsetY);
-            
-            // Consume the event if the mouse is inside the button to prevent 
-            // it from falling through to the editor and causing accidental deselections.
-            if (ev.type == SDL_EVENT_MOUSE_MOTION || 
-                ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN || 
-                ev.type == SDL_EVENT_MOUSE_BUTTON_UP) {
-                
+        bool handleEvent(const SDL_Event & ev, SDL_Window* window, float offsetX, float offsetY) override {
+            handleEventImpl(ev, offsetX, offsetY);
+            if (ev.type == SDL_EVENT_MOUSE_MOTION || ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN || ev.type == SDL_EVENT_MOUSE_BUTTON_UP) {
                 float mouseX = (ev.type == SDL_EVENT_MOUSE_MOTION) ? ev.motion.x : ev.button.x;
                 float mouseY = (ev.type == SDL_EVENT_MOUSE_MOTION) ? ev.motion.y : ev.button.y;
-                
+                float visualX = position.x - offsetX;
                 float visualY = position.y - offsetY;
-                bool inside = (mouseX >= position.x) && (mouseX <= position.x + width) &&
+                bool inside = (mouseX >= visualX) && (mouseX <= visualX + width) &&
                             (mouseY >= visualY) && (mouseY <= visualY + height);
-                            
                 if (inside) return true;
             }
             return false;
         }
 
-        void handleGamepadImpl(float cursorX, float cursorY, float offsetY, bool confirmDown, bool confirmDownLastFrame) {
+        void handleGamepadImpl(float cursorX, float cursorY, float offsetX, float offsetY, bool confirmDown, bool confirmDownLastFrame) {
+            float visualX = position.x - offsetX;
             float visualY = position.y - offsetY;
-            bool inside = (cursorX >= position.x) && (cursorX <= position.x + width) &&
-                          (cursorY >= visualY) && (cursorY <= visualY + height);
+            bool inside = (cursorX >= visualX) && (cursorX <= visualX + width) &&
+                        (cursorY >= visualY) && (cursorY <= visualY + height);
             if (!inside) {
                 if (!isHovered) { isPressed = false; currentColor = idleColor; }
                 return;
@@ -1041,8 +1291,8 @@ namespace Gui {
             if (!isPressed) currentColor = hoverColor;
         }
 
-        void renderImpl(float offsetY) {
-            SDL_FRect fillRect = { position.x, position.y - offsetY, width, height };
+        void renderImpl(float offsetX, float offsetY) {
+            SDL_FRect fillRect = { position.x - offsetX, position.y - offsetY, width, height };
             SDL_SetRenderDrawColor(renderer, currentColor.r, currentColor.g, currentColor.b, currentColor.a);
             SDL_RenderFillRect(renderer, &fillRect);
             if (textTexture) {
@@ -1098,10 +1348,19 @@ namespace Gui {
         float getWidth()        const override { return rect.w; }
         float getHeight()       const override { return rect.h; }
         void  setRect(SDL_FRect r) override {
+            const float dx = r.x - rect.x;
+            const float dy = r.y - rect.y;
             rect = r;
+            if (dx != 0.0f || dy != 0.0f) shiftChildren(dx, dy);
             refreshScrollbarGeometry();
         }
-        void setPos(SDL_Point p) override {rect.x = p.x; rect.y = p.y; refreshScrollbarGeometry();};
+        void setPos(SDL_Point p) override {
+            const float dx = (float)p.x - rect.x;
+            const float dy = (float)p.y - rect.y;
+            rect.x = p.x; rect.y = p.y;
+            if (dx != 0.0f || dy != 0.0f) shiftChildren(dx, dy);
+            refreshScrollbarGeometry();
+        };
 
         // Children are owned by the Panel
         void addChild(std::unique_ptr<IGuiElement> child) {
@@ -1132,36 +1391,21 @@ namespace Gui {
         // drawn at its scene-space position.  Children are scrolled by the
         // panel's own panelScrollOffset.
         // ------------------------------------------------------------------
-        void render(float /*editorOffsetY*/ = 0.0f) override {
-            // Background
-            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-            SDL_SetRenderDrawColor(renderer, bgColor.r, bgColor.g, bgColor.b, bgColor.a);
-            SDL_RenderFillRect(renderer, &rect);
-            if (showBorder) {
-                SDL_SetRenderDrawColor(renderer, borderColor.r, borderColor.g, borderColor.b, borderColor.a);
-                SDL_RenderRect(renderer, &rect);
-            }
-
-            // Clip children to panel bounds via SDL viewport / render clip
-            SDL_Rect clip = {
-                (int)rect.x, (int)rect.y,
-                (int)rect.w, (int)rect.h
-            };
+        void render(float offsetX = 0.0f, float editorOffsetY = 0.0f) override {
+            SDL_FRect originalRect = rect;
+            rect.x -= offsetX;
+            rect.y -= editorOffsetY;
+            // ... Background and border drawing ...
+            SDL_Rect clip = { (int)rect.x, (int)rect.y, (int)rect.w, (int)rect.h };
             SDL_SetRenderClipRect(renderer, &clip);
-
-            // Children receive panelScrollOffset as their offsetY
             for (auto& child : children)
-                child->render(panelScrollOffset);
-
+                child->render(offsetX, editorOffsetY + panelScrollOffset);
             SDL_SetRenderClipRect(renderer, nullptr);
-
-            // Scrollbar drawn on top (outside clip so thumb isn't cut)
-            scrollbar.render(renderer);
-
-            // Editor selection outlines drawn outside the clip rect so they're always visible
+            scrollbar.render(renderer, offsetX, editorOffsetY);
             for (auto& child : children)
-                child->renderSelectionOutline(renderer);
-            renderSelectionOutline(renderer);
+                child->renderSelectionOutline(renderer, offsetX, editorOffsetY + panelScrollOffset);
+            renderSelectionOutline(renderer, offsetX, editorOffsetY);
+            rect = originalRect; // Restore
         }
 
         // ------------------------------------------------------------------
@@ -1169,39 +1413,39 @@ namespace Gui {
         // the panel.  Wheel events inside the panel scroll the panel, not
         // the editor.
         // ------------------------------------------------------------------
-        bool handleEvent(const SDL_Event& ev, SDL_Window* window,
-                         float /*editorOffsetY*/ = 0.0f) override {
+        bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetX = 0.0f, float editorOffsetY = 0.0f) override {
             float mx = 0, my = 0;
             bool hasPos = getEventPos(ev, mx, my);
+            SDL_FRect shiftedRect = { rect.x - offsetX, rect.y - editorOffsetY, rect.w, rect.h };
 
-            // Wheel events: only consume if mouse is inside panel
             if (ev.type == SDL_EVENT_MOUSE_WHEEL) {
-                if (hasPos && inRect(mx, my, rect)) {
-                    scrollbar.handleEvent(ev);
-                    return true;
+                if (hasPos && inRect(mx, my, shiftedRect)) {
+                    float origTX = scrollbar.trackX, origTY = scrollbar.trackY;
+                    scrollbar.trackX -= offsetX; scrollbar.trackY -= editorOffsetY;
+                    bool res = scrollbar.handleEvent(ev);
+                    scrollbar.trackX = origTX; scrollbar.trackY = origTY;
+                    return res;
                 }
                 return false;
             }
+            if (hasPos && !inRect(mx, my, shiftedRect)) return false;
+            
+            float origTX = scrollbar.trackX, origTY = scrollbar.trackY;
+            scrollbar.trackX -= offsetX; scrollbar.trackY -= editorOffsetY;
+            bool sbRes = scrollbar.handleEvent(ev);
+            scrollbar.trackX = origTX; scrollbar.trackY = origTY;
+            if (sbRes) return true;
 
-            // For all other pointer events, only forward if inside panel
-            if (hasPos && !inRect(mx, my, rect)) return false;
-
-            // Scrollbar gets first crack at drag events
-            if (scrollbar.handleEvent(ev)) return true;
-
-            // Forward to children (they use panelScrollOffset as their offsetY)
             for (auto& child : children)
-                if (child->handleEvent(ev, window, panelScrollOffset)) return true;
-
-            return inRect(mx, my, rect); // consume clicks inside panel
+                if (child->handleEvent(ev, window, offsetX, editorOffsetY + panelScrollOffset)) return true;
+            return inRect(mx, my, shiftedRect);
         }
 
-        void handleGamepad(float cursorX, float cursorY, float /*editorOffsetY*/,
-                           SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
-            if (!inRect(cursorX, cursorY, rect)) return;
+        void handleGamepad(float cursorX, float cursorY, float offsetX, float editorOffsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
+            SDL_FRect shiftedRect = { rect.x - offsetX, rect.y - editorOffsetY, rect.w, rect.h };
+            if (!inRect(cursorX, cursorY, shiftedRect)) return;
             for (auto& child : children)
-                child->handleGamepad(cursorX, cursorY, panelScrollOffset,
-                                     window, confirmDown, confirmDownLastFrame);
+                child->handleGamepad(cursorX, cursorY, offsetX, editorOffsetY + panelScrollOffset, window, confirmDown, confirmDownLastFrame);
         }
 
         float getPanelScrollOffset() const { return panelScrollOffset; }
@@ -1223,10 +1467,28 @@ namespace Gui {
                                   computeContentHeight(), rect.h - 4);
         }
 
+        // Moves every child by (dx, dy) so they stay glued to the panel
+        // whenever the panel itself is repositioned (e.g. re-centered on
+        // window resize). Without this, children keep their old baked
+        // absolute coordinates and visually detach from the panel.
+        void shiftChildren(float dx, float dy) {
+            for (auto& c : children) {
+                c->setPos(SDL_Point{
+                    (int)std::lround(c->getX() + dx),
+                    (int)std::lround(c->getY() + dy)
+                });
+            }
+        }
+
         float computeContentHeight() const {
+            // NOTE: child Y is absolute screen-space; measure relative to
+            // the panel's own rect.y, not the raw absolute value, or the
+            // "does this content need to scroll" result (and therefore
+            // scrollbar visibility) ends up depending on where the panel
+            // happens to sit on screen instead of actual content size.
             float bottom = 0;
             for (auto& c : children)
-                bottom = std::max(bottom, c->getY() + c->getHeight());
+                bottom = std::max(bottom, (c->getY() - rect.y) + c->getHeight());
             return bottom + 8.0f; // small padding
         }
 
@@ -1278,23 +1540,20 @@ namespace Gui {
             layoutChildren();
         }
 
-        void render(float offsetY) override {
-            for (auto& child : children)
-                child->render(offsetY);
+        void render(float offsetX, float offsetY) override {
+            for (auto& child : children) child->render(offsetX, offsetY);
         }
 
-        bool handleEvent(const SDL_Event& e, SDL_Window* window, float offsetY) override {
+        bool handleEvent(const SDL_Event& e, SDL_Window* window, float offsetX, float offsetY) override {
             bool consumed = false;
             for (auto& child : children)
-                if (child->handleEvent(e, window, offsetY))
-                    consumed = true;
+                if (child->handleEvent(e, window, offsetX, offsetY)) consumed = true;
             return consumed;
         }
 
-        void handleGamepad(float cursorX, float cursorY, float offsetY, SDL_Window* window,
-                        bool confirmDown, bool confirmDownLastFrame) override {
+        void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
             for (auto& child : children)
-                child->handleGamepad(cursorX, cursorY, offsetY, window, confirmDown, confirmDownLastFrame);
+                child->handleGamepad(cursorX, cursorY, offsetX, offsetY, window, confirmDown, confirmDownLastFrame);
         }
 
         const std::vector<std::unique_ptr<IGuiElement>>& getChildren() const { return children; }
@@ -1523,7 +1782,76 @@ namespace Gui {
     // for whichever IGuiElement (or entity) is currently selected.
     // Lives entirely in screen-space; does not scroll with the editor.
     // ----------------------------------------------------------------
+    class AddChildDialog : public Dialog {
+    public:
+        AddChildDialog(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
+                    SDL_Window* window, Panel* parentPanel);
+
+        bool onHandleGamepad(float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame) override;
+
+        Panel* parentPanel = nullptr;   // the panel we are adding a child to
+        OptionBox typeOption;
+        std::vector<std::string> options = {"Button", "LineEdit", "SpinBox"};
+
+    protected:
+        void onOpen() override;
+        bool onHandleEvent(const SDL_Event& ev) override;
+        void onRender(SDL_FRect win) override;
+        void onReset() override;
+    };
+
     class SceneInspector {
+    private:
+        std::vector<std::unique_ptr<IGuiElement>>* guiElementsPtr = nullptr;
+        AddChildDialog* addChildDialog = nullptr;
+        struct ChildButtonInfo {
+            SDL_FRect rect;
+            size_t childIndex;
+        };
+        std::vector<ChildButtonInfo> childRemoveButtons;
+        SDL_FRect addChildButtonRect;
+        float inspectorScrollOffset = 0.0f;
+        Gui::Scrollbar inspectorScrollbar;
+
+        void buildPanelChildrenFields(Gui::Panel* panel) {
+            // This function is called from render() to generate the child list UI.
+            // We'll implement it directly in render() to avoid storing extra state.
+        }
+
+        void handlePanelChildEvents(const SDL_Event& ev) {
+            if (ev.type != SDL_EVENT_MOUSE_BUTTON_DOWN || ev.button.button != SDL_BUTTON_LEFT)
+                return;
+            float mx = ev.button.x, my = ev.button.y;
+
+            // Check "Add Child" button (rendered in render())
+            if (mx >= addChildButtonRect.x && mx <= addChildButtonRect.x + addChildButtonRect.w &&
+                my >= addChildButtonRect.y && my <= addChildButtonRect.y + addChildButtonRect.h) {
+                if (addChildDialog && target && target->getType() == "Panel") {
+                    addChildDialog->parentPanel = static_cast<Panel*>(target);
+                    modeBeforeDialog = currentEditMode;
+                    currentEditMode = EditMode::Dialog;
+                    addChildDialog->open();
+                }
+                return;
+            }
+
+            // Check remove buttons
+            for (auto& info : childRemoveButtons) {
+                if (mx >= info.rect.x && mx <= info.rect.x + info.rect.w &&
+                    my >= info.rect.y && my <= info.rect.y + info.rect.h) {
+                    if (target && target->getType() == "Panel") {
+                        auto* panel = static_cast<Panel*>(target);
+                        auto& children = panel->getChildrenMutable();
+                        if (info.childIndex < children.size()) {
+                            children.erase(children.begin() + info.childIndex);
+                            rebuildFields();  // refresh the inspector
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
     public:
         static constexpr float PANEL_W = 260.0f;
 
@@ -1534,8 +1862,14 @@ namespace Gui {
         }
 
         SceneInspector(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f, SDL_Window* w)
-            : renderer(r), textEngine(te), font(f), window(w)
-        {}
+            : renderer(r), textEngine(te), font(f), window(w) {
+            inspectorScrollbar.setOrientation(Gui::ScrollOrientation::Vertical);
+            inspectorScrollbar.onChange = [this](float v){ inspectorScrollOffset = v; };
+        }
+
+        void setGuiElementsVector(std::vector<std::unique_ptr<IGuiElement>>* vec) { guiElementsPtr = vec; }
+
+        void setAddChildDialog(AddChildDialog* dialog) { addChildDialog = dialog; }
 
         // Called once per frame — pass the scene GUI elements so the
         // inspector can both read and write their properties.
@@ -1544,13 +1878,13 @@ namespace Gui {
             commitAllFields(); // flush any pending edits when switching
             target = elem;
             rebuildFields();
+            inspectorScrollOffset = 0.0f; // reset scroll on new target
         }
 
         void handleGamepad(float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame) {
             if (!target) return;
             for (auto& f : fields) {
-                // LineEdit::handleGamepad signature: (float, float, float, SDL_Window*, bool, bool)
-                f.edit.handleGamepad(cursorX, cursorY, 0.0f, window, confirmDown, confirmDownLastFrame);
+                f.edit.handleGamepad(cursorX, cursorY, 0.0f, 0.0f, window, confirmDown, confirmDownLastFrame);
             }
         }
 
@@ -1559,13 +1893,19 @@ namespace Gui {
         // Returns true if the event was consumed by the inspector
         bool handleEvent(const SDL_Event& ev) {
             if (!target) return false;
+            // Forward scrollbar events
+            if (inspectorScrollbar.handleEvent(ev)) return true;
+
             bool consumed = false;
             for (auto& f : fields)
-                if (f.edit.handleEvent(ev, window, 0.0f)) consumed = true;
+                if (f.edit.handleEvent(ev, window, 0.0f, 0.0f)) consumed = true;
             // Commit on Enter/Tab
             if (ev.type == SDL_EVENT_KEY_DOWN &&
                 (ev.key.key == SDLK_RETURN || ev.key.key == SDLK_TAB)) {
                 commitAllFields();
+            }
+            if (target && target->getType() == "Panel") {
+                handlePanelChildEvents(ev);
             }
             return consumed;
         }
@@ -1589,7 +1929,41 @@ namespace Gui {
             SDL_SetRenderDrawColor(renderer, 60, 60, 75, 255);
             SDL_RenderRect(renderer, &bg);
 
-            float y = 10.0f;
+            // Compute total content height
+            float contentHeight = 0.0f;
+            // Title and divider
+            contentHeight += 10.0f + 22.0f + 22.0f + 8.0f; // inspector title, element type, divider
+            // Each field: label (32) + edit (32) + 8 spacing
+            contentHeight += fields.size() * (32.0f + 32.0f + 8.0f);
+            if (target && target->getType() == "Panel") {
+                contentHeight += 38.0f; // Add Child button + spacing
+                auto* panel = static_cast<Panel*>(target);
+                contentHeight += panel->getChildren().size() * (26.0f + 4.0f); // each child row + spacing
+            }
+            contentHeight += 8.0f; // bottom padding for hint
+
+            // Set scrollbar geometry (right side)
+            const float sbW = 12.0f;
+            float viewHeight = windowHeight;
+            inspectorScrollbar.setGeometry(
+                panelX() + PANEL_W - sbW, 0.0f, sbW, viewHeight,
+                contentHeight, viewHeight
+            );
+
+            // Update offset from scrollbar
+            inspectorScrollOffset = inspectorScrollbar.offset;
+
+            // Clip to panel area (exclude scrollbar area)
+            SDL_Rect clip = {
+                (int)panelX(),
+                0,
+                (int)(PANEL_W - sbW),
+                (int)viewHeight
+            };
+            SDL_SetRenderClipRect(renderer, &clip);
+
+            // Draw content with vertical offset
+            float y = 10.0f - inspectorScrollOffset;
             drawLabel("Inspector", panelX() + 10, y, {200,200,220,255}); y += 22;
             drawLabel(("[" + target->getType() + "]").c_str(), panelX() + 10, y, {140,140,180,255}); y += 22;
 
@@ -1601,13 +1975,46 @@ namespace Gui {
             for (auto& f : fields) {
                 drawLabel(f.label.c_str(), panelX() + 8, y, {160,160,190,255});
                 y += 32;
-                f.edit.setRect({ panelX() + 8, y, PANEL_W - 20, 26 });
-                f.edit.render(0.0f);
+                f.edit.setRect({ panelX() + 8, y, PANEL_W - sbW - 20, 26 });
+                f.edit.render(0.0f, 0.0f);
                 y += 32;
+            }
+
+            if (target && target->getType() == "Panel") {
+                auto* panel = static_cast<Panel*>(target);
+                const auto& children = panel->getChildren();
+
+                // "Add Child" button
+                SDL_FRect addBtn = { panelX() + 8, y, PANEL_W - sbW - 20, 30 };
+                addChildButtonRect = addBtn;
+                SDL_SetRenderDrawColor(renderer, 80, 120, 200, 255);
+                SDL_RenderFillRect(renderer, &addBtn);
+                drawLabel("+ Add Child", addBtn.x + 10, addBtn.y + 5, {255,255,255,255});
+                y += addBtn.h + 8;
+
+                // List children with remove buttons
+                childRemoveButtons.clear();
+                for (size_t i = 0; i < children.size(); ++i) {
+                    auto* child = children[i].get();
+                    SDL_FRect row = { panelX() + 8, y, PANEL_W - sbW - 20, 26 };
+                    drawLabel(("Child " + std::to_string(i) + " (" + child->getType() + ")").c_str(),
+                            row.x + 5, row.y + 2, {200,200,220,255});
+                    SDL_FRect removeBtn = { row.x + row.w - 30, row.y, 26, 26 };
+                    SDL_SetRenderDrawColor(renderer, 200, 40, 40, 255);
+                    SDL_RenderFillRect(renderer, &removeBtn);
+                    drawLabel("X", removeBtn.x + 8, removeBtn.y + 2, {255,255,255,255});
+                    childRemoveButtons.push_back({removeBtn, i});
+                    y += row.h + 4;
+                }
             }
 
             // Hint
             drawLabel("Enter = commit changes", panelX() + 8, y + 4, {80, 80, 100, 255});
+
+            SDL_SetRenderClipRect(renderer, nullptr);
+
+            // Render scrollbar (on top)
+            inspectorScrollbar.render(renderer, 0.0f, 0.0f);
         }
 
         // Flush all field values into the target element right now.
@@ -1617,15 +2024,40 @@ namespace Gui {
             applyFields();
         }
 
+        // Keeps displayed field text in sync with the target's live values
+        // (e.g. after it was dragged on the canvas), as long as the user
+        // isn't actively typing in that field. Call this once per frame.
+        // Without it, commitAllFields() (fired on deselect, Tab/Enter, or
+        // Save) would re-apply the stale value captured when the field was
+        // first built, silently undoing any external change like a drag.
+        void syncFromTarget() {
+            if (!target) return;
+            for (auto& f : fields) {
+                if (f.edit.isActive()) continue;
+                std::string live = liveValueForKey(f.key);
+                if (live != f.lastSyncedText) {
+                    f.edit.clear();
+                    for (char c : live) f.edit.appendText(std::string(1, c));
+                    f.lastSyncedText = live;
+                }
+            }
+        }
+
     private:
         struct Field {
             std::string label;
             std::string key;   // identifies which property this maps to
             LineEdit    edit;
+            // Last value we pushed into (or committed from) this field.
+            // Lets us tell "the user typed something here" apart from
+            // "the target changed externally" (e.g. a mouse drag), so
+            // committing never stomps a change the field doesn't know about.
+            std::string lastSyncedText;
             Field(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f,
-                  const std::string& lbl, const std::string& k, const std::string& val)
+                const std::string& lbl, const std::string& k, const std::string& val)
                 : label(lbl), key(k),
-                  edit(r, te, f, {0,0,1,1}, "")
+                edit(r, te, f, {0,0,1,1}, ""),
+                lastSyncedText(val)
             {
                 // Pre-fill with current value
                 for (char c : val) edit.appendText(std::string(1,c));
@@ -1686,9 +2118,45 @@ namespace Gui {
             }
         }
 
+        // Returns the current live value (formatted the same way rebuildFields
+        // pre-fills it) for the given field key, read straight from target.
+        std::string liveValueForKey(const std::string& key) const {
+            char buf[32];
+            if (key == "x") { std::snprintf(buf, sizeof(buf), "%.1f", target->getX());      return buf; }
+            if (key == "y") { std::snprintf(buf, sizeof(buf), "%.1f", target->getY());      return buf; }
+            if (key == "w") { std::snprintf(buf, sizeof(buf), "%.1f", target->getWidth());  return buf; }
+            if (key == "h") { std::snprintf(buf, sizeof(buf), "%.1f", target->getHeight()); return buf; }
+
+            if (target->getType() == "Button") {
+                auto* b = static_cast<Button*>(target);
+                if (key == "btn_text") return b->getText();
+            } else if (target->getType() == "LineEdit") {
+                auto* le = static_cast<LineEdit*>(target);
+                if (key == "le_placeholder") return le->getPlaceholder();
+            } else if (target->getType() == "SpinBox") {
+                auto* sb = static_cast<SpinBox*>(target);
+                if (key == "sb_min")  { std::snprintf(buf, sizeof(buf), "%.1f", sb->getMin());   return buf; }
+                if (key == "sb_max")  { std::snprintf(buf, sizeof(buf), "%.1f", sb->getMax());   return buf; }
+                if (key == "sb_step") { std::snprintf(buf, sizeof(buf), "%.1f", sb->getStep());  return buf; }
+                if (key == "sb_val")  { std::snprintf(buf, sizeof(buf), "%.1f", sb->getValue()); return buf; }
+            } else if (target->getType() == "Panel") {
+                auto* p = static_cast<Panel*>(target);
+                if (key == "panel_r") { std::snprintf(buf, sizeof(buf), "%d", (int)p->bgColor.r); return buf; }
+                if (key == "panel_g") { std::snprintf(buf, sizeof(buf), "%d", (int)p->bgColor.g); return buf; }
+                if (key == "panel_b") { std::snprintf(buf, sizeof(buf), "%d", (int)p->bgColor.b); return buf; }
+                if (key == "panel_a") { std::snprintf(buf, sizeof(buf), "%d", (int)p->bgColor.a); return buf; }
+            }
+            return "";
+        }
+
         void applyFields() {
             if (!target) return;
 
+            auto changed = [&](const std::string& key) -> bool {
+                for (auto& f : fields)
+                    if (f.key == key) return f.edit.getText() != f.lastSyncedText;
+                return false;
+            };
             auto fval = [&](const std::string& key) -> float {
                 for (auto& f : fields) {
                     if (f.key == key) {
@@ -1702,31 +2170,52 @@ namespace Gui {
                     if (f.key == key) return f.edit.getText();
                 return "";
             };
-
-            // Apply common geometry
-            SDL_FRect r = {
-                fval("x"), fval("y"), fval("w"), fval("h")
+            auto markSynced = [&](const std::string& key) {
+                for (auto& f : fields)
+                    if (f.key == key) f.lastSyncedText = f.edit.getText();
             };
-            if (r.w > 0 && r.h > 0) target->setRect(r);
 
-            // Apply type-specific
+            // Apply common geometry — only touch axes the user actually
+            // edited; fall back to the target's current live value on the
+            // rest, so we never stomp a position/size that changed
+            // externally (e.g. by dragging the element on the canvas).
+            bool xC = changed("x"), yC = changed("y"), wC = changed("w"), hC = changed("h");
+            if (xC || yC || wC || hC) {
+                SDL_FRect r = {
+                    xC ? fval("x") : target->getX(),
+                    yC ? fval("y") : target->getY(),
+                    wC ? fval("w") : target->getWidth(),
+                    hC ? fval("h") : target->getHeight()
+                };
+                if (r.w > 0 && r.h > 0) {
+                    target->setRect(r);
+                    markSynced("x"); markSynced("y"); markSynced("w"); markSynced("h");
+                }
+            }
+
+            // Apply type-specific — same "only if actually edited" rule.
             if (target->getType() == "Button") {
-                std::string t = fstr("btn_text");
-                if (!t.empty()) static_cast<Button*>(target)->setText(t);
+                if (changed("btn_text")) {
+                    std::string t = fstr("btn_text");
+                    if (!t.empty()) { static_cast<Button*>(target)->setText(t); markSynced("btn_text"); }
+                }
             } else if (target->getType() == "LineEdit") {
-                static_cast<LineEdit*>(target)->setPlaceholder(fstr("le_placeholder"));
+                if (changed("le_placeholder")) {
+                    static_cast<LineEdit*>(target)->setPlaceholder(fstr("le_placeholder"));
+                    markSynced("le_placeholder");
+                }
             } else if (target->getType() == "SpinBox") {
                 auto* sb = static_cast<SpinBox*>(target);
-                sb->setMin(fval("sb_min"));
-                sb->setMax(fval("sb_max"));
-                sb->setStep(fval("sb_step"));
-                sb->setValue(fval("sb_val"));
+                if (changed("sb_min"))  { sb->setMin(fval("sb_min"));   markSynced("sb_min"); }
+                if (changed("sb_max"))  { sb->setMax(fval("sb_max"));   markSynced("sb_max"); }
+                if (changed("sb_step")) { sb->setStep(fval("sb_step")); markSynced("sb_step"); }
+                if (changed("sb_val"))  { sb->setValue(fval("sb_val")); markSynced("sb_val"); }
             } else if (target->getType() == "Panel") {
                 auto* p = static_cast<Panel*>(target);
-                p->bgColor.r = (Uint8)std::clamp((int)fval("panel_r"), 0, 255);
-                p->bgColor.g = (Uint8)std::clamp((int)fval("panel_g"), 0, 255);
-                p->bgColor.b = (Uint8)std::clamp((int)fval("panel_b"), 0, 255);
-                p->bgColor.a = (Uint8)std::clamp((int)fval("panel_a"), 0, 255);
+                if (changed("panel_r")) { p->bgColor.r = (Uint8)std::clamp((int)fval("panel_r"), 0, 255); markSynced("panel_r"); }
+                if (changed("panel_g")) { p->bgColor.g = (Uint8)std::clamp((int)fval("panel_g"), 0, 255); markSynced("panel_g"); }
+                if (changed("panel_b")) { p->bgColor.b = (Uint8)std::clamp((int)fval("panel_b"), 0, 255); markSynced("panel_b"); }
+                if (changed("panel_a")) { p->bgColor.a = (Uint8)std::clamp((int)fval("panel_a"), 0, 255); markSynced("panel_a"); }
             }
         }
 
@@ -1749,7 +2238,10 @@ namespace Gui {
         }
 
         EntityInspector(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f, SDL_Window* w)
-            : renderer(r), textEngine(te), font(f), window(w) {}
+            : renderer(r), textEngine(te), font(f), window(w) {
+            inspectorScrollbar.setOrientation(Gui::ScrollOrientation::Vertical);
+            inspectorScrollbar.onChange = [this](float v){ inspectorScrollOffset = v; };
+        }
 
         void setTarget(ECSWorld& w, Entity e) {
             if (world == &w && targetEntity == e) return;
@@ -1757,6 +2249,7 @@ namespace Gui {
             world = &w;
             targetEntity = e;
             rebuildFields();
+            inspectorScrollOffset = 0.0f;
         }
 
         void clearTarget() {
@@ -1764,9 +2257,13 @@ namespace Gui {
             world = nullptr;
             targetEntity = (Entity)-1;
             fields.clear();
+            inspectorScrollOffset = 0.0f;
         }
 
         bool handleEvent(const SDL_Event& ev) {
+            // Handle scrollbar events first
+            if (inspectorScrollbar.handleEvent(ev)) return true;
+
             if (!world || targetEntity == (Entity)-1) return false;
             bool consumed = false;
             for (auto& f : fields) {
@@ -1782,7 +2279,7 @@ namespace Gui {
         void handleGamepad(float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame) {
             if (!world || targetEntity == (Entity)-1) return;
             for (auto& f : fields) {
-                f.widget->handleGamepad(cursorX, cursorY, 0.0f, window, confirmDown, confirmDownLastFrame);
+                f.widget->handleGamepad(cursorX, cursorY, 0.0f, 0.0f, window, confirmDown, confirmDownLastFrame);
             }
         }
 
@@ -1798,23 +2295,52 @@ namespace Gui {
             SDL_SetRenderDrawColor(renderer, 60, 60, 75, 255);
             SDL_RenderRect(renderer, &bg);
 
-            float y = 10.0f;
+            // Compute total content height
+            float contentHeight = 0.0f;
+            contentHeight += 10.0f + 24.0f + 22.0f + 8.0f; // title, ID, divider
+            contentHeight += fields.size() * (32.0f + 32.0f + 8.0f); // each field: label + widget + spacing
+            contentHeight += 8.0f; // bottom hint
+
+            // Set scrollbar geometry
+            const float sbW = 12.0f;
+            float viewHeight = windowHeight;
+            inspectorScrollbar.setGeometry(
+                panelX() + PANEL_W - sbW, 0.0f, sbW, viewHeight,
+                contentHeight, viewHeight
+            );
+            inspectorScrollOffset = inspectorScrollbar.offset;
+
+            // Clip to panel area (exclude scrollbar)
+            SDL_Rect clip = {
+                (int)panelX(),
+                0,
+                (int)(PANEL_W - sbW),
+                (int)viewHeight
+            };
+            SDL_SetRenderClipRect(renderer, &clip);
+
+            float y = 10.0f - inspectorScrollOffset;
             drawLabel("Entity Inspector", panelX() + 10, y, {200,200,220,255}); y += 24;
             drawLabel(("ID: " + std::to_string(targetEntity)).c_str(), panelX() + 10, y, {140,140,180,255}); y += 22;
 
             SDL_SetRenderDrawColor(renderer, 60, 60, 80, 255);
-            SDL_FRect div = { panelX() + 5, y, PANEL_W - 10, 1 };
+            SDL_FRect div = { panelX() + 5, y, PANEL_W - sbW - 10, 1 };
             SDL_RenderFillRect(renderer, &div); y += 8;
 
             for (auto& f : fields) {
                 drawLabel(f.label.c_str(), panelX() + 8, y, {160,160,190,255});
                 y += 32;
-                f.widget->setRect({ panelX() + 8, y, PANEL_W - 20, 26 });
+                f.widget->setRect({ panelX() + 8, y, PANEL_W - sbW - 20, 26 });
                 f.widget->render(0.0f);
                 y += 32;
             }
 
             drawLabel("Enter = commit changes", panelX() + 8, y + 4, {80, 80, 100, 255});
+
+            SDL_SetRenderClipRect(renderer, nullptr);
+
+            // Render scrollbar
+            inspectorScrollbar.render(renderer, 0.0f, 0.0f);
         }
 
         // Only writes to the world if the user actually modified the value
@@ -1910,6 +2436,8 @@ namespace Gui {
         ECSWorld* world = nullptr;
         Entity targetEntity = (Entity)-1;
         std::vector<Field> fields;
+        Gui::Scrollbar inspectorScrollbar;
+        float inspectorScrollOffset = 0.0f;
 
         void rebuildFields() {
             fields.clear();
@@ -1988,6 +2516,963 @@ namespace Gui {
         }
     };
 
+    class TextEditor : public IGuiElement {
+    public:
+        TextEditor(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f, SDL_FRect rct)
+            : renderer(r), textEngine(te), font(f), rect(rct) {
+            lines.push_back("");
+            verticalScrollbar.setOrientation(Gui::ScrollOrientation::Vertical);
+            horizontalScrollbar.setOrientation(Gui::ScrollOrientation::Horizontal);
+            // Set callbacks to update editor scroll when user drags thumb
+            verticalScrollbar.onChange = [this](float v){ scrollY = v; };
+            horizontalScrollbar.onChange = [this](float v){ scrollX = v; };
+            refreshScrollbarGeometry();
+        }
+
+        ~TextEditor() = default;
+
+        // IGuiElement overrides
+        std::string getType() const override { return "TextEditor"; }
+        float getX() const override { return rect.x; }
+        float getY() const override { return rect.y; }
+        float getWidth() const override { return rect.w; }
+        float getHeight() const override { return rect.h; }
+        void setRect(SDL_FRect r) override { rect = r; refreshScrollbarGeometry(); }
+        void setPos(SDL_Point p) override { rect.x = (float)p.x; rect.y = (float)p.y; refreshScrollbarGeometry(); }
+
+    private:
+        int tabWidth = 4;
+
+    public:
+        void setTabWidth(int w) { tabWidth = std::max(1, w); }
+        int getTabWidth() const { return tabWidth; }
+
+        bool handleEvent(const SDL_Event& e, SDL_Window* window, float offsetX, float offsetY) override {
+            if (!visible) return false;
+            // Handle scrollbars first
+            float origVX = verticalScrollbar.trackX, origVY = verticalScrollbar.trackY;
+            float origHX = horizontalScrollbar.trackX, origHY = horizontalScrollbar.trackY;
+            verticalScrollbar.trackX -= offsetX; verticalScrollbar.trackY -= offsetY;
+            horizontalScrollbar.trackX -= offsetX; horizontalScrollbar.trackY -= offsetY;
+            bool sbConsumed = false;
+            if (verticalScrollbar.handleEvent(e)) sbConsumed = true;
+            if (horizontalScrollbar.handleEvent(e)) sbConsumed = true;
+            verticalScrollbar.trackX = origVX; verticalScrollbar.trackY = origVY;
+            horizontalScrollbar.trackX = origHX; horizontalScrollbar.trackY = origHY;
+            if (sbConsumed) {
+                updateScrollbars();
+                return true;
+            }            
+            // Keyboard input
+            if (e.type == SDL_EVENT_KEY_DOWN) {
+                bool shift = (e.key.mod & SDL_KMOD_SHIFT) != 0;
+                bool ctrl  = (e.key.mod & SDL_KMOD_CTRL) != 0;
+                if (ctrl && e.key.key == SDLK_A) {
+                    selAnchorRow = 0; selAnchorCol = 0;
+                    cursorRow = (int)lines.size() - 1;
+                    cursorCol = getLineLength(cursorRow);
+                    hasSelection = true;
+                    return true;
+                }
+                if (ctrl && e.key.key == SDLK_C) {
+                    if (hasSelection) {
+                        auto [sRow, sCol, eRow, eCol] = normalizedSelection();
+                        std::string selectedText = "";
+                        if (sRow == eRow) {
+                            selectedText = lines[sRow].substr(sCol, eCol - sCol);
+                        } else {
+                            selectedText = lines[sRow].substr(sCol) + "\n";
+                            for (int r = sRow + 1; r < eRow; ++r) {
+                                selectedText += lines[r] + "\n";
+                            }
+                            selectedText += lines[eRow].substr(0, eCol);
+                        }
+                        SDL_SetClipboardText(selectedText.c_str());
+                    }
+                    return true;
+                }
+
+                // ── Clipboard: Cut (Ctrl+X) ───────────────────────────────
+                if (ctrl && e.key.key == SDLK_X) {
+                    if (hasSelection) {
+                        auto [sRow, sCol, eRow, eCol] = normalizedSelection();
+                        std::string selectedText = "";
+                        if (sRow == eRow) {
+                            selectedText = lines[sRow].substr(sCol, eCol - sCol);
+                        } else {
+                            selectedText = lines[sRow].substr(sCol) + "\n";
+                            for (int r = sRow + 1; r < eRow; ++r) {
+                                selectedText += lines[r] + "\n";
+                            }
+                            selectedText += lines[eRow].substr(0, eCol);
+                        }
+                        SDL_SetClipboardText(selectedText.c_str());
+                        deleteSelection();
+                        updateScrollbars();
+                    }
+                    return true;
+                }
+
+                // ── Clipboard: Paste (Ctrl+V) ─────────────────────────────
+                if (ctrl && e.key.key == SDLK_V) {
+                    char* clipText = SDL_GetClipboardText();
+                    if (clipText) {
+                        std::string text(clipText);
+                        SDL_free(clipText); // SDL3 requires manual freeing of clipboard strings
+                        
+                        if (hasSelection) deleteSelection();
+                        
+                        for (char c : text) {
+                            if (c == '\n') {
+                                newline();
+                            } else if (c == '\r') {
+                                continue; // Skip Windows carriage returns
+                            } else if (c == '\t') {
+                                insertChar('\t');
+                            } else if (c >= 32 && c < 127) {
+                                insertChar(c);
+                            }
+                        }
+                        updateScrollbars();
+                    }
+                    return true;
+                }
+                switch (e.key.key) {
+                    case SDLK_LEFT:  moveCursor(cursorRow, cursorCol - 1, shift); updateScrollbars(); return true;
+                    case SDLK_RIGHT: moveCursor(cursorRow, cursorCol + 1, shift); updateScrollbars(); return true;
+                    case SDLK_UP:    moveCursor(cursorRow - 1, cursorCol, shift); updateScrollbars(); return true;
+                    case SDLK_DOWN:  moveCursor(cursorRow + 1, cursorCol, shift); updateScrollbars(); return true;
+                    case SDLK_HOME:  moveCursor(cursorRow, 0, shift); updateScrollbars(); return true;
+                    case SDLK_END:   moveCursor(cursorRow, getLineLength(cursorRow), shift); updateScrollbars(); return true;
+                    case SDLK_PAGEUP: {
+                        int rows = (int)(rect.h / LINE_HEIGHT) - 1;
+                        moveCursor(cursorRow - rows, cursorCol, shift);
+                        updateScrollbars();
+                        return true;
+                    }
+                    case SDLK_PAGEDOWN: {
+                        int rows = (int)(rect.h / LINE_HEIGHT) - 1;
+                        moveCursor(cursorRow + rows, cursorCol, shift);
+                        updateScrollbars();
+                        return true;
+                    }
+                    case SDLK_BACKSPACE: backspace(); updateScrollbars(); return true;
+                    case SDLK_DELETE:    deleteChar(); updateScrollbars(); return true;
+                    case SDLK_RETURN:    newline(); updateScrollbars(); return true;
+                    case SDLK_TAB:       insertChar('\t'); updateScrollbars(); return true;
+                    case SDLK_ESCAPE:
+                        // Close via escape key instead of button
+                        if (onClose) onClose();
+                        return true;
+                    default:
+                        break;
+                }
+            }
+            // Text input (characters)
+            if (e.type == SDL_EVENT_TEXT_INPUT) {
+                const char* text = e.text.text;
+                for (int i = 0; text[i]; ++i) {
+                    if (text[i] >= 32 && text[i] < 127) { // printable ASCII
+                        insertChar(text[i]);
+                    }
+                }
+                updateScrollbars();
+                return true;
+            }
+            // Mouse wheel inside the editor area
+            if (e.type == SDL_EVENT_MOUSE_WHEEL) {
+                float mx, my;
+                SDL_GetMouseState(&mx, &my);
+                SDL_FRect shiftedRect = { rect.x - offsetX, rect.y - offsetY, rect.w, rect.h };
+                if (mx >= shiftedRect.x && mx <= shiftedRect.x + shiftedRect.w &&
+                    my >= shiftedRect.y && my <= shiftedRect.y + shiftedRect.h) {
+                    float delta = (e.wheel.y > 0) ? -LINE_HEIGHT * 3 : LINE_HEIGHT * 3;
+                    scrollY = std::clamp(scrollY + delta, 0.0f, verticalScrollbar.maxOffset());
+                    if (e.wheel.x != 0) {
+                        scrollX = std::clamp(scrollX + e.wheel.x * CHAR_WIDTH * 3, 0.0f, horizontalScrollbar.maxOffset());
+                    }
+                    updateScrollbars();
+                    return true;
+                }
+            }
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
+                float mx = e.button.x, my = e.button.y;
+                SDL_FRect shiftedRect = { rect.x - offsetX, rect.y - offsetY, rect.w - 12, rect.h - 12 };
+                if (mx >= shiftedRect.x && mx <= shiftedRect.x + shiftedRect.w &&
+                    my >= shiftedRect.y && my <= shiftedRect.y + shiftedRect.h) {
+                    // Start text input so SDL generates SDL_EVENT_TEXT_INPUT events
+                    SDL_StartTextInput(window);
+                    int row, col;
+                    hitTestRowCol(mx, my, shiftedRect, row, col);
+                    bool shift = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+                    moveCursor(row, col, shift);
+                    mouseSelecting = true;
+                    updateScrollbars();
+                    return true;
+                }
+            }
+            if (e.type == SDL_EVENT_MOUSE_MOTION && mouseSelecting) {
+                float mx = e.motion.x, my = e.motion.y;
+                SDL_FRect shiftedRect = { rect.x - offsetX, rect.y - offsetY, rect.w - 12, rect.h - 12 };
+                int row, col;
+                hitTestRowCol(mx, my, shiftedRect, row, col);
+                moveCursor(row, col, true);
+                updateScrollbars();
+                return true;
+            }
+            if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) {
+                mouseSelecting = false;
+            }
+            return false;
+        }
+
+        // Maps a screen point to a (row, col), using real font metrics
+        // (xToCol) rather than a fixed per-character width.
+        void hitTestRowCol(float mx, float my, SDL_FRect shiftedRect, int& row, int& col) const {
+            float localX = mx - shiftedRect.x + scrollX - PADDING_X;
+            float localY = my - shiftedRect.y + scrollY - PADDING_Y;
+            row = (int)(localY / LINE_HEIGHT);
+            if (row < 0) row = 0;
+            if (row >= (int)lines.size()) row = (int)lines.size() - 1;
+            col = xToCol(lines[row], localX);
+        }
+
+        void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY,
+                               SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
+            if (!visible) return;
+            // We don't use cursor position; we rely on keyboard mapping.
+            // However, if the user has a gamepad, they can use the stick to move the cursor.
+            // This is a simplification – we'll just pass through to keyboard events.
+            // For full integration, we'd need to map gamepad buttons to actions.
+            // For now, we only support keyboard.
+            (void)cursorX; (void)cursorY; (void)offsetX; (void)offsetY; (void)window;
+            (void)confirmDown; (void)confirmDownLastFrame;
+        }
+
+        
+        void render(float offsetX, float offsetY) override {
+            if (!visible) return;
+
+            // Background
+            SDL_SetRenderDrawColor(renderer, 32, 32, 42, 255);
+            SDL_FRect bgRect = { rect.x - offsetX, rect.y - offsetY, rect.w, rect.h };
+            SDL_RenderFillRect(renderer, &bgRect);
+            SDL_SetRenderDrawColor(renderer, 70, 70, 90, 255);
+            SDL_RenderRect(renderer, &bgRect);
+
+            // Clip
+            SDL_Rect clip = { (int)bgRect.x, (int)bgRect.y, (int)bgRect.w, (int)bgRect.h };
+            SDL_SetRenderClipRect(renderer, &clip);
+
+            // Draw text and cursor
+            renderText(offsetX, offsetY);
+            renderCursor(offsetX, offsetY);
+
+            // Stop clipping
+            SDL_SetRenderClipRect(renderer, nullptr);
+
+            // Draw scrollbars ONCE, passing the offsets
+            verticalScrollbar.render(renderer, offsetX, offsetY);
+            horizontalScrollbar.render(renderer, offsetX, offsetY);
+        }
+
+        // File operations
+        void loadFile(const std::string& path) {
+            std::ifstream file(path);
+            if (!file.is_open()) {
+                SDL_Log("TextEditor: failed to open %s", path.c_str());
+                return;
+            }
+            lines.clear();
+            std::string line;
+            while (std::getline(file, line)) {
+                std::string converted;
+                converted.reserve(line.size() * tabWidth); // rough reserve
+                for (char c : line) {
+                    if (c == '\t') {
+                        converted.append(tabWidth, ' ');
+                    } else {
+                        converted += c;
+                    }
+                }
+                lines.push_back(converted);
+            }
+            filePath = path;
+            cursorRow = 0;
+            cursorCol = 0;
+            scrollX = 0.0f;
+            scrollY = 0.0f;
+            hasSelection = false;
+            mouseSelecting = false;
+            refreshScrollbarGeometry();
+            updateScrollbars();
+        }
+
+        void saveFile() {
+            if (filePath.empty()) return;
+            std::ofstream file(filePath);
+            if (!file.is_open()) {
+                SDL_Log("TextEditor: failed to save %s", filePath.c_str());
+                return;
+            }
+            for (size_t i = 0; i < lines.size(); ++i) {
+                file << lines[i];
+                if (i + 1 < lines.size()) file << '\n';
+            }
+            SDL_Log("TextEditor: saved to %s", filePath.c_str());
+        }
+
+        bool isFileLoaded() const { return !filePath.empty(); }
+        const std::string& getFilePath() const { return filePath; }
+
+        // Visibility
+        void setVisible(bool v) { visible = v; }
+        bool isVisible() const { return visible; }
+
+        // Close callback (called when user clicks close button)
+        std::function<void()> onClose;
+        
+
+    private:
+        SDL_Renderer* renderer;
+        TTF_TextEngine* textEngine;
+        TTF_Font* font;
+        SDL_FRect rect;
+        bool visible = true;
+
+        std::string filePath;
+        std::vector<std::string> lines;
+        int cursorRow = 0, cursorCol = 0;
+        float scrollX = 0.0f, scrollY = 0.0f;
+
+        // Selection: anchor is where a drag or shift-select started; the
+        // cursor is the live end. No selection while hasSelection is false.
+        int selAnchorRow = 0, selAnchorCol = 0;
+        bool hasSelection = false;
+        bool mouseSelecting = false;
+
+        Gui::Scrollbar verticalScrollbar;
+        Gui::Scrollbar horizontalScrollbar;
+
+        static constexpr float LINE_HEIGHT = 25.0f;
+        static constexpr float CHAR_WIDTH = 25.0f;
+        static constexpr float PADDING_X = 6.0f;
+        static constexpr float PADDING_Y = 6.0f;
+        // Helper methods
+        float getLineHeight() const {
+            if (!font) return 20.0f;
+            return (float)TTF_GetFontHeight(font);
+        }
+
+        void refreshScrollbarGeometry() {
+            // Compute max line width using actual font
+            float maxLineWidth = 0.0f;
+            for (const auto& line : lines) {
+                int w = 0, h = 0;
+                if (!line.empty() && font) {
+                    TTF_GetStringSize(font, line.c_str(), line.size(), &w, &h);
+                }
+                maxLineWidth = std::max(maxLineWidth, (float)w);
+            }
+            float contentW = maxLineWidth + 2 * PADDING_X;
+            float contentH = lines.size() * getLineHeight() + 2 * PADDING_Y; // use dynamic line height
+            float viewW = rect.w - 12.0f;
+            float viewH = rect.h - 12.0f;
+
+            verticalScrollbar.setGeometry(rect.x + rect.w - 12, rect.y, 12, rect.h,
+                                        contentH, viewH);
+            horizontalScrollbar.setGeometry(rect.x, rect.y + rect.h - 12, rect.w - 12, 12,
+                                            contentW, viewW);
+
+            // Sync offsets without callback
+            verticalScrollbar.setOffsetNoCallback(scrollY);
+            horizontalScrollbar.setOffsetNoCallback(scrollX);
+        }
+
+        void renderText(float offsetX, float offsetY) {
+            // Clip to visible area
+            float viewX = rect.x - offsetX + PADDING_X;
+            float viewY = rect.y - offsetY + PADDING_Y;
+            float viewW = rect.w - 12.0f - PADDING_X * 2;
+            float viewH = rect.h - 12.0f - PADDING_Y * 2;
+
+            // Start rendering from the line that fits the scroll
+            int startLine = (int)(scrollY / LINE_HEIGHT);
+            float yOffset = viewY - scrollY + startLine * LINE_HEIGHT;
+
+            int selStartRow = 0, selStartCol = 0, selEndRow = 0, selEndCol = 0;
+            if (hasSelection) std::tie(selStartRow, selStartCol, selEndRow, selEndCol) = normalizedSelection();
+
+            for (size_t i = startLine; i < lines.size(); ++i) {
+                float y = yOffset + (i - startLine) * LINE_HEIGHT;
+                if (y > viewY + viewH) break;
+                const std::string& line = lines[i];
+                float x = viewX - scrollX;
+
+                // Selection highlight behind the text for this line
+                if (hasSelection && (int)i >= selStartRow && (int)i <= selEndRow) {
+                    int fromCol = ((int)i == selStartRow) ? selStartCol : 0;
+                    int toCol   = ((int)i == selEndRow)   ? selEndCol   : (int)line.size();
+                    float hx0 = x + textWidthUpTo(line, fromCol);
+                    // Selecting past end-of-line (multi-line selection) shows
+                    // a little highlight past the last character, like most editors.
+                    float hx1 = x + textWidthUpTo(line, toCol);
+                    if (toCol >= (int)line.size() && (int)i < selEndRow) hx1 += CHAR_WIDTH * 0.5f;
+                    if (hx1 > hx0) {
+                        SDL_FRect selRect = { hx0, y, hx1 - hx0, LINE_HEIGHT };
+                        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                        SDL_SetRenderDrawColor(renderer, 80, 120, 220, 110);
+                        SDL_RenderFillRect(renderer, &selRect);
+                    }
+                }
+
+                // Syntax-highlighted text, one draw call per token so each
+                // can have its own color (TTF_Text only supports one color
+                // per object).
+                for (const auto& tok : tokenizeLine(line)) {
+                    std::string sub = line.substr(tok.start, tok.len);
+                    if (sub.empty()) continue;
+                    float tx = x + textWidthUpTo(line, (int)tok.start);
+                    TTF_Text* t = TTF_CreateText(textEngine, font, sub.c_str(), 0);
+                    if (t) {
+                        TTF_SetTextColor(t, tok.color.r, tok.color.g, tok.color.b, tok.color.a);
+                        TTF_DrawRendererText(t, tx, y);
+                        TTF_DestroyText(t);
+                    }
+                }
+            }
+        }
+
+        void renderCursor(float offsetX, float offsetY) {
+            SDL_FPoint pos = getCursorPixelPos(offsetX, offsetY);
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            SDL_FRect cursorRect = { pos.x, pos.y, 2.0f, LINE_HEIGHT };
+            SDL_RenderFillRect(renderer, &cursorRect);
+        }
+
+
+        void moveCursor(int row, int col, bool extend = false) {
+            if (row < 0) row = 0;
+            if (row >= (int)lines.size()) row = (int)lines.size() - 1;
+            int maxCol = getLineLength(row);
+            if (col < 0) col = 0;
+            if (col > maxCol) col = maxCol;
+            if (extend) {
+                if (!hasSelection) { selAnchorRow = cursorRow; selAnchorCol = cursorCol; hasSelection = true; }
+            } else {
+                hasSelection = false;
+            }
+            cursorRow = row;
+            cursorCol = col;
+            if (extend && selAnchorRow == cursorRow && selAnchorCol == cursorCol) hasSelection = false;
+            // Ensure cursor is visible
+            SDL_FPoint pos = getCursorPixelPos(0.0f, 0.0f);
+            float viewX = rect.x + PADDING_X;
+            float viewY = rect.y + PADDING_Y;
+            float viewW = rect.w - 12.0f - PADDING_X * 2;
+            float viewH = rect.h - 12.0f - PADDING_Y * 2;
+            if (pos.x < viewX) scrollX = std::max(0.0f, scrollX - (viewX - pos.x));
+            else if (pos.x + CHAR_WIDTH > viewX + viewW) scrollX += (pos.x + CHAR_WIDTH - viewX - viewW);
+            if (pos.y < viewY) scrollY = std::max(0.0f, scrollY - (viewY - pos.y));
+            else if (pos.y + LINE_HEIGHT > viewY + viewH) scrollY += (pos.y + LINE_HEIGHT - viewY - viewH);
+            // Clamp scroll to max
+            scrollX = std::clamp(scrollX, 0.0f, horizontalScrollbar.maxOffset());
+            scrollY = std::clamp(scrollY, 0.0f, verticalScrollbar.maxOffset());
+            horizontalScrollbar.offset = scrollX;
+            verticalScrollbar.offset = scrollY;
+        }
+        
+
+        void insertChar(char ch) {
+            if (cursorRow < 0 || cursorRow >= (int)lines.size()) return;
+            if (hasSelection) deleteSelection();
+            std::string& line = lines[cursorRow];
+            if (cursorCol < 0) cursorCol = 0;
+            if (cursorCol > (int)line.size()) cursorCol = (int)line.size();
+
+            if (ch == '\t') {
+                line.insert(cursorCol, tabWidth, ' ');
+                cursorCol += tabWidth;
+            } else {
+                line.insert(cursorCol, 1, ch);
+                cursorCol++;
+            }
+        }
+
+        void deleteChar() {
+            if (cursorRow < 0 || cursorRow >= (int)lines.size()) return;
+            if (hasSelection) { deleteSelection(); return; }
+            std::string& line = lines[cursorRow];
+            if (cursorCol < (int)line.size()) {
+                line.erase(cursorCol, 1);
+            } else if (cursorRow + 1 < (int)lines.size()) {
+                // Join with next line
+                std::string& next = lines[cursorRow + 1];
+                line += next;
+                lines.erase(lines.begin() + cursorRow + 1);
+            }
+        }
+
+        void backspace() {
+            if (cursorRow < 0 || cursorRow >= (int)lines.size()) return;
+            if (hasSelection) { deleteSelection(); return; }
+            if (cursorCol == 0 && cursorRow > 0) {
+                // Merge with previous line
+                std::string& prev = lines[cursorRow - 1];
+                std::string& curr = lines[cursorRow];
+                prev += curr;
+                lines.erase(lines.begin() + cursorRow);
+                cursorRow--;
+                cursorCol = (int)prev.size();
+            } else if (cursorCol > 0) {
+                std::string& line = lines[cursorRow];
+                line.erase(cursorCol - 1, 1);
+                cursorCol--;
+            }
+        }
+
+        void newline() {
+            if (cursorRow < 0 || cursorRow >= (int)lines.size()) return;
+            if (hasSelection) deleteSelection();
+            std::string& line = lines[cursorRow];
+            std::string rest = line.substr(cursorCol);
+            line.erase(cursorCol);
+            lines.insert(lines.begin() + cursorRow + 1, rest);
+            cursorRow++;
+            cursorCol = 0;
+        }
+        
+
+        void updateScrollbars() {
+            // Use setOffsetNoCallback to avoid triggering onChange
+            horizontalScrollbar.setOffsetNoCallback(scrollX);
+            verticalScrollbar.setOffsetNoCallback(scrollY);
+        }
+
+        SDL_FPoint getCursorPixelPos(float offsetX, float offsetY) const {
+            float x = rect.x - offsetX + PADDING_X - scrollX + textWidthUpTo(lines[cursorRow], cursorCol);
+            float y = rect.y - offsetY + PADDING_Y - scrollY + cursorRow * LINE_HEIGHT;
+            return {x, y};
+        }
+
+        // Real pixel width of the first `col` characters of `line`, measured
+        // with the actual font metrics. The UI font isn't monospace, so a
+        // fixed per-character width (the old CHAR_WIDTH-based math) drifts
+        // from the real glyph positions more with every character — this is
+        // what caused the cursor/clicks to land in the wrong place.
+        float textWidthUpTo(const std::string& line, int col) const {
+            if (col <= 0 || line.empty() || !font) return 0.0f;
+            std::string sub = line.substr(0, std::min((size_t)col, line.size()));
+            int w = 0, h = 0;
+            if (!sub.empty()) TTF_GetStringSize(font, sub.c_str(), sub.size(), &w, &h);
+            return (float)w;
+        }
+
+        // Inverse of textWidthUpTo: given a local pixel X (relative to the
+        // start of the line's text), returns the column whose character
+        // boundary is closest to that X. Used for click-to-caret mapping.
+        int xToCol(const std::string& line, float localX) const {
+            if (localX <= 0.0f || line.empty()) return 0;
+            float prevW = 0.0f;
+            for (size_t i = 1; i <= line.size(); ++i) {
+                float w = textWidthUpTo(line, (int)i);
+                if (localX < (prevW + w) * 0.5f) return (int)i - 1;
+                prevW = w;
+            }
+            return (int)line.size();
+        }
+
+        // Returns the selection as (startRow, startCol, endRow, endCol) with
+        // start always before (or equal to) end, regardless of which
+        // direction the user dragged/shift-selected in.
+        std::tuple<int,int,int,int> normalizedSelection() const {
+            if (selAnchorRow < cursorRow || (selAnchorRow == cursorRow && selAnchorCol <= cursorCol))
+                return {selAnchorRow, selAnchorCol, cursorRow, cursorCol};
+            return {cursorRow, cursorCol, selAnchorRow, selAnchorCol};
+        }
+
+        // Removes the selected text (if any), collapsing the cursor to
+        // where the selection started. Called before typing/backspace/
+        // delete/newline whenever hasSelection is true, so those actions
+        // replace the selection instead of acting next to it.
+        void deleteSelection() {
+            if (!hasSelection) return;
+            auto [sRow, sCol, eRow, eCol] = normalizedSelection();
+            if (sRow == eRow) {
+                lines[sRow].erase((size_t)sCol, (size_t)(eCol - sCol));
+            } else {
+                std::string tail = lines[eRow].substr((size_t)eCol);
+                lines[sRow].erase((size_t)sCol);
+                lines[sRow] += tail;
+                lines.erase(lines.begin() + sRow + 1, lines.begin() + eRow + 1);
+            }
+            cursorRow = sRow; cursorCol = sCol;
+            hasSelection = false;
+        }
+
+        // Minimal C++ token classifier for syntax highlighting: comments,
+        // preprocessor directives, string literals, numbers, and a common
+        // keyword list. Not a real parser — good enough to make code
+        // readable, not to validate it.
+        struct Token { size_t start, len; SDL_Color color; };
+        std::vector<Token> tokenizeLine(const std::string& line) const {
+            static const std::vector<std::string> keywords = {
+                "if","else","for","while","do","return","class","struct","public","private","protected",
+                "void","int","float","double","bool","char","const","static","virtual","override","auto",
+                "namespace","using","new","delete","true","false","nullptr","template","typename","this",
+                "break","continue","switch","case","default","enum","unsigned","long","short","inline",
+                "std","string","vector","include","define","ifdef","ifndef","endif","pragma"
+            };
+            std::vector<Token> tokens;
+            const SDL_Color normalColor  = {220, 220, 240, 255};
+            const SDL_Color keywordColor = {110, 160, 230, 255};
+            const SDL_Color commentColor = {90, 140, 90, 255};
+            const SDL_Color stringColor  = {210, 150, 90, 255};
+            const SDL_Color numberColor  = {180, 210, 140, 255};
+            const SDL_Color ppColor      = {190, 140, 220, 255};
+
+            size_t i = 0;
+            while (i < line.size()) {
+                if (i + 1 < line.size() && line[i] == '/' && line[i+1] == '/') {
+                    tokens.push_back({i, line.size() - i, commentColor});
+                    break;
+                }
+                if (line[i] == '#') {
+                    size_t j = i + 1;
+                    while (j < line.size() && (isalnum((unsigned char)line[j]) || line[j] == '_')) j++;
+                    tokens.push_back({i, j - i, ppColor});
+                    i = j; continue;
+                }
+                if (line[i] == '"') {
+                    size_t j = i + 1;
+                    while (j < line.size() && line[j] != '"') {
+                        if (line[j] == '\\' && j + 1 < line.size()) j++;
+                        j++;
+                    }
+                    if (j < line.size()) j++; // include closing quote
+                    tokens.push_back({i, j - i, stringColor});
+                    i = j; continue;
+                }
+                if (isalpha((unsigned char)line[i]) || line[i] == '_') {
+                    size_t j = i;
+                    while (j < line.size() && (isalnum((unsigned char)line[j]) || line[j] == '_')) j++;
+                    std::string word = line.substr(i, j - i);
+                    bool isKeyword = std::find(keywords.begin(), keywords.end(), word) != keywords.end();
+                    tokens.push_back({i, j - i, isKeyword ? keywordColor : normalColor});
+                    i = j; continue;
+                }
+                if (isdigit((unsigned char)line[i])) {
+                    size_t j = i;
+                    while (j < line.size() && (isalnum((unsigned char)line[j]) || line[j] == '.')) j++;
+                    tokens.push_back({i, j - i, numberColor});
+                    i = j; continue;
+                }
+                tokens.push_back({i, 1, normalColor});
+                i++;
+            }
+            return tokens;
+        }
+        int getLineLength(int row) const {
+            if (row < 0 || row >= (int)lines.size()) return 0;
+            return (int)lines[row].size();
+        }
+    };
+
+    class FileExplorer : public Dialog {
+    public:
+        FileExplorer(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f,
+            SDL_Window* w, const std::string& rootPath, const std::string& filter)
+            : Dialog(r, te, f, w, {0,0,600,500}, "Open File", "Open", "Cancel"),
+            currentPath(rootPath.empty() ? std::filesystem::current_path().string() : rootPath),
+            rootPath(rootPath.empty() ? std::filesystem::current_path().string() : rootPath),  // store root
+            filter(filter),
+            pathEdit(r, te, f, {0,0,1,1}, "Path...")
+        {
+            refreshEntries();
+        }
+
+        void setCallback(std::function<void(const std::string&)> cb) { callback = cb; }
+        void setFilter(const std::string& f) { filter = f; }
+
+        void goToRoot() {
+            currentPath = rootPath;
+            refreshEntries();
+        }
+
+    protected:
+
+        void onOpen() {
+            // Center the dialog on the window
+            int winW, winH;
+            SDL_GetWindowSize(window, &winW, &winH);
+            logicalRect = {
+                (winW - 600.0f) * 0.5f,
+                (winH - 400.0f) * 0.5f,
+                600.0f, 400.0f
+            };
+            pathEdit.setPlaceholder("Path...");
+            selectedIndex = -1;
+            selectedFilePath.clear();
+            goToRoot(); // also refreshes entries
+        }
+
+        bool onHandleEvent(const SDL_Event& ev) {
+            // ── Back button click ──────────────────────────────────────────────
+            if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                float mx = ev.button.x, my = ev.button.y;
+                SDL_FRect win = animRect();
+                SDL_FRect backBtn = { win.x + 10, win.y + 40, 30, 28 };
+                if (mx >= backBtn.x && mx <= backBtn.x + backBtn.w &&
+                    my >= backBtn.y && my <= backBtn.y + backBtn.h) {
+                    goToParent();
+                    return true;
+                }
+            }
+            // Let the path edit handle its own events
+            if (pathEdit.handleEvent(ev, window, 0.0f, 0.0f)) return true;
+
+            // Mouse clicks on the list — single click selects/navigates
+            // directories, double click (clicks >= 2) opens a file. These
+            // were previously two separate blocks with identical
+            // "MOUSE_BUTTON_DOWN + left button" guards; the first one
+            // always matched and returned true first, so the double-click
+            // block below it could never run. Merged into one block that
+            // actually checks ev.button.clicks.
+            if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                float mx = ev.button.x, my = ev.button.y;
+                SDL_FRect win = animRect();
+                // List area is inside the window, with padding
+                SDL_FRect listRect = { win.x + 10, win.y + 70, win.w - 20, win.h - 110 };
+                if (mx >= listRect.x && mx <= listRect.x + listRect.w &&
+                    my >= listRect.y && my <= listRect.y + listRect.h) {
+                    // Determine which entry was clicked
+                    float rowHeight = 24.0f;
+                    int idx = (int)((my - listRect.y) / rowHeight);
+                    if (idx >= 0 && idx < (int)entries.size()) {
+                        selectedIndex = idx;
+                        if (isDir[idx]) {
+                            goToDirectory(entries[idx]);
+                        } else if (ev.button.clicks >= 2) {
+                            selectedFilePath = (std::filesystem::path(currentPath) / entries[idx]).string();
+                            selectFile(entries[idx]);  // calls callback and resets
+                        }
+                        return true;
+                    }
+                }
+            }
+
+            if (ev.type == SDL_EVENT_KEY_DOWN) {
+                if (ev.key.key == SDLK_RETURN) {
+                    if (selectedIndex >= 0 && selectedIndex < (int)entries.size()) {
+                        if (isDir[selectedIndex]) {
+                            goToDirectory(entries[selectedIndex]);
+                        } else {
+                            selectedFilePath = (std::filesystem::path(currentPath) / entries[selectedIndex]).string();
+                            selectFile(entries[selectedIndex]);
+                        }
+                        return true;
+                    }
+                }
+                if (ev.key.key == SDLK_BACKSPACE || ev.key.key == SDLK_UP) {
+                    goToParent();   // go up one level (not root)
+                    return true;
+                }
+                if (ev.key.key == SDLK_DOWN) {
+                    selectedIndex = std::min(selectedIndex + 1, (int)entries.size() - 1);
+                    return true;
+                }
+                if (ev.key.key == SDLK_UP) {
+                    selectedIndex = std::max(selectedIndex - 1, 0);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void onRender(SDL_FRect win) {
+            // Background and border are drawn by base Dialog
+
+            // back button
+            float mx, my;
+            SDL_GetMouseState(&mx, &my);
+
+            SDL_FRect backBtn = { win.x + 10, win.y + 40, 30, 28 };
+            bool hovered = (mx >= backBtn.x && mx <= backBtn.x + backBtn.w &&
+                            my >= backBtn.y && my <= backBtn.y + backBtn.h);
+            SDL_Color backColor = hovered ? SDL_Color{80,80,80,255} : SDL_Color{60,60,60,255};
+            fillRect(backBtn, backColor);
+            drawText("<", backBtn.x + 8, backBtn.y + 4, {220,220,220,255});
+
+            // Path bar
+            pathEdit.setRect({ win.x + 45, win.y + 40, win.w - 98, 28 });
+            pathEdit.render(0.0f, 0.0f);
+
+            // List area
+            SDL_FRect listRect = { win.x + 10, win.y + 75, win.w - 20, win.h - 140 };
+            SDL_SetRenderDrawColor(renderer, 50, 50, 60, 255);
+            SDL_RenderFillRect(renderer, &listRect);
+            SDL_SetRenderDrawColor(renderer, 80, 80, 100, 255);
+            SDL_RenderRect(renderer, &listRect);
+
+            // Clip to list area
+            SDL_Rect clip = { (int)listRect.x, (int)listRect.y, (int)listRect.w, (int)listRect.h };
+            SDL_SetRenderClipRect(renderer, &clip);
+
+            // Draw each entry
+            float rowHeight = 24.0f;
+            float y = listRect.y;
+            for (size_t i = 0; i < entries.size(); ++i) {
+                SDL_Color bg = (i == selectedIndex) ? SDL_Color{70, 70, 120, 255} : SDL_Color{60, 60, 70, 255};
+                SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, bg.a);
+                SDL_FRect rowRect = { listRect.x, y, listRect.w, rowHeight };
+                SDL_RenderFillRect(renderer, &rowRect);
+                // Icon: directory vs file
+                std::string display = isDir[i] ? "[DIR] " + entries[i] : entries[i];
+                if (isDir[i]) {
+                    drawText(display.c_str(), listRect.x + 5, y + 2, {200, 200, 180, 255});
+                } else {
+                    drawText(display.c_str(), listRect.x + 5, y + 2, {220, 220, 240, 255});
+                }
+                y += rowHeight;
+            }
+
+            SDL_SetRenderClipRect(renderer, nullptr);
+        }
+
+        void onReset() override {
+            selectedIndex = -1;
+            selectedFilePath.clear();
+            pathEdit.clear();
+            pathEdit.deactivate(window);
+        }
+
+    public:
+
+        bool hasSelectedFile() const { return !selectedFilePath.empty(); }
+        std::string getSelectedFilePath() const { return selectedFilePath; }
+
+        void triggerCallback() {
+            if (!callback) return;
+            std::string filePath = selectedFilePath;
+            // If no file was double‑clicked, use the highlighted index
+            if (filePath.empty() && selectedIndex >= 0 && selectedIndex < (int)entries.size() && !isDir[selectedIndex]) {
+                filePath = (std::filesystem::path(currentPath) / entries[selectedIndex]).string();
+            }
+            if (!filePath.empty()) {
+                callback(filePath);
+                // The callback should call reset(), but we can also reset here to be safe
+                // Our callbacks already call reset, so no need.
+            }
+        }
+
+    private:
+        std::string currentPath;                 // absolute path of the current directory
+        std::string rootPath;                    // initial root path
+        std::string filter;                      // pattern (e.g. "*.json")
+        std::vector<std::string> entries;        // display names of files/dirs
+        std::vector<bool> isDir;                 // parallel: true for directories
+        int selectedIndex = -1;                  // currently highlighted entry (for keyboard/gamepad)
+        std::function<void(const std::string&)> callback;
+
+        Gui::LineEdit pathEdit;                  // editable path bar
+        bool showHidden = false;                 // toggle hidden files
+        
+        std::string selectedFilePath;
+
+        // scan currentPath and fill entries/isDir
+        void refreshEntries() {
+            entries.clear();
+            isDir.clear();
+            try {
+                for (const auto& entry : std::filesystem::directory_iterator(currentPath)) {
+                    std::string name = entry.path().filename().string();
+                    // Skip hidden (starting with '.' unless showHidden is true)
+                    if (!showHidden && name[0] == '.') continue;
+                    bool dir = entry.is_directory();
+                    if (!dir && !matchesFilter(name)) continue;
+                    entries.push_back(name);
+                    isDir.push_back(dir);
+                }
+                // Sort: directories first, then files alphabetically
+                std::vector<size_t> order(entries.size());
+                std::iota(order.begin(), order.end(), 0);
+                std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                    if (isDir[a] != isDir[b]) return isDir[a] > isDir[b]; // directories first
+                    return entries[a] < entries[b];
+                });
+                std::vector<std::string> sortedEntries;
+                std::vector<bool> sortedIsDir;
+                for (size_t idx : order) {
+                    sortedEntries.push_back(entries[idx]);
+                    sortedIsDir.push_back(isDir[idx]);
+                }
+                entries.swap(sortedEntries);
+                isDir.swap(sortedIsDir);
+                // Reset selection
+                selectedIndex = -1;
+                // Update path edit
+                pathEdit.clear();
+                for (char c : currentPath) pathEdit.appendText(std::string(1, c));
+            } catch (const std::exception& e) {
+                // e.g. permission denied
+                SDL_Log("FileExplorer: error reading directory: %s", e.what());
+            }
+        }         
+
+        void goToParent() {
+            if (currentPath == rootPath) return; // never navigate above the configured root
+            std::filesystem::path p(currentPath);
+            if (p.has_parent_path()) {
+                currentPath = p.parent_path().string();
+                refreshEntries();
+            }
+        }
+
+        void goToDirectory(const std::string& dirName) {
+            std::filesystem::path newPath = std::filesystem::path(currentPath) / dirName;
+            if (std::filesystem::is_directory(newPath)) {
+                currentPath = newPath.string();
+                refreshEntries();
+            }
+        }
+
+        void selectFile(const std::string& fileName) {
+            std::string fullPath = (std::filesystem::path(currentPath) / fileName).string();
+            if (callback) callback(fullPath);
+        }
+
+        bool matchesFilter(const std::string& fileName) const {
+            if (filter == "*" || filter.empty()) return true;
+            auto patterns = splitFilter();
+            for (const auto& pat : patterns) {
+                // Simple wildcard matching: only '*' supported
+                if (pat == "*") return true;
+                if (pat.find('*') != std::string::npos) {
+                    std::string prefix = pat.substr(0, pat.find('*'));
+                    std::string suffix = pat.substr(pat.find('*') + 1);
+                    if (fileName.size() >= prefix.size() + suffix.size() &&
+                        fileName.compare(0, prefix.size(), prefix) == 0 &&
+                        fileName.compare(fileName.size() - suffix.size(), suffix.size(), suffix) == 0)
+                        return true;
+                } else {
+                    if (fileName == pat) return true;
+                }
+            }
+            return false;
+        }
+
+        // Helper to split filter patterns
+        std::vector<std::string> splitFilter() const {
+            std::vector<std::string> parts;
+            size_t start = 0, end;
+            while ((end = filter.find(';', start)) != std::string::npos) {
+                parts.push_back(filter.substr(start, end - start));
+                start = end + 1;
+            }
+            parts.push_back(filter.substr(start));
+            return parts;
+        }
+    };
 
 } // end namespace Gui
 
@@ -2011,36 +3496,57 @@ void deselect_all(ECSWorld& world) {
     }
 }
 
-void render_system_in_editor(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
-                             const ECSWorld& world, float viewX, float viewY,
-                             float scrollX, float scrollY) {
+void render_system_and_scene_gui_in_editor(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
+const ECSWorld & world, float viewX, float viewY,
+float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& guiElements) {
+
     for (Entity i = 0; i < world.entity_count; ++i) {
         if (world.has_position[i]) {
             float logicalX = world.position_pool[i].x;
             float logicalY = world.position_pool[i].y;
+            // Fixed typo: "s crollX" -> "scrollX"
             float screenX = viewX + logicalX - scrollX;
             float screenY = viewY + logicalY - scrollY;
             SDL_FRect outlineRect = { screenX, screenY, 50, 50 };
             if (world.has_rectangle_shape[i]) {
+                // Fixed typo: "rectangle_shape_ pool" -> "rectangle_shape_pool"
                 outlineRect.w = world.rectangle_shape_pool[i].w;
                 outlineRect.h = world.rectangle_shape_pool[i].h;
             }
+            // Fixed typo: "& &" -> "&&" and spacing
             if (world.has_selection[i] && world.selection_pool[i].isSelected) {
                 SDL_SetRenderDrawColor(renderer, world.selection_pool[i].selectionColor.r,
-                                       world.selection_pool[i].selectionColor.g,
-                                       world.selection_pool[i].selectionColor.b,
-                                       world.selection_pool[i].selectionColor.a);
+                world.selection_pool[i].selectionColor.g,
+                world.selection_pool[i].selectionColor.b,
+                world.selection_pool[i].selectionColor.a);
             } else {
                 SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
             }
             if (world.has_metadata[i]) {
+                // Fixed typo: "TTF_ CreateText" -> "TTF_CreateText"
                 TTF_Text* textObj = TTF_CreateText(textEngine, font, world.metadata_pool[i].name.c_str(), 0);
-                TTF_SetTextColor(textObj, 255, 255, 255, 255);
-                TTF_DrawRendererText(textObj, screenX, screenY);
-                TTF_DestroyText(textObj);
+                if (textObj) {
+                    TTF_SetTextColor(textObj, 255, 255, 255, 255);
+                    TTF_DrawRendererText(textObj, screenX, screenY);
+                    // Fixed typo: "TTF_DestroyTex t" -> "TTF_DestroyText"
+                    TTF_DestroyText(textObj);
+                }
             }
             SDL_RenderRect(renderer, &outlineRect);
         }
+    }
+
+    // Must match the convention used for entities (screen = pos + view - scroll)
+    // and for the editor's Select/Move hit-testing, or GUI elements render and
+    // hit-test at different screen positions than entities do.
+    float guiOffsetX = scrollX - viewX;
+    float guiOffsetY = scrollY - viewY;
+    for (auto & elem : guiElements) {
+        // 1. Pass the calculated canvas offsets so they render in the correct logical space
+        elem->render(guiOffsetX, guiOffsetY);
+        
+        // 2. Draw the yellow selection outline around the element if it's selected
+        elem->renderSelectionOutline(renderer, guiOffsetX, guiOffsetY);
     }
 }
 
@@ -2075,148 +3581,207 @@ void render_system_game(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_
     }
 }
 
-void edit_object_with_editor_mouse(SDL_Renderer* renderer, ECSWorld & world, const std::vector<std::unique_ptr<Gui::IGuiElement>>& guiElements, const SDL_Event & e) {
+void edit_object_with_editor_mouse(SDL_Renderer* renderer, ECSWorld& world,
+std::vector<std::unique_ptr<Gui::IGuiElement>>& guiElements,
+Gui::IGuiElement*& selectedGuiElem,
+const SDL_Event& e)
+{
     if (currentEditMode == EditMode::Dialog) return;
     if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) {
         isDraggingLeftMouse = false;
     }
     if (currentEditMode == EditMode::Select) {
-        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
-            // Convert screen click to logical canvas coordinates
-            float logicalX = e.button.x - canvasViewX + editorScrollX;
-            float logicalY = e.button.y - canvasViewY + editorScrollY;
-            Entity topmostEntity = (Entity)-1;
-            int maxZ = 0;
-            bool found = false;
-            for (Entity i = 0; i < world.entity_count; i++) {
-                if (world.has_position[i] && world.has_selection[i]) {
-                    float entityW = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f;
-                    float entityH = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f;
-                    // Check if logical click is inside entity's logical rectangle
-                    if (logicalX >= world.position_pool[i].x && logicalX <= world.position_pool[i].x + entityW &&
-                        logicalY >= world.position_pool[i].y && logicalY <= world.position_pool[i].y + entityH) {
-                        int currentZ = world.has_z_index[i] ? world.z_index_pool[i].z : 0;
-                        if (!found || currentZ > maxZ) {
-                            maxZ = currentZ;
-                            topmostEntity = i;
-                            found = true;
-                        }
-                    }
-                }
-            }
-            if (topmostEntity != (Entity)-1) {
-                if (currentSelectionmode == SelectionMode::SingleSelect) {
-                    bool wasSelected = world.selection_pool[topmostEntity].isSelected;
-                    for (Entity i = 0; i < world.entity_count; i++) {
-                        if (world.has_selection[i]) world.selection_pool[i].isSelected = false;
-                    }
-                    if (!wasSelected) {
-                        world.selection_pool[topmostEntity].isSelected = true;
-                        lastSelectedEntity = topmostEntity;
-                    } else {
-                        lastSelectedEntity = (Entity)-1;
-                    }
-                } else if (currentSelectionmode == SelectionMode::MultiSelect) {
-                    world.selection_pool[topmostEntity].isSelected = !world.selection_pool[topmostEntity].isSelected;
-                    if (world.selection_pool[topmostEntity].isSelected)
-                        lastSelectedEntity = topmostEntity;
-                    else
-                        lastSelectedEntity = (Entity)-1;
-                }
-            } else {
-                // Click on empty canvas -> deselect all
-                // Only deselect if the click was actually inside the canvas bounds.
-                // This prevents clicking toolbar buttons (like "Move") from clearing the selection.
-                bool insideCanvas = (e.button.y >= canvasViewY) && 
-                                    (e.button.x >= canvasViewX) && 
-                                    (e.button.x <= canvasViewX + canvasViewW);
-                                    
-                if (currentSelectionmode == SelectionMode::SingleSelect && insideCanvas) {
-                    deselect_all(world);
-                    lastSelectedEntity = (Entity)-1;
-                }
-            }
-        }
-    } else if (currentEditMode == EditMode::MoveWithMouse) {
-        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
-            if (isInsideCanvas(e.button.x, e.button.y)) {
-                isDraggingLeftMouse = true;
-                lastDragX = e.button.x;
-                lastDragY = e.button.y;
-            }
-        } else if (e.type == SDL_EVENT_MOUSE_MOTION && isDraggingLeftMouse) {
-            if (isInsideCanvas(e.motion.x, e.motion.y)) {
-                int dx = e.motion.x - lastDragX;
-                int dy = e.motion.y - lastDragY;
-                if (dx != 0 || dy != 0) {
-                    for (Entity i = 0; i < world.entity_count; i++) {
-                        if (world.has_position[i] && world.has_selection[i] && world.selection_pool[i].isSelected) {
-                            world.position_pool[i].x += dx;
-                            world.position_pool[i].y += dy;
-                            if (world.has_rectangle_shape[i]) {
-                                clamp_entity_position_to_canvas(world.position_pool[i],
-                                    world.rectangle_shape_pool[i].w,
-                                    world.rectangle_shape_pool[i].h);
-                            } else {
-                                clamp_entity_position_to_canvas(world.position_pool[i]);
-                            }
-                        }
-                    }
-                    for (const auto & elem : guiElements)
-                    {
-                        auto guiElem = elem.get();
-                        if (guiElem->editorSelected) {
-                            SDL_FPoint newPos = {guiElem->getX() + dx, guiElem->getY() + dy};
-                            clamp_guiElem_position_to_canvas(newPos, guiElem->getWidth(), guiElem->getHeight());
-                            guiElem->setPos({static_cast<int>(newPos.x), static_cast<int>(newPos.y)});
-                        }
-                    }
-                    lastDragX = e.motion.x;
-                    lastDragY = e.motion.y;
-                }
-            } else {
-                isDraggingLeftMouse = false;
-            }
-        }
-    } else if (currentEditMode == EditMode::Delete) {
-        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
-            float logicalX = e.button.x - canvasViewX + editorScrollX;
-            float logicalY = e.button.y - canvasViewY + editorScrollY;
-            Entity topmostEntity = (Entity)-1;
-            int maxZ = 0;
-            bool found = false;
-            for (Entity i = 0; i < world.entity_count; i++) {
-                if (world.has_position[i] && world.has_selection[i]) {
-                    float entityW = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f;
-                    float entityH = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f;
-                    if (logicalX >= world.position_pool[i].x && logicalX <= world.position_pool[i].x + entityW &&
-                        logicalY >= world.position_pool[i].y && logicalY <= world.position_pool[i].y + entityH) {
-                        int currentZ = world.has_z_index[i] ? world.z_index_pool[i].z : 0;
-                        if (!found || currentZ > maxZ) {
-                            maxZ = currentZ;
-                            topmostEntity = i;
-                            found = true;
-                        }
-                    }
-                }
-            }
-            if (topmostEntity != (Entity)-1) world.delete_entity(topmostEntity);
-        }
-    }
+         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
+             float logicalX = e.button.x - canvasViewX + editorScrollX;
+             float logicalY = e.button.y - canvasViewY + editorScrollY;
+             
+             // 1. Check GUI elements (using primary rectangle)
+             Gui::IGuiElement* topmostGui = nullptr;
+             for (auto& elem : guiElements) {
+                 float ex = elem->getX();
+                 float ey = elem->getY();
+                 float ew = elem->getWidth();
+                 float eh = elem->getHeight();
+                 if (logicalX >= ex && logicalX <= ex + ew && logicalY >= ey && logicalY <= ey + eh) {
+                     topmostGui = elem.get();
+                 }
+             }
+             
+             // 2. Check Entities
+             Entity topmostEntity = (Entity)-1;
+             int maxZ = 0;
+             bool foundEntity = false;
+             for (Entity i = 0; i < world.entity_count; i++) {
+                 if (world.has_position[i] && world.has_selection[i]) {
+                     float entityW = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f;
+                     // Fixed typo: "rectangle_s hape_pool" -> "rectangle_shape_pool"
+                     float entityH = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f;
+                     if (logicalX >= world.position_pool[i].x && logicalX <= world.position_pool[i].x + entityW &&
+                         logicalY >= world.position_pool[i].y && logicalY <= world.position_pool[i].y + entityH) {
+                         int currentZ = world.has_z_index[i] ? world.z_index_pool[i].z : 0;
+                         if (!foundEntity || currentZ > maxZ) {
+                             maxZ = currentZ;
+                             topmostEntity = i;
+                             foundEntity = true;
+                         }
+                     }
+                 }
+             }
+             
+             if (topmostGui) {
+                 if (selectedGuiElem) selectedGuiElem->editorSelected = false;
+                 selectedGuiElem = topmostGui;
+                 selectedGuiElem->editorSelected = true;
+                 deselect_all(world);
+                 lastSelectedEntity = (Entity)-1;
+             } else if (foundEntity) {
+                 if (selectedGuiElem) { selectedGuiElem->editorSelected = false; selectedGuiElem = nullptr; }
+                 if (currentSelectionmode == SelectionMode::SingleSelect) {
+                     bool wasSelected = world.selection_pool[topmostEntity].isSelected;
+                     for (Entity i = 0; i < world.entity_count; i++) {
+                         if (world.has_selection[i]) world.selection_pool[i].isSelected = false;
+                     }
+                     if (!wasSelected) {
+                         world.selection_pool[topmostEntity].isSelected = true;
+                         // Fixed typo: "la stSelectedEntity" -> "lastSelectedEntity"
+                         lastSelectedEntity = topmostEntity;
+                     } else {
+                         lastSelectedEntity = (Entity)-1;
+                     }
+                 } else if (currentSelectionmode == SelectionMode::MultiSelect) {
+                     // Fixed typo: "i sSelected" -> "isSelected"
+                     world.selection_pool[topmostEntity].isSelected = !world.selection_pool[topmostEntity].isSelected;
+                     if (world.selection_pool[topmostEntity].isSelected)
+                         lastSelectedEntity = topmostEntity;
+                     else
+                         // Fixed typo: "(Enti ty)" -> "(Entity)"
+                         lastSelectedEntity = (Entity)-1;
+                 }
+             } else {
+                 // Fixed typo: "& &" -> "&&"
+                 bool insideCanvas = (e.button.y >= canvasViewY) &&
+                                     (e.button.x >= canvasViewX) &&
+                                     (e.button.x <= canvasViewX + canvasViewW);
+                 if (insideCanvas) {
+                     if (selectedGuiElem) { selectedGuiElem->editorSelected = false; selectedGuiElem = nullptr; }
+                     if (currentSelectionmode == SelectionMode::SingleSelect) {
+                         deselect_all(world);
+                         lastSelectedEntity = (Entity)-1;
+                     }
+                 }
+             }
+         }
+     } else if (currentEditMode == EditMode::MoveWithMouse) {
+         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
+             if (isInsideCanvas(e.button.x, e.button.y)) {
+                 isDraggingLeftMouse = true;
+                 lastDragX = e.button.x;
+                 lastDragY = e.button.y;
+             }
+         } else if (e.type == SDL_EVENT_MOUSE_MOTION && isDraggingLeftMouse) {
+             if (isInsideCanvas(e.motion.x, e.motion.y)) {
+                 int dx = e.motion.x - lastDragX;
+                 int dy = e.motion.y - lastDragY;
+                 if (dx != 0 || dy != 0) {
+                     // Move Entities
+                     for (Entity i = 0; i < world.entity_count; i++) {
+                         if (world.has_position[i] && world.has_selection[i] && world.selection_pool[i].isSelected) {
+                             world.position_pool[i].x += dx;
+                             world.position_pool[i].y += dy;
+                             if (world.has_rectangle_shape[i]) {
+                                 clamp_entity_position_to_canvas(world.position_pool[i],
+                                     world.rectangle_shape_pool[i].w,
+                                     world.rectangle_shape_pool[i].h);
+                             } else {
+                                 clamp_entity_position_to_canvas(world.position_pool[i]);
+                             }
+                         }
+                     }
+                     // Move GUI Elements
+                     if (selectedGuiElem) {
+                         SDL_FPoint newPos = { selectedGuiElem->getX() + dx, selectedGuiElem->getY() + dy };
+                         clamp_guiElem_position_to_canvas(newPos, selectedGuiElem->getWidth(), selectedGuiElem->getHeight());
+                         selectedGuiElem->setPos({ static_cast<int>(newPos.x), static_cast<int>(newPos.y) });
+                     }
+                     lastDragX = e.motion.x;
+                     lastDragY = e.motion.y;
+                 }
+             } else {
+                 isDraggingLeftMouse = false;
+             }
+         }
+     } else if (currentEditMode == EditMode::Delete) {
+         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
+             float logicalX = e.button.x - canvasViewX + editorScrollX;
+             float logicalY = e.button.y - canvasViewY + editorScrollY;
+             // Delete GUI element
+             Gui::IGuiElement* guiToDelete = nullptr;
+             for (auto& elem : guiElements) {
+                 float ex = elem->getX();
+                 float ey = elem->getY();
+                 float ew = elem->getWidth();
+                 float eh = elem->getHeight();
+                 if (logicalX >= ex && logicalX <= ex + ew && logicalY >= ey && logicalY <= ey + eh) {
+                     guiToDelete = elem.get();
+                 }
+             }
+             if (guiToDelete) {
+                 if (selectedGuiElem == guiToDelete) selectedGuiElem = nullptr;
+                 guiElements.erase(std::remove_if(guiElements.begin(), guiElements.end(),
+                     [guiToDelete](const std::unique_ptr<Gui::IGuiElement>& p) { return p.get() == guiToDelete; }),
+                     guiElements.end());
+                 return;
+             }
+             // Delete Entity
+             Entity topmostEntity = (Entity)-1;
+             int maxZ = 0;
+             bool found = false;
+             for (Entity i = 0; i < world.entity_count; i++) {
+                 if (world.has_position[i] && world.has_selection[i]) {
+                     float entityW = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f;
+                     float entityH = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f;
+                     if (logicalX >= world.position_pool[i].x && logicalX <= world.position_pool[i].x + entityW &&
+                         logicalY >= world.position_pool[i].y && logicalY <= world.position_pool[i].y + entityH) {
+                         int currentZ = world.has_z_index[i] ? world.z_index_pool[i].z : 0;
+                         if (!found || currentZ > maxZ) {
+                             maxZ = currentZ;
+                             topmostEntity = i;
+                             found = true;
+                         }
+                     }
+                 }
+             }
+             if (topmostEntity != (Entity)-1) world.delete_entity(topmostEntity);
+         }
+     }
 }
 
 
-void edit_object_with_editor_gamepad(ECSWorld& world, float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame) {
+void edit_object_with_editor_gamepad(ECSWorld& world,
+std::vector<std::unique_ptr<Gui::IGuiElement>>& guiElements,
+Gui::IGuiElement*& selectedGuiElem,
+float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame)
+{
     if (currentEditMode == EditMode::Dialog) return;
     if (!confirmDown) isGamepadDragging = false;
 
-    // Convert screen cursor to logical canvas coordinates
     float logicalX = cursorX - canvasViewX + editorScrollX;
     float logicalY = cursorY - canvasViewY + editorScrollY;
 
+    Gui::IGuiElement* topmostGui = nullptr;
+    for (auto& elem : guiElements) {
+        float ex = elem->getX();
+        float ey = elem->getY();
+        float ew = elem->getWidth();
+        float eh = elem->getHeight();
+        if (logicalX >= ex && logicalX <= ex + ew && logicalY >= ey && logicalY <= ey + eh) {
+            topmostGui = elem.get();
+        }
+    }
+
     Entity topmostEntity = (Entity)-1;
     int maxZ = -1;
-    bool found = false;
+    bool foundEntity = false;
     for (Entity i = 0; i < world.entity_count; i++) {
         if (world.has_position[i] && world.has_selection[i]) {
             float entityW = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f;
@@ -2224,10 +3789,10 @@ void edit_object_with_editor_gamepad(ECSWorld& world, float cursorX, float curso
             if (logicalX >= world.position_pool[i].x && logicalX <= world.position_pool[i].x + entityW &&
                 logicalY >= world.position_pool[i].y && logicalY <= world.position_pool[i].y + entityH) {
                 int currentZ = world.has_z_index[i] ? world.z_index_pool[i].z : 0;
-                if (!found || currentZ > maxZ) {
+                if (!foundEntity || currentZ > maxZ) {
                     maxZ = currentZ;
                     topmostEntity = i;
-                    found = true;
+                    foundEntity = true;
                 }
             }
         }
@@ -2235,7 +3800,14 @@ void edit_object_with_editor_gamepad(ECSWorld& world, float cursorX, float curso
 
     if (currentEditMode == EditMode::Select) {
         if (!confirmDown && confirmDownLastFrame && !gamepadDidDrag) {
-            if (topmostEntity != (Entity)-1) {
+            if (topmostGui) {
+                if (selectedGuiElem) selectedGuiElem->editorSelected = false;
+                selectedGuiElem = topmostGui;
+                selectedGuiElem->editorSelected = true;
+                deselect_all(world);
+                lastSelectedEntity = (Entity)-1;
+            } else if (foundEntity) {
+                if (selectedGuiElem) { selectedGuiElem->editorSelected = false; selectedGuiElem = nullptr; }
                 if (currentSelectionmode == SelectionMode::SingleSelect) {
                     bool wasSelected = world.selection_pool[topmostEntity].isSelected;
                     for (Entity i = 0; i < world.entity_count; i++) {
@@ -2255,14 +3827,15 @@ void edit_object_with_editor_gamepad(ECSWorld& world, float cursorX, float curso
                         lastSelectedEntity = (Entity)-1;
                 }
             } else {
-                // Same bounds check for gamepad cursor
                 bool insideCanvas = (cursorY >= canvasViewY) && 
                                     (cursorX >= canvasViewX) && 
                                     (cursorX <= canvasViewX + canvasViewW);
-                                    
-                if (currentSelectionmode == SelectionMode::SingleSelect && insideCanvas) {
-                    deselect_all(world);
-                    lastSelectedEntity = (Entity)-1;
+                if (insideCanvas) {
+                    if (selectedGuiElem) { selectedGuiElem->editorSelected = false; selectedGuiElem = nullptr; }
+                    if (currentSelectionmode == SelectionMode::SingleSelect) {
+                        deselect_all(world);
+                        lastSelectedEntity = (Entity)-1;
+                    }
                 }
             }
         }
@@ -2287,6 +3860,11 @@ void edit_object_with_editor_gamepad(ECSWorld& world, float cursorX, float curso
                             clamp_entity_position_to_canvas(world.position_pool[i]);
                         }
                     }
+                    if (selectedGuiElem) {
+                        SDL_FPoint newPos = { selectedGuiElem->getX() + dx, selectedGuiElem->getY() + dy };
+                        clamp_guiElem_position_to_canvas(newPos, selectedGuiElem->getWidth(), selectedGuiElem->getHeight());
+                        selectedGuiElem->setPos({ static_cast<int>(newPos.x), static_cast<int>(newPos.y) });
+                    }
                     gamepadDidDrag = true;
                     lastGamepadCursorX = cursorX;
                     lastGamepadCursorY = cursorY;
@@ -2297,7 +3875,14 @@ void edit_object_with_editor_gamepad(ECSWorld& world, float cursorX, float curso
         }
     } else if (currentEditMode == EditMode::Delete) {
         if (!confirmDown && confirmDownLastFrame) {
-            if (topmostEntity != (Entity)-1) world.delete_entity(topmostEntity);
+            if (topmostGui) {
+                if (selectedGuiElem == topmostGui) selectedGuiElem = nullptr;
+                guiElements.erase(std::remove_if(guiElements.begin(), guiElements.end(),
+                    [topmostGui](const std::unique_ptr<Gui::IGuiElement>& p) { return p.get() == topmostGui; }),
+                    guiElements.end());
+            } else if (topmostEntity != (Entity)-1) {
+                world.delete_entity(topmostEntity);
+            }
         }
     }
 }
@@ -2357,7 +3942,7 @@ public:
     SceneParser(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f, SDL_Window* w)
         : renderer(r), textEngine(te), font(f), window(w) {}
 
-    std::string engine_root = getEnginePath();
+    std::string engine_root = std::filesystem::absolute(getEnginePath()).string();
     std::string projects_root = getProjectsPath();
 
     // ==========================================
@@ -2367,18 +3952,31 @@ public:
         
         Scene scene;
         
+        std::string fullPath = filepath;
         #ifdef EMSCRIPTEN
             // On Emscripten, use the path as-is (it's already in virtual FS format)
-            std::string fullPath = filepath;
-            // Ensure it starts with / for virtual FS
             if (!fullPath.empty() && fullPath[0] != '/') {
                 fullPath = "/" + fullPath;
             }
         #else
-            // On native platforms, use engine_root
-            std::string fullPath = engine_root + filepath;
+            // On native platforms, if the path is not absolute, prepend engine_root.
+            // Absolute paths (e.g., C:\... or /...) are used directly.
+            if (!fullPath.empty()) {
+                bool isAbsolute = false;
+        #ifdef _WIN32
+                // Windows absolute path: drive letter or starts with \ or /
+                if (fullPath.size() > 1 && fullPath[1] == ':') isAbsolute = true;
+                if (fullPath[0] == '\\' || fullPath[0] == '/') isAbsolute = true;
+        #else
+                // Unix absolute path: starts with /
+                if (fullPath[0] == '/') isAbsolute = true;
         #endif
-            
+                if (!isAbsolute) {
+                    fullPath = engine_root + fullPath;
+                }
+            }
+        #endif
+                    
             std::ifstream file(fullPath);
             if (!file.is_open()) {
                 SDL_Log("Current Working Directory: %s\n", std::filesystem::current_path().string().c_str());
