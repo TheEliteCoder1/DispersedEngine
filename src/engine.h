@@ -2,11 +2,11 @@
 #include <SDL3/SDL.h>
 #include <SDL3_ttf/SDL_ttf.h>
 #include <SDL3_image/SDL_image.h>
+#include <SDL3_mixer/SDL_mixer.h>
 #include <iostream>
 #include <string>
 #include <cstdlib>
 #include <filesystem>
-#include <box2d/box2d.h>
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -1297,7 +1297,7 @@ namespace Gui {
             SDL_RenderFillRect(renderer, &fillRect);
             if (textTexture) {
                 SDL_FRect renderQuad = {
-                    position.x + (width - textWidth) / 2.0f,
+                    (position.x - offsetX) + (width - textWidth) / 2.0f,
                     (position.y - offsetY) + (height - textHeight) / 2.0f,
                     textWidth, textHeight
                 };
@@ -1402,8 +1402,8 @@ namespace Gui {
                 child->render(offsetX, editorOffsetY + panelScrollOffset);
             SDL_SetRenderClipRect(renderer, nullptr);
             scrollbar.render(renderer, offsetX, editorOffsetY);
-            for (auto& child : children)
-                child->renderSelectionOutline(renderer, offsetX, editorOffsetY + panelScrollOffset);
+            //for (auto& child : children)
+                //child->renderSelectionOutline(renderer, offsetX, editorOffsetY + panelScrollOffset);
             renderSelectionOutline(renderer, offsetX, editorOffsetY);
             rect = originalRect; // Restore
         }
@@ -2881,14 +2881,16 @@ namespace Gui {
             }
             float contentW = maxLineWidth + 2 * PADDING_X;
             float contentH = lines.size() * getLineHeight() + 2 * PADDING_Y; // use dynamic line height
-            float viewW = rect.w - 12.0f;
-            float viewH = rect.h - 12.0f;
-
+            
+            // FIX: Subtract padding from the view size so maxOffset() correctly 
+            // allows scrolling to the very edge of the text content.
+            float viewW = rect.w - 12.0f - PADDING_X * 2;
+            float viewH = rect.h - 12.0f - PADDING_Y * 2;
+            
             verticalScrollbar.setGeometry(rect.x + rect.w - 12, rect.y, 12, rect.h,
                                         contentH, viewH);
             horizontalScrollbar.setGeometry(rect.x, rect.y + rect.h - 12, rect.w - 12, 12,
                                             contentW, viewW);
-
             // Sync offsets without callback
             verticalScrollbar.setOffsetNoCallback(scrollY);
             horizontalScrollbar.setOffsetNoCallback(scrollX);
@@ -3352,6 +3354,7 @@ namespace Gui {
                             if (idx == 1) createNewScene();
                             else if (idx == 2) createNewScript();
                             else if (idx == 3) createNewHeader();
+                            else if (idx == 4) createNewConfig();
                             showContextMenu = false;
                             return true;
                         }
@@ -3704,7 +3707,8 @@ namespace Gui {
             "New Folder",
             "New Scene (.json)",
             "New Script (.cpp)",
-            "New Header (.h)"
+            "New Header (.h)",
+            "New Config (.txt)",
         };
         bool showItemContextMenu = false;
         float itemContextMenuX = 0, itemContextMenuY = 0;
@@ -3886,8 +3890,8 @@ namespace Gui {
 
             std::string filePath = (std::filesystem::path(currentPath) / fullName).string();
             nlohmann::json j;
-            j["scene_name"] = "New Scene";
-            j["script_attached"] = "";
+            j["scene_name"] = "SceneName";
+            j["script_attached"] = "ProjectName/scripts/SceneName.cpp";
             j["entities"] = nlohmann::json::array();
             j["gui_elements"] = nlohmann::json::array();
             std::ofstream out(filePath);
@@ -3895,6 +3899,7 @@ namespace Gui {
             out.close();
 
             refreshEntries();
+            
             for (size_t i = 0; i < entries.size(); ++i) {
                 if (entries[i] == fullName) { selectedIndex = (int)i; break; }
             }
@@ -3911,20 +3916,127 @@ namespace Gui {
             } while (std::filesystem::exists(std::filesystem::path(currentPath) / fullName));
 
             std::string filePath = (std::filesystem::path(currentPath) / fullName).string();
+            
+            // Using the bare-bones program.cpp template
             std::string templateContent =
                 "#include \"engine.h\"\n"
+                "#include <iostream>\n"
+                "#include <cmath>\n"
                 "\n"
-                "class MyScript : public ScriptBase {\n"
-                "public:\n"
-                "    void onStart() override {}\n"
-                "    void onUpdate(float dt) override {}\n"
-                "    void onDraw() override {}\n"
-                "    void onEnd() override {}\n"
-                "    std::string getName() const override { return \"MyScript\"; }\n"
+                "#ifdef __EMSCRIPTEN__\n"
+                "#include <emscripten/emscripten.h>\n"
+                "#endif\n"
+                "\n"
+                "struct ProgramContext {\n"
+                "    SDL_Renderer*   renderer    = nullptr;\n"
+                "    TTF_TextEngine* textEngine  = nullptr;\n"
+                "    TTF_Font*       titleFont   = nullptr;\n"
+                "    TTF_Font*       bodyFont    = nullptr;\n"
+                "    SDL_Window*     window      = nullptr;\n"
                 "};\n"
                 "\n"
-                "extern \"C\" ScriptBase* create_script() {\n"
-                "    return new MyScript();\n"
+                "class ProgramScript : public ScriptBase {\n"
+                "public:\n"
+                "    std::string getName() const override { return \"ProgramScript\"; }\n"
+                "    ProgramContext* ctx = nullptr;\n"
+                "    void onStart() override;\n"
+                "    void onUpdate(float dt) override;\n"
+                "    void onDraw() override;\n"
+                "    void onEnd() override;\n"
+                "private:\n"
+                "    float elapsed = 0.0f;\n"
+                "};\n"
+                "\n"
+                "static SDL_Renderer* g_renderer = nullptr;\n"
+                "static SDL_Window* g_window = nullptr;\n"
+                "static TTF_TextEngine* g_textEngine = nullptr;\n"
+                "static TTF_Font* g_bodyFont = nullptr;\n"
+                "static TTF_Font* g_titleFont = nullptr;\n"
+                "static ProgramScript* g_script = nullptr;\n"
+                "static ProgramContext* g_ctx = nullptr;\n"
+                "static bool g_running = true;\n"
+                "static Uint64 g_lastTime = 0;\n"
+                "\n"
+                "#ifdef __EMSCRIPTEN__\n"
+                "void main_loop_callback() {\n"
+                "    if (!g_running) { emscripten_cancel_main_loop(); return; }\n"
+                "    Uint64 now = SDL_GetTicks(); float dt = (float)(now - g_lastTime) / 1000.0f; g_lastTime = now;\n"
+                "    SDL_Event e;\n"
+                "    while (SDL_PollEvent(&e)) {\n"
+                "        if (e.type == SDL_EVENT_QUIT) g_running = false;\n"
+                "        if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) g_running = false;\n"
+                "    }\n"
+                "    g_script->onUpdate(dt);\n"
+                "    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);\n"
+                "    SDL_SetRenderDrawColor(g_renderer, 10, 10, 20, 255);\n"
+                "    SDL_RenderClear(g_renderer);\n"
+                "    int winW = 1600, winH = 900; SDL_GetWindowSize(g_window, &winW, &winH); float w = (float)winW;\n"
+                "    for (int i = 0; i < 9; ++i) {\n"
+                "        SDL_SetRenderDrawColor(g_renderer, 40, 50, 100, (Uint8)(8 + i * 3));\n"
+                "        SDL_FRect band = { 0, (float)(i * 100), w, 100 };\n"
+                "        SDL_RenderFillRect(g_renderer, &band);\n"
+                "    }\n"
+                "    g_script->onDraw(); SDL_RenderPresent(g_renderer);\n"
+                "}\n"
+                "#endif\n"
+                "\n"
+                "void ProgramScript::onStart() { if (!ctx) return; elapsed = 0.0f; SDL_Log(\"[ProgramScript] onStart\"); }\n"
+                "void ProgramScript::onUpdate(float dt) { elapsed += dt; }\n"
+                "void ProgramScript::onDraw() {\n"
+                "    if (!ctx || !ctx->renderer || !ctx->textEngine || !ctx->window) return;\n"
+                "    int winW = 1600, winH = 900; SDL_GetWindowSize(ctx->window, &winW, &winH); float w = (float)winW;\n"
+                "    SDL_SetRenderDrawBlendMode(ctx->renderer, SDL_BLENDMODE_BLEND);\n"
+                "    SDL_FRect titleBg = { 0, 0, w, 110 };\n"
+                "    SDL_SetRenderDrawColor(ctx->renderer, 12, 12, 22, 220);\n"
+                "    SDL_RenderFillRect(ctx->renderer, &titleBg);\n"
+                "    TTF_Font* tf = ctx->titleFont ? ctx->titleFont : ctx->bodyFont;\n"
+                "    if (tf && ctx->textEngine) {\n"
+                "        TTF_Text* title = TTF_CreateText(ctx->textEngine, tf, \"program\", 0);\n"
+                "        if (title) {\n"
+                "            TTF_SetTextColor(title, 200, 210, 255, 255);\n"
+                "            int tw = 0, th = 0; TTF_GetTextSize(title, &tw, &th);\n"
+                "            TTF_DrawRendererText(title, (w - tw) * 0.5f, 18.0f);\n"
+                "            TTF_DestroyText(title);\n"
+                "        }\n"
+                "    }\n"
+                "}\n"
+                "void ProgramScript::onEnd() { SDL_Log(\"[ProgramScript] onEnd\"); }\n"
+                "\n"
+                "int main(int argc, char* argv[]) {\n"
+                "    const float windowWidth = 1600.0f, windowHeight = 900.0f;\n"
+                "    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) { std::cerr << \"SDL_Init failed: \" << SDL_GetError() << \"\\n\"; return -1; }\n"
+                "    if (!TTF_Init()) { std::cerr << \"TTF_Init failed: \" << SDL_GetError() << \"\\n\"; SDL_Quit(); return -1; }\n"
+                "    SDL_Window* window = SDL_CreateWindow(\"Program\", windowWidth, windowHeight, SDL_WINDOW_RESIZABLE);\n"
+                "    SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);\n"
+                "    if (!window || !renderer) { std::cerr << \"Window/Renderer creation failed\\n\"; TTF_Quit(); SDL_Quit(); return -1; }\n"
+                "    TTF_Font* bodyFont = ProjectScript_TTF_OpenFont(\"SampleProject/assets/fonts/fredoka.ttf\", 22);\n"
+                "    TTF_Font* titleFont = ProjectScript_TTF_OpenFont(\"SampleProject/assets/fonts/fredoka.ttf\", 52);\n"
+                "    TTF_TextEngine* textEngine = TTF_CreateRendererTextEngine(renderer);\n"
+                "    ProgramContext ctx; ctx.renderer = renderer; ctx.textEngine = textEngine; ctx.titleFont = titleFont; ctx.bodyFont = bodyFont; ctx.window = window;\n"
+                "    ProgramScript script; script.ctx = &ctx; script.onStart();\n"
+                "    g_renderer = renderer; g_window = window; g_textEngine = textEngine; g_bodyFont = bodyFont; g_titleFont = titleFont; g_script = &script; g_ctx = &ctx; g_lastTime = SDL_GetTicks();\n"
+                "#ifdef __EMSCRIPTEN__\n"
+                "    emscripten_set_main_loop(main_loop_callback, 0, 1);\n"
+                "#else\n"
+                "    bool running = true; Uint64 lastTime = SDL_GetTicks();\n"
+                "    while (running) {\n"
+                "        Uint64 now = SDL_GetTicks(); float dt = (float)(now - lastTime) / 1000.0f; lastTime = now;\n"
+                "        SDL_Event e;\n"
+                "        while (SDL_PollEvent(&e)) { if (e.type == SDL_EVENT_QUIT) running = false; if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) running = false; }\n"
+                "        script.onUpdate(dt);\n"
+                "        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);\n"
+                "        SDL_SetRenderDrawColor(renderer, 10, 10, 20, 255);\n"
+                "        SDL_RenderClear(renderer);\n"
+                "        int winW = 1600, winH = 900; SDL_GetWindowSize(window, &winW, &winH); float w = (float)winW;\n"
+                "        for (int i = 0; i < 9; ++i) { SDL_SetRenderDrawColor(renderer, 40, 50, 100, (Uint8)(8 + i * 3)); SDL_FRect band = { 0, (float)(i * 100), w, 100 }; SDL_RenderFillRect(renderer, &band); }\n"
+                "        script.onDraw(); SDL_RenderPresent(renderer);\n"
+                "    }\n"
+                "#endif\n"
+                "    script.onEnd();\n"
+                "    if (titleFont) TTF_CloseFont(titleFont); if (bodyFont) TTF_CloseFont(bodyFont);\n"
+                "    if (textEngine) TTF_DestroyRendererTextEngine(textEngine);\n"
+                "    SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit();\n"
+                "    return 0;\n"
                 "}\n";
 
             std::ofstream out(filePath);
@@ -3948,18 +4060,33 @@ namespace Gui {
             } while (std::filesystem::exists(std::filesystem::path(currentPath) / fullName));
 
             std::string filePath = (std::filesystem::path(currentPath) / fullName).string();
+            
+            // Using the bare-bones program.h template
             std::string headerContent =
                 "#pragma once\n"
-                "\n"
                 "#include \"engine.h\"\n"
                 "\n"
-                "class MyScript : public ScriptBase {\n"
+                "// Bare-bones context holding just what's needed for rendering\n"
+                "struct ProgramContext {\n"
+                "    SDL_Renderer*   renderer    = nullptr;\n"
+                "    TTF_TextEngine* textEngine  = nullptr;\n"
+                "    TTF_Font*       titleFont   = nullptr;\n"
+                "    TTF_Font*       bodyFont    = nullptr;\n"
+                "    SDL_Window*     window      = nullptr;\n"
+                "};\n"
+                "\n"
+                "class ProgramScript : public ScriptBase {\n"
                 "public:\n"
+                "    std::string getName() const override { return \"ProgramScript\"; }\n"
+                "    ProgramContext* ctx = nullptr;\n"
+                "\n"
                 "    void onStart() override;\n"
                 "    void onUpdate(float dt) override;\n"
                 "    void onDraw() override;\n"
                 "    void onEnd() override;\n"
-                "    std::string getName() const override;\n"
+                "\n"
+                "private:\n"
+                "    float elapsed = 0.0f;\n"
                 "};\n";
 
             std::ofstream out(filePath);
@@ -3969,6 +4096,73 @@ namespace Gui {
             refreshEntries();
             for (size_t i = 0; i < entries.size(); ++i) {
                 if (entries[i] == fullName) { selectedIndex = (int)i; break; }
+            }
+        }
+
+        void createNewConfig() {
+            std::string filePath = (std::filesystem::path(currentPath) / "CMakeLists.txt").string();
+            
+            // Use the current folder name as the project name, fallback to "NewProject"
+            std::string projectName = std::filesystem::path(currentPath).filename().string();
+            if (projectName.empty() || projectName == "." || projectName == "..") {
+                projectName = "NewProject";
+            }
+
+            std::string templateContent =
+                "# projects/" + projectName + "/CMakeLists.txt\n"
+                "\n"
+                "cmake_minimum_required(VERSION 3.20)\n"
+                "\n"
+                "set(PROJECT_SOURCES\n"
+                "    scripts/MainMenuScript.cpp\n"
+                ")\n"
+                "\n"
+                "add_executable(" + projectName + " ${PROJECT_SOURCES})\n"
+                "\n"
+                "# Tell engine.h we are building a project script\n"
+                "target_compile_definitions(" + projectName + " PRIVATE PROJECT_SCRIPT_BUILD=1)\n"
+                "\n"
+                "target_link_libraries(" + projectName + " PRIVATE DispersedEngine)\n"
+                "\n"
+                "target_include_directories(" + projectName + " PRIVATE\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/scripts\n"
+                ")\n"
+                "\n"
+                "# ── Post-build: copy the ENTIRE project folder next to the executable ────────\n"
+                "# This creates Release/" + projectName + "/ containing assets/, scenes/, scripts/, etc.\n"
+                "# Now the exe can just use \"./" + projectName + "/...\" to find everything!\n"
+                "add_custom_command(TARGET " + projectName + " POST_BUILD\n"
+                "    COMMAND ${CMAKE_COMMAND} -E copy_directory\n"
+                "        ${CMAKE_CURRENT_SOURCE_DIR}\n"
+                "        $<TARGET_FILE_DIR:" + projectName + ">/" + projectName + "\n"
+                "    COMMENT \"Copying entire " + projectName + " folder next to executable\"\n"
+                ")\n"
+                "\n"
+                "# ── Platform settings ──────────────────────────────────────────────────────────────\n"
+                "if(EMSCRIPTEN)\n"
+                "    set_target_properties(" + projectName + " PROPERTIES SUFFIX \".html\")\n"
+                "    target_link_options(" + projectName + " PRIVATE\n"
+                "        \"-sALLOW_MEMORY_GROWTH=1\"\n"
+                "        \"-sUSE_WEBGL2=1\"\n"
+                "        \"-sASYNCIFY\"\n"
+                "        \"-sFORCE_FILESYSTEM\"\n"
+                "        # Mount the entire project folder to /" + projectName + " in the virtual FS\n"
+                "        \"--preload-file=${CMAKE_CURRENT_SOURCE_DIR}@/" + projectName + "\"\n"
+                "        \"--shell-file=${CMAKE_SOURCE_DIR}/minimal_shell.html\"\n"
+                "    )\n"
+                "else()\n"
+                "    set_target_properties(" + projectName + " PROPERTIES\n"
+                "        SUFFIX \".exe\"\n"
+                "    )\n"
+                "endif()\n";
+
+            std::ofstream out(filePath);
+            out << templateContent;
+            out.close();
+
+            refreshEntries();
+            for (size_t i = 0; i < entries.size(); ++i) {
+                if (entries[i] == "CMakeLists.txt") { selectedIndex = (int)i; break; }
             }
         }
     };

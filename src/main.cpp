@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "font.h"
 #include <string>
 
 bool showCanvas = true;
@@ -222,6 +223,11 @@ int main(int argc, char* argv[]) {
         SDL_Quit(); return 1;
     }
 
+    if (!MIX_Init()) {
+        SDL_Log("Could not initialize mixer: %s", SDL_GetError());
+        SDL_Quit(); return -1;
+    }
+
     SDL_Window* window = SDL_CreateWindow("Dispersed Engine", (int)windowWidth, (int)windowHeight, SDL_WINDOW_RESIZABLE);
     if (!window) {
         std::cerr << "Window creation failed: " << SDL_GetError() << std::endl;
@@ -230,11 +236,11 @@ int main(int argc, char* argv[]) {
 
     SDL_SetWindowOpacity(window, 0.95f);
 
-#ifdef __EMSCRIPTEN__
-    SDL_Log("PLATFORM: Emscripten detected");
-#else
-    SDL_Log("PLATFORM: Native build");
-#endif
+    #ifdef __EMSCRIPTEN__
+        SDL_Log("PLATFORM: Emscripten detected");
+    #else
+        SDL_Log("PLATFORM: Native build");
+    #endif
 
     SDL_Surface* iconSurface = IMG_Load((getAssetsPath() + "icon.svg").c_str()); 
     if (!iconSurface) SDL_Log("Failed to load icon: %s", SDL_GetError());
@@ -247,16 +253,18 @@ int main(int argc, char* argv[]) {
     }
 
     TTF_TextEngine* textEngine = TTF_CreateRendererTextEngine(renderer);
-    TTF_Font* font = TTF_OpenFont((getAssetsPath() + "fredoka.ttf").c_str(), 20);
-    TTF_Font* fontLarger = TTF_OpenFont((getAssetsPath() + "fira.ttf").c_str(), 23);
 
-    if (!font) std::cerr << "Failed to load font: " << SDL_GetError() << std::endl;
+    std::unique_ptr<Font::Manager> fontManager = std::make_unique<Font::Manager>();
 
-    Gui::TextEditor textEditor(renderer, textEngine, fontLarger, {0, 0, 100, 100});
+
+    fontManager->Load("regularFont", getAssetsPath() + "fredoka.ttf", 20);
+    fontManager->Load("largeFont", getAssetsPath() + "fira.ttf", 23);
+    
+    Gui::TextEditor textEditor(renderer, textEngine, fontManager->Get("largeFont"), {0, 0, 100, 100});
     textEditor.setVisible(false);  // start hidden
 
     std::filesystem::path projectsAbsPath = std::filesystem::absolute(getProjectsPath());
-    Gui::FileExplorer fileExplorer(renderer, textEngine, font, window, projectsAbsPath.string(), "*.json");
+    Gui::FileExplorer fileExplorer(renderer, textEngine, fontManager->Get("regularFont"), window, projectsAbsPath.string(), "*.json");
 
     // ─ Gamepad ─────────────────────────────────────────────────────────────
     SDL_Gamepad* gamepad = nullptr;
@@ -279,15 +287,15 @@ int main(int argc, char* argv[]) {
     bool confirmLastFrame = false;
     float lastTriggerValue = 0.0f;
 
-    Gui::VirtualKeyboard* virtualKeyboard = new Gui::VirtualKeyboard(renderer, textEngine, font);
+    Gui::VirtualKeyboard* virtualKeyboard = new Gui::VirtualKeyboard(renderer, textEngine, fontManager->Get("regularFont"));
     bool showVirtualKeyboard = false;
 
-    AddEntityDialog* dialog = new AddEntityDialog(renderer, textEngine, font, window);
-    AddGuiElemDialog* dialog2 = new AddGuiElemDialog(renderer, textEngine, font, window);
-    Gui::AddChildDialog addChildDialog(renderer, textEngine, font, window, nullptr);
+    AddEntityDialog* dialog = new AddEntityDialog(renderer, textEngine, fontManager->Get("regularFont"), window);
+    AddGuiElemDialog* dialog2 = new AddGuiElemDialog(renderer, textEngine, fontManager->Get("regularFont"), window);
+    Gui::AddChildDialog addChildDialog(renderer, textEngine, fontManager->Get("regularFont"), window, nullptr);
 
     // ── Load scene from file ─────────────────────────────────────────────────
-    SceneParser sceneParser(renderer, textEngine, font, window);
+    SceneParser sceneParser(renderer, textEngine, fontManager->Get("regularFont"), window);
     Scene scene;
     ECSWorld& world = scene.world;
     std::vector<std::unique_ptr<Gui::IGuiElement>>& guiElements = scene.guiElements;
@@ -295,13 +303,13 @@ int main(int argc, char* argv[]) {
     std::string currentSceneFilePath;
 
     // ── Inspectors ─────────────────────────────────────────────────────────
-    Gui::SceneInspector inspector(renderer, textEngine, font, window);
+    Gui::SceneInspector inspector(renderer, textEngine, fontManager->Get("regularFont"), window);
     Gui::IGuiElement* selectedGuiElem = nullptr;
 
     inspector.setGuiElementsVector(&guiElements);
     inspector.setAddChildDialog(&addChildDialog);
     
-    Gui::EntityInspector entityInspector(renderer, textEngine, font, window);
+    Gui::EntityInspector entityInspector(renderer, textEngine, fontManager->Get("regularFont"), window);
     Entity selectedEntity = (Entity)-1;
 
     auto selectEntity = [&](Entity e) {
@@ -334,7 +342,7 @@ int main(int argc, char* argv[]) {
 
     // ── Build toolbar using layout containers ────────────────────────────
     auto makeButton = [&](const std::string& label, std::function<void()> cb) {
-        auto btn = std::make_unique<Gui::Button>(renderer, font, label, SDL_FPoint{0,0}, 100, 50);
+        auto btn = std::make_unique<Gui::Button>(renderer, fontManager->Get("regularFont"), label, SDL_FPoint{0,0}, 100, 50);
         btn->onClicked = cb;
         return btn;
     };
@@ -555,7 +563,7 @@ int main(int argc, char* argv[]) {
                 if (action == Gui::Dialog::Action::Confirm) {
                     size_t countBefore = scene.guiElements.size();
                     create_gui_element_with_user_input(
-                        renderer, textEngine, font, scene.guiElements,
+                        renderer, textEngine, fontManager->Get("regularFont"), scene.guiElements,
                         dialog2->guiElemType.getCurrentOption(), "untitled"
                     );
                     if (scene.guiElements.size() > countBefore) {
@@ -585,11 +593,11 @@ int main(int argc, char* argv[]) {
                         std::string childType = addChildDialog.typeOption.getCurrentOption();
                         std::unique_ptr<Gui::IGuiElement> child;
                         if (childType == "Button") {
-                            child = std::make_unique<Gui::Button>(renderer, font, "Button", SDL_FPoint{0,0}, 100, 50);
+                            child = std::make_unique<Gui::Button>(renderer, fontManager->Get("regularFont"), "Button", SDL_FPoint{0,0}, 100, 50);
                         } else if (childType == "LineEdit") {
-                            child = std::make_unique<Gui::LineEdit>(renderer, textEngine, font, SDL_FRect{0,0,200,36}, "Type here...");
+                            child = std::make_unique<Gui::LineEdit>(renderer, textEngine, fontManager->Get("regularFont"), SDL_FRect{0,0,200,36}, "Type here...");
                         } else if (childType == "SpinBox") {
-                            child = std::make_unique<Gui::SpinBox>(renderer, textEngine, font, SDL_FRect{0,0,200,36}, 0.0f, 100.0f, 50.0f, 1.0f);
+                            child = std::make_unique<Gui::SpinBox>(renderer, textEngine, fontManager->Get("regularFont"), SDL_FRect{0,0,200,36}, 0.0f, 100.0f, 50.0f, 1.0f);
                         }
                         if (child) {
                             int childY = (int)panel->getY() + 10;
@@ -621,8 +629,10 @@ int main(int argc, char* argv[]) {
             }
 
             bool consumedByScrollbar = false;
-            if (verticalScrollbar.handleEvent(e)) consumedByScrollbar = true;
-            if (horizontalScrollbar.handleEvent(e)) consumedByScrollbar = true;
+            if (showCanvas) {
+                if (verticalScrollbar.handleEvent(e)) consumedByScrollbar = true;
+                if (horizontalScrollbar.handleEvent(e)) consumedByScrollbar = true;
+            }
             if (!consumedByScrollbar && e.type == SDL_EVENT_MOUSE_WHEEL) {
                 bool consumedByScene = false;
                 float guiOffsetX = editorScrollX - canvasViewX;
@@ -735,7 +745,7 @@ int main(int argc, char* argv[]) {
                     if (action == Gui::Dialog::Action::Confirm) {
                         size_t countBefore = scene.guiElements.size();
                         create_gui_element_with_user_input(
-                            renderer, textEngine, font, scene.guiElements,
+                            renderer, textEngine, fontManager->Get("regularFont"), scene.guiElements,
                             dialog2->guiElemType.getCurrentOption(), "untitled"
                         );
                         if (scene.guiElements.size() > countBefore) {
@@ -762,11 +772,11 @@ int main(int argc, char* argv[]) {
                         std::string childType = addChildDialog.typeOption.getCurrentOption();
                         std::unique_ptr<Gui::IGuiElement> child;
                         if (childType == "Button") {
-                            child = std::make_unique<Gui::Button>(renderer, font, "Button", SDL_FPoint{0,0}, 100, 50);
+                            child = std::make_unique<Gui::Button>(renderer, fontManager->Get("regularFont"), "Button", SDL_FPoint{0,0}, 100, 50);
                         } else if (childType == "LineEdit") {
-                            child = std::make_unique<Gui::LineEdit>(renderer, textEngine, font, SDL_FRect{0,0,200,36}, "Type here...");
+                            child = std::make_unique<Gui::LineEdit>(renderer, textEngine, fontManager->Get("regularFont"), SDL_FRect{0,0,200,36}, "Type here...");
                         } else if (childType == "SpinBox") {
-                            child = std::make_unique<Gui::SpinBox>(renderer, textEngine, font, SDL_FRect{0,0,200,36}, 0.0f, 100.0f, 50.0f, 1.0f);
+                            child = std::make_unique<Gui::SpinBox>(renderer, textEngine, fontManager->Get("regularFont"), SDL_FRect{0,0,200,36}, 0.0f, 100.0f, 50.0f, 1.0f);
                         }
                         if (child) {
                             int childY = (int)panel->getY() + 10;
@@ -875,16 +885,14 @@ int main(int argc, char* argv[]) {
 
         if (showCanvas) {
             render_editor_canvas(renderer);
-            render_system_and_scene_gui_in_editor(renderer, textEngine, font, world,
+            render_system_and_scene_gui_in_editor(renderer, textEngine, fontManager->Get("regularFont"), world,
                                         canvasViewX, canvasViewY, editorScrollX, editorScrollY, guiElements);
+            verticalScrollbar.render(renderer);
+            horizontalScrollbar.render(renderer);
         } else {
             textEditor.setRect({canvasViewX, canvasViewY, canvasViewW, canvasViewH});
             textEditor.render(0.0f, 0.0f);
         }
-
-        verticalScrollbar.render(renderer);
-        horizontalScrollbar.render(renderer);
-
         if (inspectorVisible) {
             if (selectedGuiElem) {
                 inspector.syncFromTarget();
@@ -900,13 +908,13 @@ int main(int argc, char* argv[]) {
                 SDL_RenderFillRect(renderer, &bg);
                 SDL_SetRenderDrawColor(renderer, 60, 60, 75, 255);
                 SDL_RenderRect(renderer, &bg);
-                TTF_Text* t = TTF_CreateText(textEngine, font, "Inspector", 0);
+                TTF_Text* t = TTF_CreateText(textEngine, fontManager->Get("regularFont"), "Inspector", 0);
                 if (t) {
                     TTF_SetTextColor(t, 180, 180, 200, 255);
                     TTF_DrawRendererText(t, bg.x + 10, bg.y + 10);
                     TTF_DestroyText(t);
                 }
-                t = TTF_CreateText(textEngine, font, "Click an entity\nor GUI element.", 0);
+                t = TTF_CreateText(textEngine, fontManager->Get("regularFont"), "Click an entity\nor GUI element.", 0);
                 if (t) {
                     TTF_SetTextColor(t, 100, 100, 120, 255);
                     TTF_DrawRendererText(t, bg.x + 10, bg.y + 40);
@@ -946,12 +954,12 @@ int main(int argc, char* argv[]) {
     delete dialog2;
     delete virtualKeyboard;
     if (gamepad) SDL_CloseGamepad(gamepad);
-    if (font) TTF_CloseFont(font);
+    fontManager->Clear();
     if (iconSurface) SDL_DestroySurface(iconSurface);
     TTF_DestroyRendererTextEngine(textEngine);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
-    TTF_Quit();
+    MIX_Quit();
     SDL_Quit();
     return 0;
 }

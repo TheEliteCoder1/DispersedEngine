@@ -1,3 +1,3 @@
 # projects/CMakeLists.txt
 add_subdirectory(SampleProject)
-# add_subdirectory(PaintApp)
+add_subdirectory(ChefSim)
