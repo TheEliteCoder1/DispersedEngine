@@ -131,14 +131,18 @@ if exist src\assets (
 xcopy /E /I /Y /D src\assets build_windows\src\Release\assets >nul 2>&1
 echo   -- Engine assets synced to src\Release
 )
-:: Project Assets -> Next to FirstProject.exe
-if exist projects\FirstProject\assets (
-xcopy /E /I /Y /D projects\FirstProject\assets build_windows\projects\FirstProject\Release\assets >nul 2>&1
-echo   -- Project assets synced to FirstProject\Release
+:: Project Assets -> Loop through all projects dynamically
+for /d %%p in (projects\*) do (
+    if exist "%%p\assets" (
+        xcopy /E /I /Y /D "%%p\assets" "build_windows\%%p\Release\assets" >nul 2>&1
+        echo   -- Project assets synced to %%~nxp\Release
+    )
 )
 :: vcpkg DLLs (unchanged between builds, /D skips if already present and identical)
 xcopy /Y /D vcpkg_installed\x64-windows\bin\*.dll build_windows\src\Release\ >nul 2>&1
-xcopy /Y /D vcpkg_installed\x64-windows\bin\*.dll build_windows\projects\FirstProject\Release\ >nul 2>&1
+for /d %%p in (projects\*) do (
+    xcopy /Y /D vcpkg_installed\x64-windows\bin\*.dll "build_windows\%%p\Release\" >nul 2>&1
+)
 echo   -- vcpkg DLLs checked.
 echo.
 
@@ -151,7 +155,8 @@ echo      Run build.bat for a clean full rebuild from scratch.
 echo.
 if "%BUILD_WINDOWS%"=="1" (
 echo Windows Engine:  build_windows\src\Release\Editor.exe
-echo Windows Project: build_windows\projects\FirstProject\Release\FirstProject.exe
+echo Windows Projects:
+for /d %%p in (projects\*) do echo - build_windows\%%p\Release\%%~nxp.exe
 echo.
 )
 if "%BUILD_WEB%"=="1" (
@@ -159,7 +164,6 @@ echo Web Files (Run with 'emrun'^):
 for /r build_web %%f in (*.html) do echo - %%f
 echo.
 )
-
 :end
 pause
 popd

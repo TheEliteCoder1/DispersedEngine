@@ -1,2 +1,3 @@
 # projects/CMakeLists.txt
-add_subdirectory(FirstProject)
+add_subdirectory(SampleProject)
+# add_subdirectory(PaintApp)

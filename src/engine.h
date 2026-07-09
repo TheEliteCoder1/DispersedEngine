@@ -1647,6 +1647,11 @@ namespace Gui {
             }
         }
 
+        void setNewTitle(std::string newTitle) {
+            title = std::move(newTitle);
+        }
+
+
         Action handleEvent(const SDL_Event& ev) {
             if (state != DialogState::Opened) return Action::None;
             SDL_FRect win = animRect();
@@ -3182,13 +3187,24 @@ namespace Gui {
     public:
         FileExplorer(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f,
             SDL_Window* w, const std::string& rootPath, const std::string& filter)
-            : Dialog(r, te, f, w, {0,0,600,500}, "Open File", "Open", "Cancel"),
-            currentPath(rootPath.empty() ? std::filesystem::current_path().string() : rootPath),
-            rootPath(rootPath.empty() ? std::filesystem::current_path().string() : rootPath),  // store root
-            filter(filter),
-            pathEdit(r, te, f, {0,0,1,1}, "Path...")
-        {
+        : Dialog(r, te, f, w, {0,0,600,500}, "Open File", "Open", "Cancel"),
+        currentPath(rootPath.empty() ? std::filesystem::current_path().string() : rootPath),
+        rootPath(rootPath.empty() ? std::filesystem::current_path().string() : rootPath),
+        filter(filter),
+        pathEdit(r, te, f, {0,0,1,1}, "Path..."),
+        renameEdit(r, te, f, {0,0,1,1}, ""), // <--- ADD THIS
+        renderer(r), font(f), textEngine(te)
+    {
             refreshEntries();
+            loadIcons();
+        }
+
+        ~FileExplorer() {
+            if (folderIcon)  SDL_DestroyTexture(folderIcon);
+            if (cppIcon)     SDL_DestroyTexture(cppIcon);
+            if (hIcon)       SDL_DestroyTexture(hIcon);
+            if (sceneIcon)   SDL_DestroyTexture(sceneIcon);
+            if (textIcon)    SDL_DestroyTexture(textIcon);
         }
 
         void setCallback(std::function<void(const std::string&)> cb) { callback = cb; }
@@ -3199,10 +3215,56 @@ namespace Gui {
             refreshEntries();
         }
 
-    protected:
+    private:
+        SDL_FRect getItemContextMenuRect() const {
+            float w = 160.0f, h = 28.0f * itemContextMenuItems.size() + 6.0f;
+            float x = itemContextMenuX, y = itemContextMenuY;
+            SDL_FRect win = animRect();
+            if (x + w > win.x + win.w) x = win.x + win.w - w - 10;
+            if (y + h > win.y + win.h) y = win.y + win.h - h - 10;
+            if (x < win.x + 10) x = win.x + 10;
+            if (y < win.y + 70) y = win.y + 70;
+            return { x, y, w, h };
+        }
 
-        void onOpen() {
-            // Center the dialog on the window
+        void commitRename() {
+            std::string newName = renameEdit.getText();
+            if (renameIndex >= 0 && renameIndex < (int)entries.size()) {
+                std::string oldName = entries[renameIndex];
+                
+                if (!newName.empty() && newName != oldName) {
+                    std::filesystem::path oldPath = std::filesystem::path(currentPath) / oldName;
+                    std::filesystem::path newPath = std::filesystem::path(currentPath) / newName;
+                    
+                    if (!std::filesystem::exists(newPath)) {
+                        std::error_code ec;
+                        std::filesystem::rename(oldPath, newPath, ec);
+                        if (ec) {
+                            SDL_Log("Failed to rename '%s' to '%s': %s", oldName.c_str(), newName.c_str(), ec.message().c_str());
+                        } else {
+                            SDL_Log("Renamed '%s' to '%s'", oldName.c_str(), newName.c_str());
+                        }
+                    } else {
+                        SDL_Log("Failed to rename: '%s' already exists.", newName.c_str());
+                    }
+                }
+            }
+            
+            isRenaming = false;
+            renameEdit.deactivate(window);
+            refreshEntries();
+            
+            // Try to re-select the renamed item in the list
+            for (size_t i = 0; i < entries.size(); ++i) {
+                if (entries[i] == newName) {
+                    selectedIndex = (int)i;
+                    break;
+                }
+            }
+        }
+
+    protected:
+        void onOpen() override {
             int winW, winH;
             SDL_GetWindowSize(window, &winW, &winH);
             logicalRect = {
@@ -3213,11 +3275,131 @@ namespace Gui {
             pathEdit.setPlaceholder("Path...");
             selectedIndex = -1;
             selectedFilePath.clear();
-            goToRoot(); // also refreshes entries
+            goToRoot();
+            loadIcons();
         }
 
-        bool onHandleEvent(const SDL_Event& ev) {
-            // ── Back button click ──────────────────────────────────────────────
+        bool onHandleEvent(const SDL_Event& ev) override {
+            if (showDeleteConfirmation) {
+                if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                    float mx = ev.button.x, my = ev.button.y;
+                    SDL_FRect win = animRect();
+                    float boxW = 300.0f, boxH = 120.0f;
+                    float boxX = win.x + (win.w - boxW) * 0.5f;
+                    float boxY = win.y + (win.h - boxH) * 0.5f;
+                    SDL_FRect yesBtn = { boxX + 20.0f, boxY + boxH - 50.0f, 120.0f, 36.0f };
+                    SDL_FRect noBtn  = { boxX + boxW - 140.0f, boxY + boxH - 50.0f, 120.0f, 36.0f };
+                    
+                    if (mx >= yesBtn.x && mx <= yesBtn.x + yesBtn.w && my >= yesBtn.y && my <= yesBtn.y + yesBtn.h) {
+                        if (deleteIndex >= 0 && deleteIndex < (int)entries.size()) {
+                            std::string pathToDelete = (std::filesystem::path(currentPath) / entries[deleteIndex]).string();
+                            std::error_code ec;
+                            // remove_all works for both files and directories
+                            std::filesystem::remove_all(pathToDelete, ec);
+                            if (ec) SDL_Log("Failed to delete '%s': %s", pathToDelete.c_str(), ec.message().c_str());
+                            else    SDL_Log("Deleted '%s'", pathToDelete.c_str());
+                        }
+                        showDeleteConfirmation = false;
+                        refreshEntries();
+                        return true;
+                    }
+                    if (mx >= noBtn.x && mx <= noBtn.x + noBtn.w && my >= noBtn.y && my <= noBtn.y + noBtn.h) {
+                        showDeleteConfirmation = false;
+                        return true;
+                    }
+                }
+                if (ev.type == SDL_EVENT_KEY_DOWN) {
+                    if (ev.key.key == SDLK_ESCAPE) { showDeleteConfirmation = false; return true; }
+                }
+                return true; // Consume all other events while confirming
+            }
+            // --- NEW: Handle Active Rename Mode ---
+            if (isRenaming) {
+                bool wasActive = renameEdit.isActive();
+                renameEdit.handleEvent(ev, window, 0.0f, 0.0f);
+                
+                if (ev.type == SDL_EVENT_KEY_DOWN) {
+                    if (ev.key.key == SDLK_RETURN) {
+                        commitRename();
+                        return true;
+                    }
+                    if (ev.key.key == SDLK_ESCAPE) {
+                        isRenaming = false;
+                        renameEdit.deactivate(window);
+                        return true;
+                    }
+                }
+                
+                // If the user clicked outside the LineEdit, it deactivates itself. Commit the rename.
+                if (wasActive && !renameEdit.isActive()) {
+                    commitRename();
+                    return true;
+                }
+                
+                return true; // Consume all events while renaming
+            }
+            // Context menu handling
+            if (showContextMenu) {
+                if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                    float mx = ev.button.x, my = ev.button.y;
+                    SDL_FRect menuRect = getContextMenuRect();
+                    if (mx >= menuRect.x && mx <= menuRect.x + menuRect.w &&
+                        my >= menuRect.y && my <= menuRect.y + menuRect.h) {
+                        float itemH = 28.0f;
+                        int idx = (int)((my - menuRect.y) / itemH);
+                        if (idx >= 0 && idx < (int)contextMenuItems.size()) {
+                            if (idx == 0) createNewFolder();
+                            if (idx == 1) createNewScene();
+                            else if (idx == 2) createNewScript();
+                            else if (idx == 3) createNewHeader();
+                            showContextMenu = false;
+                            return true;
+                        }
+                    } else {
+                        showContextMenu = false;
+                        return true;
+                    }
+                }
+                if (ev.type == SDL_EVENT_KEY_DOWN || ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                    showContextMenu = false;
+                    return true;
+                }
+                return true;
+            }
+            if (showItemContextMenu) {
+                if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                    float mx = ev.button.x, my = ev.button.y;
+                    SDL_FRect menuRect = getItemContextMenuRect();
+                    if (mx >= menuRect.x && mx <= menuRect.x + menuRect.w &&
+                        my >= menuRect.y && my <= menuRect.y + menuRect.h) {
+                        float itemH = 28.0f;
+                        int idx = (int)((my - menuRect.y) / itemH);
+                        if (idx == 0) { // Rename was clicked
+                            isRenaming = true;
+                            renameIndex = selectedIndex;
+                            renameEdit.clear();
+                            for (char c : entries[renameIndex]) renameEdit.appendText(std::string(1, c));
+                            renameEdit.setActive(true);
+                            SDL_StartTextInput(window);
+                        } else if (idx == 1) {
+                            showDeleteConfirmation = true;
+                            deleteIndex = selectedIndex;
+                            showItemContextMenu = false;
+                        }
+                        showItemContextMenu = false;
+                        return true;
+                    } else {
+                        showItemContextMenu = false;
+                        return true;
+                    }
+                }
+                if (ev.type == SDL_EVENT_KEY_DOWN || ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                    showItemContextMenu = false;
+                    return true;
+                }
+                return true;
+            }
+            // Back button
             if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                 float mx = ev.button.x, my = ev.button.y;
                 SDL_FRect win = animRect();
@@ -3228,24 +3410,17 @@ namespace Gui {
                     return true;
                 }
             }
-            // Let the path edit handle its own events
+
+            // Path edit
             if (pathEdit.handleEvent(ev, window, 0.0f, 0.0f)) return true;
 
-            // Mouse clicks on the list — single click selects/navigates
-            // directories, double click (clicks >= 2) opens a file. These
-            // were previously two separate blocks with identical
-            // "MOUSE_BUTTON_DOWN + left button" guards; the first one
-            // always matched and returned true first, so the double-click
-            // block below it could never run. Merged into one block that
-            // actually checks ev.button.clicks.
+            // List interactions (left click)
             if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                 float mx = ev.button.x, my = ev.button.y;
                 SDL_FRect win = animRect();
-                // List area is inside the window, with padding
                 SDL_FRect listRect = { win.x + 10, win.y + 70, win.w - 20, win.h - 110 };
                 if (mx >= listRect.x && mx <= listRect.x + listRect.w &&
                     my >= listRect.y && my <= listRect.y + listRect.h) {
-                    // Determine which entry was clicked
                     float rowHeight = 24.0f;
                     int idx = (int)((my - listRect.y) / rowHeight);
                     if (idx >= 0 && idx < (int)entries.size()) {
@@ -3254,13 +3429,43 @@ namespace Gui {
                             goToDirectory(entries[idx]);
                         } else if (ev.button.clicks >= 2) {
                             selectedFilePath = (std::filesystem::path(currentPath) / entries[idx]).string();
-                            selectFile(entries[idx]);  // calls callback and resets
+                            selectFile(entries[idx]);
                         }
                         return true;
                     }
                 }
             }
 
+            // Right-click -> context menu
+            if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_RIGHT) {
+                float mx = ev.button.x, my = ev.button.y;
+                SDL_FRect win = animRect();
+                SDL_FRect listRect = { win.x + 10, win.y + 70, win.w - 20, win.h - 110 };
+                if (mx >= listRect.x && mx <= listRect.x + listRect.w &&
+                    my >= listRect.y && my <= listRect.y + listRect.h) {
+                    float rowHeight = 24.0f;
+                    int idx = (int)((my - listRect.y) / rowHeight);
+                    
+                    // --- MODIFIED: Distinguish between item and empty space ---
+                    if (idx >= 0 && idx < (int)entries.size()) {
+                        // Right-clicked on an item
+                        selectedIndex = idx;
+                        itemContextMenuX = mx;
+                        itemContextMenuY = my;
+                        showItemContextMenu = true;
+                        showContextMenu = false; // Hide the "New..." menu
+                    } else {
+                        // Right-clicked on empty space
+                        contextMenuX = mx;
+                        contextMenuY = my;
+                        showContextMenu = true;
+                        showItemContextMenu = false; // Hide the item menu
+                    }
+                    return true;
+                }
+            }
+
+            // Keyboard navigation
             if (ev.type == SDL_EVENT_KEY_DOWN) {
                 if (ev.key.key == SDLK_RETURN) {
                     if (selectedIndex >= 0 && selectedIndex < (int)entries.size()) {
@@ -3274,7 +3479,7 @@ namespace Gui {
                     }
                 }
                 if (ev.key.key == SDLK_BACKSPACE || ev.key.key == SDLK_UP) {
-                    goToParent();   // go up one level (not root)
+                    goToParent();
                     return true;
                 }
                 if (ev.key.key == SDLK_DOWN) {
@@ -3289,13 +3494,11 @@ namespace Gui {
             return false;
         }
 
-        void onRender(SDL_FRect win) {
-            // Background and border are drawn by base Dialog
-
-            // back button
+        void onRender(SDL_FRect win) override {
             float mx, my;
             SDL_GetMouseState(&mx, &my);
 
+            // Back button
             SDL_FRect backBtn = { win.x + 10, win.y + 40, 30, 28 };
             bool hovered = (mx >= backBtn.x && mx <= backBtn.x + backBtn.w &&
                             my >= backBtn.y && my <= backBtn.y + backBtn.h);
@@ -3314,29 +3517,138 @@ namespace Gui {
             SDL_SetRenderDrawColor(renderer, 80, 80, 100, 255);
             SDL_RenderRect(renderer, &listRect);
 
-            // Clip to list area
             SDL_Rect clip = { (int)listRect.x, (int)listRect.y, (int)listRect.w, (int)listRect.h };
             SDL_SetRenderClipRect(renderer, &clip);
 
-            // Draw each entry
+            // Draw entries with icons
             float rowHeight = 24.0f;
             float y = listRect.y;
+            const float iconSize = 32.0f;
+            const float textOffset = iconSize + 6.0f;
+
             for (size_t i = 0; i < entries.size(); ++i) {
                 SDL_Color bg = (i == selectedIndex) ? SDL_Color{70, 70, 120, 255} : SDL_Color{60, 60, 70, 255};
                 SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, bg.a);
                 SDL_FRect rowRect = { listRect.x, y, listRect.w, rowHeight };
                 SDL_RenderFillRect(renderer, &rowRect);
-                // Icon: directory vs file
-                std::string display = isDir[i] ? "[DIR] " + entries[i] : entries[i];
+
+                // Choose icon (texture)
+                SDL_Texture* icon = nullptr;
                 if (isDir[i]) {
-                    drawText(display.c_str(), listRect.x + 5, y + 2, {200, 200, 180, 255});
+                    icon = folderIcon;
                 } else {
-                    drawText(display.c_str(), listRect.x + 5, y + 2, {220, 220, 240, 255});
+                    std::string ext = getFileExtension(entries[i]);
+                    if (ext == ".cpp" || ext == ".hpp") icon = cppIcon;
+                    else if (ext == ".h") icon = hIcon;
+                    else if (ext == ".json") icon = sceneIcon;
+                    else if (ext == ".txt" || ext == "")  icon = textIcon;
+                }
+
+                if (icon) {
+                    SDL_FRect iconRect = { listRect.x + 4, y + (rowHeight - iconSize) * 0.5f, iconSize, iconSize };
+                    SDL_RenderTexture(renderer, icon, nullptr, &iconRect);
+                } else {
+                    drawText(isDir[i] ? "[DIR]" : "[FILE]", listRect.x + 4, y + 2, {200,200,180,255});
+                }
+
+                SDL_Color textColor = isDir[i] ? SDL_Color{200,200,180,255} : SDL_Color{220,220,240,255};
+                if (isRenaming && i == renameIndex) {
+                    SDL_FRect editRect = { listRect.x + textOffset, y + 2, listRect.w - textOffset - 10, rowHeight - 4 };
+                    renameEdit.setRect(editRect);
+                    renameEdit.render(0.0f, 0.0f);
+                } else {
+                    SDL_Color textColor = isDir[i] ? SDL_Color{200,200,180,255} : SDL_Color{220,220,240,255};
+                    drawText(entries[i].c_str(), listRect.x + textOffset, y + 2, textColor);
                 }
                 y += rowHeight;
             }
 
             SDL_SetRenderClipRect(renderer, nullptr);
+
+            // Context menu
+            if (showContextMenu) {
+                SDL_FRect menuRect = getContextMenuRect();
+                SDL_SetRenderDrawColor(renderer, 40, 40, 50, 220);
+                SDL_RenderFillRect(renderer, &menuRect);
+                SDL_SetRenderDrawColor(renderer, 100, 100, 130, 255);
+                SDL_RenderRect(renderer, &menuRect);
+
+                float itemH = 28.0f;
+                float yPos = menuRect.y;
+                for (size_t i = 0; i < contextMenuItems.size(); ++i) {
+                    SDL_FRect itemRect = { menuRect.x, yPos, menuRect.w, itemH };
+                    float mX, mY;
+                    SDL_GetMouseState(&mX, &mY);
+                    bool hover = (mX >= itemRect.x && mX <= itemRect.x + itemRect.w &&
+                                mY >= itemRect.y && mY <= itemRect.y + itemRect.h);
+                    if (hover) {
+                        SDL_SetRenderDrawColor(renderer, 80, 80, 120, 255);
+                        SDL_RenderFillRect(renderer, &itemRect);
+                    }
+                    drawText(contextMenuItems[i].c_str(), menuRect.x + 8, yPos + 4, {255,255,255,255});
+                    yPos += itemH;
+                }
+            }
+            if (showItemContextMenu) {
+                SDL_FRect menuRect = getItemContextMenuRect();
+                SDL_SetRenderDrawColor(renderer, 40, 40, 50, 220);
+                SDL_RenderFillRect(renderer, &menuRect);
+                SDL_SetRenderDrawColor(renderer, 100, 100, 130, 255);
+                SDL_RenderRect(renderer, &menuRect);
+
+                float itemH = 28.0f;
+                float yPos = menuRect.y;
+                for (size_t i = 0; i < itemContextMenuItems.size(); ++i) {
+                    SDL_FRect itemRect = { menuRect.x, yPos, menuRect.w, itemH };
+                    float mX, mY;
+                    SDL_GetMouseState(&mX, &mY);
+                    bool hover = (mX >= itemRect.x && mX <= itemRect.x + itemRect.w &&
+                                mY >= itemRect.y && mY <= itemRect.y + itemRect.h);
+                    if (hover) {
+                        SDL_SetRenderDrawColor(renderer, 80, 80, 120, 255);
+                        SDL_RenderFillRect(renderer, &itemRect);
+                    }
+                    drawText(itemContextMenuItems[i].c_str(), menuRect.x + 8, yPos + 4, {255,255,255,255});
+                    yPos += itemH;
+                }
+            }
+            if (showDeleteConfirmation) {
+                SDL_FRect win = animRect();
+                float boxW = 300.0f, boxH = 120.0f;
+                float boxX = win.x + (win.w - boxW) * 0.5f;
+                float boxY = win.y + (win.h - boxH) * 0.5f;
+                
+                // Darken background
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 150);
+                SDL_RenderFillRect(renderer, &win);
+                
+                // Dialog Box
+                SDL_SetRenderDrawColor(renderer, 40, 40, 50, 240);
+                SDL_FRect box = { boxX, boxY, boxW, boxH };
+                SDL_RenderFillRect(renderer, &box);
+                SDL_SetRenderDrawColor(renderer, 100, 100, 130, 255);
+                SDL_RenderRect(renderer, &box);
+                
+                // Message Text
+                std::string msg = "Delete '" + (deleteIndex >= 0 && deleteIndex < (int)entries.size() ? entries[deleteIndex] : "") + "'?";
+                drawText(msg.c_str(), boxX + 20.0f, boxY + 20.0f, {255, 255, 255, 255});
+                
+                // Buttons
+                SDL_FRect yesBtn = { boxX + 20.0f, boxY + boxH - 50.0f, 120.0f, 36.0f };
+                SDL_FRect noBtn  = { boxX + boxW - 140.0f, boxY + boxH - 50.0f, 120.0f, 36.0f };
+                
+                float mx, my; SDL_GetMouseState(&mx, &my);
+                
+                bool hoverYes = (mx >= yesBtn.x && mx <= yesBtn.x + yesBtn.w && my >= yesBtn.y && my <= yesBtn.y + yesBtn.h);
+                SDL_SetRenderDrawColor(renderer, hoverYes ? 220 : 180, 60, 60, 255);
+                SDL_RenderFillRect(renderer, &yesBtn);
+                drawText("Yes", yesBtn.x + 45.0f, yesBtn.y + 8.0f, {255, 255, 255, 255});
+                
+                bool hoverNo = (mx >= noBtn.x && mx <= noBtn.x + noBtn.w && my >= noBtn.y && my <= noBtn.y + noBtn.h);
+                SDL_SetRenderDrawColor(renderer, hoverNo ? 100 : 80, 100, 120, 255);
+                SDL_RenderFillRect(renderer, &noBtn);
+                drawText("No", noBtn.x + 48.0f, noBtn.y + 8.0f, {255, 255, 255, 255});
+            }
         }
 
         void onReset() override {
@@ -3344,60 +3656,125 @@ namespace Gui {
             selectedFilePath.clear();
             pathEdit.clear();
             pathEdit.deactivate(window);
+            showContextMenu = false;
         }
 
     public:
-
         bool hasSelectedFile() const { return !selectedFilePath.empty(); }
         std::string getSelectedFilePath() const { return selectedFilePath; }
 
         void triggerCallback() {
             if (!callback) return;
             std::string filePath = selectedFilePath;
-            // If no file was double‑clicked, use the highlighted index
             if (filePath.empty() && selectedIndex >= 0 && selectedIndex < (int)entries.size() && !isDir[selectedIndex]) {
                 filePath = (std::filesystem::path(currentPath) / entries[selectedIndex]).string();
             }
             if (!filePath.empty()) {
                 callback(filePath);
-                // The callback should call reset(), but we can also reset here to be safe
-                // Our callbacks already call reset, so no need.
             }
         }
 
     private:
-        std::string currentPath;                 // absolute path of the current directory
-        std::string rootPath;                    // initial root path
-        std::string filter;                      // pattern (e.g. "*.json")
-        std::vector<std::string> entries;        // display names of files/dirs
-        std::vector<bool> isDir;                 // parallel: true for directories
-        int selectedIndex = -1;                  // currently highlighted entry (for keyboard/gamepad)
+        std::string currentPath;
+        std::string rootPath;
+        std::string filter;
+        std::vector<std::string> entries;
+        std::vector<bool> isDir;
+        int selectedIndex = -1;
         std::function<void(const std::string&)> callback;
-
-        Gui::LineEdit pathEdit;                  // editable path bar
-        bool showHidden = false;                 // toggle hidden files
-        
+        Gui::LineEdit pathEdit;
+        Gui::LineEdit renameEdit;
+        bool showHidden = false;
         std::string selectedFilePath;
 
-        // scan currentPath and fill entries/isDir
+        SDL_Renderer*   renderer;
+        TTF_TextEngine* textEngine;
+        TTF_Font*       font;
+
+        // GPU textures
+        SDL_Texture* folderIcon = nullptr;
+        SDL_Texture* cppIcon    = nullptr;
+        SDL_Texture* hIcon      = nullptr;
+        SDL_Texture* sceneIcon  = nullptr;
+        SDL_Texture* textIcon   = nullptr;
+
+        bool showContextMenu = false;
+        float contextMenuX = 0, contextMenuY = 0;
+        std::vector<std::string> contextMenuItems = {
+            "New Folder",
+            "New Scene (.json)",
+            "New Script (.cpp)",
+            "New Header (.h)"
+        };
+        bool showItemContextMenu = false;
+        float itemContextMenuX = 0, itemContextMenuY = 0;
+        std::vector<std::string> itemContextMenuItems = {"Rename", "Delete"};
+        bool isRenaming = false;
+        int renameIndex = -1;
+        bool showDeleteConfirmation = false;
+        int deleteIndex = -1;
+
+
+        // --------------------------------------------------------------
+        // Helpers
+        // --------------------------------------------------------------
+        static std::string getFileExtension(const std::string& name) {
+            size_t dot = name.rfind('.');
+            if (dot == std::string::npos) return "";
+            std::string ext = name.substr(dot);
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            return ext;
+        }
+
+        void loadIcons() {
+            // Helper: try to load texture; on failure, create fallback
+            auto loadOrFallback = [this](const std::string& filename, SDL_Color fallbackColor, const std::string& fallbackLabel) -> SDL_Texture* {
+                std::string path = getAssetsPath() + filename;
+                SDL_Texture* tex = IMG_LoadTexture(renderer, path.c_str());
+                if (tex) {
+                    return tex;
+                }
+                SDL_Log("Failed to load icon: %s (%s)", path.c_str(), SDL_GetError());
+                return nullptr;
+            };
+
+            if (!folderIcon)  folderIcon  = loadOrFallback("folder_icon.svg",  SDL_Color{200,180,50,255}, "Dir");
+            if (!cppIcon)     cppIcon     = loadOrFallback("cpp_icon.svg",     SDL_Color{80,160,255,255}, "C++");
+            if (!hIcon)       hIcon       = loadOrFallback("h_icon.svg",       SDL_Color{255,120,80,255}, "Head");
+            if (!sceneIcon)   sceneIcon   = loadOrFallback("scene_icon.svg",   SDL_Color{80,200,120,255}, "Scne");
+            if (!textIcon)    textIcon    = loadOrFallback("file_icon.svg",     SDL_Color{80,100,120,255}, "Txt");
+        }
+
+        SDL_FRect getContextMenuRect() const {
+            float w = 160.0f, h = 28.0f * contextMenuItems.size() + 6.0f;
+            float x = contextMenuX, y = contextMenuY;
+            SDL_FRect win = animRect();
+            if (x + w > win.x + win.w) x = win.x + win.w - w - 10;
+            if (y + h > win.y + win.h) y = win.y + win.h - h - 10;
+            if (x < win.x + 10) x = win.x + 10;
+            if (y < win.y + 70) y = win.y + 70;
+            return { x, y, w, h };
+        }
+
+        // --------------------------------------------------------------
+        // Directory listing
+        // --------------------------------------------------------------
         void refreshEntries() {
             entries.clear();
             isDir.clear();
             try {
                 for (const auto& entry : std::filesystem::directory_iterator(currentPath)) {
                     std::string name = entry.path().filename().string();
-                    // Skip hidden (starting with '.' unless showHidden is true)
                     if (!showHidden && name[0] == '.') continue;
                     bool dir = entry.is_directory();
                     if (!dir && !matchesFilter(name)) continue;
                     entries.push_back(name);
                     isDir.push_back(dir);
                 }
-                // Sort: directories first, then files alphabetically
                 std::vector<size_t> order(entries.size());
                 std::iota(order.begin(), order.end(), 0);
                 std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-                    if (isDir[a] != isDir[b]) return isDir[a] > isDir[b]; // directories first
+                    if (isDir[a] != isDir[b]) return isDir[a] > isDir[b];
                     return entries[a] < entries[b];
                 });
                 std::vector<std::string> sortedEntries;
@@ -3408,19 +3785,16 @@ namespace Gui {
                 }
                 entries.swap(sortedEntries);
                 isDir.swap(sortedIsDir);
-                // Reset selection
                 selectedIndex = -1;
-                // Update path edit
                 pathEdit.clear();
                 for (char c : currentPath) pathEdit.appendText(std::string(1, c));
             } catch (const std::exception& e) {
-                // e.g. permission denied
                 SDL_Log("FileExplorer: error reading directory: %s", e.what());
             }
-        }         
+        }
 
         void goToParent() {
-            if (currentPath == rootPath) return; // never navigate above the configured root
+            if (currentPath == rootPath) return;
             std::filesystem::path p(currentPath);
             if (p.has_parent_path()) {
                 currentPath = p.parent_path().string();
@@ -3445,8 +3819,12 @@ namespace Gui {
             if (filter == "*" || filter.empty()) return true;
             auto patterns = splitFilter();
             for (const auto& pat : patterns) {
-                // Simple wildcard matching: only '*' supported
                 if (pat == "*") return true;
+                
+                // --- ADD THIS ---
+                if (pat == "*.*") return true; // Treat *.* as a wildcard for all files
+                // ----------------
+
                 if (pat.find('*') != std::string::npos) {
                     std::string prefix = pat.substr(0, pat.find('*'));
                     std::string suffix = pat.substr(pat.find('*') + 1);
@@ -3461,7 +3839,6 @@ namespace Gui {
             return false;
         }
 
-        // Helper to split filter patterns
         std::vector<std::string> splitFilter() const {
             std::vector<std::string> parts;
             size_t start = 0, end;
@@ -3471,6 +3848,128 @@ namespace Gui {
             }
             parts.push_back(filter.substr(start));
             return parts;
+        }
+
+        void createNewFolder() {
+            std::string base = "new_folder";
+            int counter = 1;
+            std::string fullName;
+            do {
+                fullName = base + (counter > 1 ? "_" + std::to_string(counter) : "");
+                ++counter;
+            } while (std::filesystem::exists(std::filesystem::path(currentPath) / fullName));
+
+            std::string folderPath = (std::filesystem::path(currentPath) / fullName).string();
+            
+            // Create the directory on the disk
+            if (!std::filesystem::create_directory(folderPath)) {
+                SDL_Log("Failed to create folder: %s", folderPath.c_str());
+                return;
+            }
+
+            refreshEntries();
+            // Automatically select the newly created folder in the list
+            for (size_t i = 0; i < entries.size(); ++i) {
+                if (entries[i] == fullName) { selectedIndex = (int)i; break; }
+            }
+        }
+
+        void createNewScene() {
+            std::string base = "new_scene";
+            std::string ext = ".json";
+            int counter = 1;
+            std::string fullName;
+            do {
+                fullName = base + (counter > 1 ? "_" + std::to_string(counter) : "") + ext;
+                ++counter;
+            } while (std::filesystem::exists(std::filesystem::path(currentPath) / fullName));
+
+            std::string filePath = (std::filesystem::path(currentPath) / fullName).string();
+            nlohmann::json j;
+            j["scene_name"] = "New Scene";
+            j["script_attached"] = "";
+            j["entities"] = nlohmann::json::array();
+            j["gui_elements"] = nlohmann::json::array();
+            std::ofstream out(filePath);
+            out << j.dump(4);
+            out.close();
+
+            refreshEntries();
+            for (size_t i = 0; i < entries.size(); ++i) {
+                if (entries[i] == fullName) { selectedIndex = (int)i; break; }
+            }
+        }
+
+        void createNewScript() {
+            std::string base = "new_script";
+            std::string ext = ".cpp";
+            int counter = 1;
+            std::string fullName;
+            do {
+                fullName = base + (counter > 1 ? "_" + std::to_string(counter) : "") + ext;
+                ++counter;
+            } while (std::filesystem::exists(std::filesystem::path(currentPath) / fullName));
+
+            std::string filePath = (std::filesystem::path(currentPath) / fullName).string();
+            std::string templateContent =
+                "#include \"engine.h\"\n"
+                "\n"
+                "class MyScript : public ScriptBase {\n"
+                "public:\n"
+                "    void onStart() override {}\n"
+                "    void onUpdate(float dt) override {}\n"
+                "    void onDraw() override {}\n"
+                "    void onEnd() override {}\n"
+                "    std::string getName() const override { return \"MyScript\"; }\n"
+                "};\n"
+                "\n"
+                "extern \"C\" ScriptBase* create_script() {\n"
+                "    return new MyScript();\n"
+                "}\n";
+
+            std::ofstream out(filePath);
+            out << templateContent;
+            out.close();
+
+            refreshEntries();
+            for (size_t i = 0; i < entries.size(); ++i) {
+                if (entries[i] == fullName) { selectedIndex = (int)i; break; }
+            }
+        }
+
+        void createNewHeader() {
+            std::string base = "new_header";
+            std::string ext = ".h";
+            int counter = 1;
+            std::string fullName;
+            do {
+                fullName = base + (counter > 1 ? "_" + std::to_string(counter) : "") + ext;
+                ++counter;
+            } while (std::filesystem::exists(std::filesystem::path(currentPath) / fullName));
+
+            std::string filePath = (std::filesystem::path(currentPath) / fullName).string();
+            std::string headerContent =
+                "#pragma once\n"
+                "\n"
+                "#include \"engine.h\"\n"
+                "\n"
+                "class MyScript : public ScriptBase {\n"
+                "public:\n"
+                "    void onStart() override;\n"
+                "    void onUpdate(float dt) override;\n"
+                "    void onDraw() override;\n"
+                "    void onEnd() override;\n"
+                "    std::string getName() const override;\n"
+                "};\n";
+
+            std::ofstream out(filePath);
+            out << headerContent;
+            out.close();
+
+            refreshEntries();
+            for (size_t i = 0; i < entries.size(); ++i) {
+                if (entries[i] == fullName) { selectedIndex = (int)i; break; }
+            }
         }
     };
 

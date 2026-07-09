@@ -216,6 +216,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "SDL Initialization failed: " << SDL_GetError() << std::endl;
         return 1;
     }
+
     if (!TTF_Init()) {
         std::cerr << "TTF Initialization failed: " << SDL_GetError() << std::endl;
         SDL_Quit(); return 1;
@@ -235,7 +236,7 @@ int main(int argc, char* argv[]) {
     SDL_Log("PLATFORM: Native build");
 #endif
 
-    SDL_Surface* iconSurface = IMG_Load((getAssetsPath() + "icon.svg").c_str());
+    SDL_Surface* iconSurface = IMG_Load((getAssetsPath() + "icon.svg").c_str()); 
     if (!iconSurface) SDL_Log("Failed to load icon: %s", SDL_GetError());
     else SDL_SetWindowIcon(window, iconSurface);
 
@@ -341,7 +342,7 @@ int main(int argc, char* argv[]) {
     auto loadBtn = makeButton("O-Scene", [&]() {
         if (selectedGuiElem) { selectedGuiElem->editorSelected = false; selectedGuiElem = nullptr; }
         inspector.setTarget(nullptr);
-
+        fileExplorer.setNewTitle("File Explorer - [*.json]");
         fileExplorer.setFilter("*.json");
         fileExplorer.setCallback([&](const std::string& path) {
             scene = sceneParser.loadFromFile(path);
@@ -363,7 +364,8 @@ int main(int argc, char* argv[]) {
     });
 
     auto openScriptBtn = makeButton("O-Script", [&]() {
-        fileExplorer.setFilter("*.cpp;*.h");
+        fileExplorer.setNewTitle("File Explorer - [*.cpp;*.h;*.txt;*.*]");
+        fileExplorer.setFilter("*.cpp;*.h;*.txt;*.*;*.json");
         fileExplorer.setCallback([&](const std::string& path) {
             textEditor.loadFile(path);
             showCanvas = false;
@@ -411,7 +413,7 @@ int main(int argc, char* argv[]) {
     auto selectMultiBtn = makeButton("Multi Sel", [](){ currentSelectionmode = SelectionMode::MultiSelect; });
     auto deselectBtn = makeButton("Deselect", [&world, &selectedGuiElem](){
         deselect_all(world);
-        if (selectedGuiElem) {
+        if (selectedGuiElem) {  
             selectedGuiElem->editorSelected = false;
             selectedGuiElem = nullptr;
         }
@@ -462,14 +464,12 @@ int main(int argc, char* argv[]) {
             if (e.type == SDL_EVENT_KEY_DOWN) {
 
                 bool ctrlDown = (e.key.mod & (SDL_KMOD_LCTRL | SDL_KMOD_RCTRL));
-                bool shiftDown = (e.key.mod & (SDL_KMOD_LSHIFT | SDL_KMOD_RSHIFT));
 
-
-                if (ctrlDown && shiftDown && e.key.key == SDLK_I) {
+                if (ctrlDown && e.key.key == SDLK_I) {
                     inspectorVisible = !inspectorVisible;
                 }
 
-                if (ctrlDown && shiftDown && e.key.key == SDLK_S) {
+                if (ctrlDown && e.key.key == SDLK_S) {
                     inspector.commitAllFields();   // flush any pending edits
                     // check first since saveToFile() dosen't do that automatically
                     if (!currentSceneFilePath.empty()) {
