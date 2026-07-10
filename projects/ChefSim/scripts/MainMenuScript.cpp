@@ -35,6 +35,7 @@ static MainMenuScript* g_script = nullptr;
 static MainMenuContext* g_ctx = nullptr;
 static bool g_running = true;
 static Uint64 g_lastTime = 0;
+EngineResources g_resources;
 
 #ifdef __EMSCRIPTEN__
 void main_loop_callback() {
@@ -59,9 +60,9 @@ void main_loop_callback() {
 }
 #endif
 
-void ProgramScript::onStart() { if (!ctx) return; elapsed = 0.0f; SDL_Log("[ProgramScript] onStart"); }
-void ProgramScript::onUpdate(float dt) { elapsed += dt; }
-void ProgramScript::onDraw() {
+void MainMenuScript::onStart() { if (!ctx) return; elapsed = 0.0f; SDL_Log("[MainMenuScript] onStart"); }
+void MainMenuScript::onUpdate(float dt) { elapsed += dt; }
+void MainMenuScript::onDraw() {
     if (!ctx || !ctx->renderer || !ctx->textEngine || !ctx->window) return;
     int winW = 1600, winH = 900; SDL_GetWindowSize(ctx->window, &winW, &winH); float w = (float)winW;
     SDL_SetRenderDrawBlendMode(ctx->renderer, SDL_BLENDMODE_BLEND);
@@ -79,7 +80,7 @@ void ProgramScript::onDraw() {
         }
     }
 }
-void ProgramScript::onEnd() { SDL_Log("[ProgramScript] onEnd"); }
+void MainMenuScript::onEnd() { SDL_Log("[MainMenuScript] onEnd"); }
 
 int main(int argc, char* argv[]) {
     const float windowWidth = 1600.0f, windowHeight = 900.0f;
@@ -91,8 +92,8 @@ int main(int argc, char* argv[]) {
     TTF_Font* bodyFont = ProjectScript_TTF_OpenFont("SampleProject/assets/fonts/fredoka.ttf", 22);
     TTF_Font* titleFont = ProjectScript_TTF_OpenFont("SampleProject/assets/fonts/fredoka.ttf", 52);
     TTF_TextEngine* textEngine = TTF_CreateRendererTextEngine(renderer);
-    ProgramContext ctx; ctx.renderer = renderer; ctx.textEngine = textEngine; ctx.titleFont = titleFont; ctx.bodyFont = bodyFont; ctx.window = window;
-    ProgramScript script; script.ctx = &ctx; script.onStart();
+    MainMenuContext ctx; ctx.renderer = renderer; ctx.textEngine = textEngine; ctx.titleFont = titleFont; ctx.bodyFont = bodyFont; ctx.window = window;
+    MainMenuScript script; script.ctx = &ctx; script.onStart();
     g_renderer = renderer; g_window = window; g_textEngine = textEngine; g_bodyFont = bodyFont; g_titleFont = titleFont; g_script = &script; g_ctx = &ctx; g_lastTime = SDL_GetTicks();
 #ifdef __EMSCRIPTEN__
     emscripten_set_main_loop(main_loop_callback, 0, 1);

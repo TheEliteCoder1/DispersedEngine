@@ -1,8 +1,8 @@
 #include "engine.h"
-#include "font.h"
-#include <string>
 
 bool showCanvas = true;
+EngineResources g_resources;
+
 
 void create_entity_with_user_input(ECSWorld& world, const std::string& name, float w, float h) {
     Entity e = world.create_entity();
@@ -27,7 +27,7 @@ void create_gui_element_with_user_input(
     const std::string& name
 ) {
     if (type == "Button") {
-        auto btn = std::make_unique<Gui::Button>(renderer, font, "btn", SDL_FPoint{0,0}, 100, 50);
+        auto btn = std::make_unique<Gui::Button>(renderer, font, "btn", SDL_FPoint{0.0f,0.0f}, 100.0f, 50.0f);
         guiElements.push_back(std::move(btn));
     }
     else if (type == "LineEdit") {
@@ -150,6 +150,107 @@ protected:
     }
 };
 
+class AudioEditorDialog : public Gui::Dialog {
+    public:
+    Gui::LineEdit pathEdit, outputNameEdit;
+    Gui::SpinBox pitchBox, speedBox;
+    std::function<void()> onChooseFile; // <--- ADDED: Callback for the choose file button
+
+    public:
+    AudioEditorDialog(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f, SDL_Window* w)
+    : Gui::Dialog(r, te, f, w, {0,0,500,350}, "Audio Editor", "Save", "Cancel"),
+    pathEdit(r, te, f, {0,0,1,1}, "Select audio file..."),
+    outputNameEdit(r, te, f, {0,0,1,1}, "output_sfx"),
+    pitchBox(r, te, f, {0,0,1,1}, 0.5f, 2.0f, 1.0f, 0.1f),
+    speedBox(r, te, f, {0,0,1,1}, 0.5f, 2.0f, 1.0f, 0.1f) {}
+
+    Gui::ITextInput* getCurrentTextInput() override {
+    if (pathEdit.isActive()) return &pathEdit;
+    if (outputNameEdit.isActive()) return &outputNameEdit;
+    return nullptr;
+    }
+    protected:
+    void onOpen() override { int w,h; SDL_GetWindowSize(window,&w,&h); logicalRect={(w-500)*0.5f,(h-350)*0.5f,500,350}; }
+
+    bool onHandleEvent(const SDL_Event& ev) override {
+        // <--- ADDED: Handle "Choose File" button click
+        if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
+            SDL_FRect win = animRect();
+            SDL_FRect chooseBtn = {win.x + win.w - 110, win.y+70, 90, 30};
+            float mx = ev.button.x, my = ev.button.y;
+            if (mx >= chooseBtn.x && mx <= chooseBtn.x+chooseBtn.w && my >= chooseBtn.y && my <= chooseBtn.y+chooseBtn.h) {
+                if (onChooseFile) onChooseFile();
+                return true; // Consume event
+            }
+        }
+        // <--- END ADDED
+
+        if (pathEdit.handleEvent(ev, window, 0.0f, 0.0f)) return true;
+        if (outputNameEdit.handleEvent(ev, window, 0.0f, 0.0f)) return true;
+        if (pitchBox.handleEvent(ev, window, 0.0f, 0.0f)) return true;
+        if (speedBox.handleEvent(ev, window, 0.0f, 0.0f)) return true;
+        return false;
+    }
+
+    void onRender(SDL_FRect win) override {
+        drawText("Input Path:", win.x+20, win.y+50, {80,80,80,255});
+        
+        // <--- MODIFIED: Narrowed the pathEdit width to fit the button
+        pathEdit.setRect({win.x+20, win.y+70, win.w-140, 30}); pathEdit.render(0,0);
+        
+        // <--- ADDED: Draw the "Choose File" button
+        SDL_FRect chooseBtn = {win.x + win.w - 110, win.y+70, 85, 30};
+        float mx, my; SDL_GetMouseState(&mx, &my);
+        SDL_Color btnCol = (mx >= chooseBtn.x && mx <= chooseBtn.x+chooseBtn.w && my >= chooseBtn.y && my <= chooseBtn.y+chooseBtn.h) ? SDL_Color{120,120,120,255} : SDL_Color{80,80,80,255};
+        SDL_SetRenderDrawColor(renderer, btnCol.r, btnCol.g, btnCol.b, btnCol.a);
+        SDL_RenderFillRect(renderer, &chooseBtn);
+        drawText("Select", chooseBtn.x + 10, chooseBtn.y + 5, {255,255,255,255});
+        // <--- END ADDED
+
+        drawText("Output Name:", win.x+20, win.y+120, {80,80,80,255});
+        outputNameEdit.setRect({win.x+20, win.y+140, win.w-40, 30}); outputNameEdit.render(0,0);
+        drawText("Pitch:", win.x+20, win.y+190, {80,80,80,255});
+        pitchBox.setRect({win.x+20, win.y+210, 150, 30}); pitchBox.render(0,0);
+        drawText("Speed:", win.x+200, win.y+190, {80,80,80,255});
+        speedBox.setRect({win.x+200, win.y+210, 150, 30}); speedBox.render(0,0);
+    }
+
+    void onReset() override { pathEdit.clear(); outputNameEdit.clear(); pathEdit.deactivate(window); outputNameEdit.deactivate(window); }
+};
+
+
+
+class AnimationPreviewerDialog : public Gui::Dialog {
+    Gui::LineEdit animNameEdit, framesEdit; // framesEdit takes comma-separated resource names
+    Gui::SpinBox speedBox;
+public:
+    AnimationPreviewerDialog(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f, SDL_Window* w)
+        : Gui::Dialog(r, te, f, w, {0,0,500,350}, "Animation Creator", "Save Anim", "Cancel"),
+          animNameEdit(r, te, f, {0,0,1,1}, "my_animation"),
+          framesEdit(r, te, f, {0,0,1,1}, "frame1,frame2,frame3"),
+          speedBox(r, te, f, {0,0,1,1}, 0.1f, 60.0f, 10.0f, 0.5f) {}
+    Gui::ITextInput* getCurrentTextInput() override {
+        if(animNameEdit.isActive()) return &animNameEdit; if(framesEdit.isActive()) return &framesEdit; return nullptr;
+    }
+protected:
+    void onOpen() override { int w,h; SDL_GetWindowSize(window,&w,&h); logicalRect={(w-500)*0.5f,(h-350)*0.5f,500,350}; }
+    bool onHandleEvent(const SDL_Event& ev) override {
+        if(animNameEdit.handleEvent(ev,window,0,0)) return true;
+        if(framesEdit.handleEvent(ev,window,0,0)) return true;
+        if(speedBox.handleEvent(ev,window,0,0)) return true;
+        return false;
+    }
+    void onRender(SDL_FRect win) override {
+        drawText("Animation Name:", win.x+20, win.y+50, {80,80,80,255});
+        animNameEdit.setRect({win.x+20, win.y+70, win.w-40, 30}); animNameEdit.render(0,0);
+        drawText("Frames (comma-sep):", win.x+20, win.y+120, {80,80,80,255});
+        framesEdit.setRect({win.x+20, win.y+140, win.w-40, 30}); framesEdit.render(0,0);
+        drawText("Speed (FPS):", win.x+20, win.y+190, {80,80,80,255});
+        speedBox.setRect({win.x+20, win.y+210, 150, 30}); speedBox.render(0,0);
+    }
+    void onReset() override { animNameEdit.clear(); framesEdit.clear(); animNameEdit.deactivate(window); framesEdit.deactivate(window); }
+};
+
 namespace Gui {
 
     AddChildDialog::AddChildDialog(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
@@ -252,19 +353,21 @@ int main(int argc, char* argv[]) {
         SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1;
     }
 
+    g_resources.TextureManager.SetRenderer(renderer);
+    if (!g_resources.AudioManager.CreateMixerDevice()) {
+        SDL_Log("Audio mixer init failed");
+    }
+
     TTF_TextEngine* textEngine = TTF_CreateRendererTextEngine(renderer);
 
-    std::unique_ptr<Font::Manager> fontManager = std::make_unique<Font::Manager>();
-
-
-    fontManager->Load("regularFont", getAssetsPath() + "fredoka.ttf", 20);
-    fontManager->Load("largeFont", getAssetsPath() + "fira.ttf", 23);
+    g_resources.FontManager.Load("regularFont", getAssetsPath() + "fredoka.ttf", 20);
+    g_resources.FontManager.Load("largeFont", getAssetsPath() + "fira.ttf", 23);
     
-    Gui::TextEditor textEditor(renderer, textEngine, fontManager->Get("largeFont"), {0, 0, 100, 100});
+    Gui::TextEditor textEditor(renderer, textEngine, g_resources.FontManager.Get("largeFont"), {0, 0, 100, 100});
     textEditor.setVisible(false);  // start hidden
 
     std::filesystem::path projectsAbsPath = std::filesystem::absolute(getProjectsPath());
-    Gui::FileExplorer fileExplorer(renderer, textEngine, fontManager->Get("regularFont"), window, projectsAbsPath.string(), "*.json");
+    Gui::FileExplorer fileExplorer(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window, projectsAbsPath.string(), "*.json");
 
     // ─ Gamepad ─────────────────────────────────────────────────────────────
     SDL_Gamepad* gamepad = nullptr;
@@ -287,15 +390,15 @@ int main(int argc, char* argv[]) {
     bool confirmLastFrame = false;
     float lastTriggerValue = 0.0f;
 
-    Gui::VirtualKeyboard* virtualKeyboard = new Gui::VirtualKeyboard(renderer, textEngine, fontManager->Get("regularFont"));
+    Gui::VirtualKeyboard* virtualKeyboard = new Gui::VirtualKeyboard(renderer, textEngine, g_resources.FontManager.Get("regularFont"));
     bool showVirtualKeyboard = false;
 
-    AddEntityDialog* dialog = new AddEntityDialog(renderer, textEngine, fontManager->Get("regularFont"), window);
-    AddGuiElemDialog* dialog2 = new AddGuiElemDialog(renderer, textEngine, fontManager->Get("regularFont"), window);
-    Gui::AddChildDialog addChildDialog(renderer, textEngine, fontManager->Get("regularFont"), window, nullptr);
+    AddEntityDialog* dialog = new AddEntityDialog(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window);
+    AddGuiElemDialog* dialog2 = new AddGuiElemDialog(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window);
+    Gui::AddChildDialog addChildDialog(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window, nullptr);
 
     // ── Load scene from file ─────────────────────────────────────────────────
-    SceneParser sceneParser(renderer, textEngine, fontManager->Get("regularFont"), window);
+    SceneParser sceneParser(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window);
     Scene scene;
     ECSWorld& world = scene.world;
     std::vector<std::unique_ptr<Gui::IGuiElement>>& guiElements = scene.guiElements;
@@ -303,13 +406,13 @@ int main(int argc, char* argv[]) {
     std::string currentSceneFilePath;
 
     // ── Inspectors ─────────────────────────────────────────────────────────
-    Gui::SceneInspector inspector(renderer, textEngine, fontManager->Get("regularFont"), window);
+    Gui::SceneInspector inspector(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window);
     Gui::IGuiElement* selectedGuiElem = nullptr;
 
     inspector.setGuiElementsVector(&guiElements);
     inspector.setAddChildDialog(&addChildDialog);
     
-    Gui::EntityInspector entityInspector(renderer, textEngine, fontManager->Get("regularFont"), window);
+    Gui::EntityInspector entityInspector(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window);
     Entity selectedEntity = (Entity)-1;
 
     auto selectEntity = [&](Entity e) {
@@ -342,7 +445,7 @@ int main(int argc, char* argv[]) {
 
     // ── Build toolbar using layout containers ────────────────────────────
     auto makeButton = [&](const std::string& label, std::function<void()> cb) {
-        auto btn = std::make_unique<Gui::Button>(renderer, fontManager->Get("regularFont"), label, SDL_FPoint{0,0}, 100, 50);
+        auto btn = std::make_unique<Gui::Button>(renderer, g_resources.FontManager.Get("regularFont"), label, SDL_FPoint{0,0}, 100, 50);
         btn->onClicked = cb;
         return btn;
     };
@@ -433,6 +536,29 @@ int main(int argc, char* argv[]) {
         textEditor.setVisible(!showCanvas);
     });
 
+    AudioEditorDialog* audioEditor = new AudioEditorDialog(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window);
+    
+    audioEditor->onChooseFile = [&]() {
+        fileExplorer.setNewTitle("Choose Audio File");
+        fileExplorer.setFilter("*.mp3;*.wav"); // Filters for mp3 and wav files
+        fileExplorer.setCallback([&](const std::string& path) {
+            // Populate the pathEdit field with the selected file path
+            audioEditor->pathEdit.clear();
+            for (char c : path) audioEditor->pathEdit.appendText(std::string(1, c));
+            
+            // Close the file explorer to return focus to the Audio Editor
+            fileExplorer.reset(); 
+        });
+        fileExplorer.open();
+    };
+
+    // TextureCropperDialog* texCropper = new TextureCropperDialog(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window);
+    // AnimationPreviewerDialog* animPrev = new AnimationPreviewerDialog(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window);
+
+    auto audioToolBtn = makeButton("Audio Tool", [audioEditor](){ modeBeforeDialog = currentEditMode; currentEditMode = EditMode::Dialog; audioEditor->open(); });
+    // auto texToolBtn = makeButton("Tex Tool", [texCropper](){ modeBeforeDialog = currentEditMode; currentEditMode = EditMode::Dialog; texCropper->open(); });
+    // auto animToolBtn = makeButton("Anim Tool", [animPrev](){ modeBeforeDialog = currentEditMode; currentEditMode = EditMode::Dialog; animPrev->open(); });
+
     auto toolbar = std::make_unique<Gui::HBoxContainer>();
     toolbar->setPadding(5);
     toolbar->setSpacing(5);
@@ -449,7 +575,12 @@ int main(int argc, char* argv[]) {
     toolbar->addChild(std::move(deselectBtn));
     toolbar->addChild(std::move(inspectorToggleBtn));
     toolbar->addChild(std::move(canvasBtn));
+    toolbar->addChild(std::move(audioToolBtn));
+    // toolbar->addChild(std::move(texToolBtn));
+    // toolbar->addChild(std::move(animToolBtn));
     toolbar->setRect({0, 0, windowWidth, 60});
+
+    Physics::PhysicsWorld physicsWorld;
 
     bool running = true;
     SDL_Event e;
@@ -563,7 +694,7 @@ int main(int argc, char* argv[]) {
                 if (action == Gui::Dialog::Action::Confirm) {
                     size_t countBefore = scene.guiElements.size();
                     create_gui_element_with_user_input(
-                        renderer, textEngine, fontManager->Get("regularFont"), scene.guiElements,
+                        renderer, textEngine, g_resources.FontManager.Get("regularFont"), scene.guiElements,
                         dialog2->guiElemType.getCurrentOption(), "untitled"
                     );
                     if (scene.guiElements.size() > countBefore) {
@@ -584,6 +715,22 @@ int main(int argc, char* argv[]) {
                 }
                 continue;
             }
+            if (audioEditor->isOpen()) {
+                auto action = audioEditor->handleEvent(e);
+                if (action == Gui::Dialog::Action::Confirm) {
+                    std::string in = audioEditor->pathEdit.getText();
+                    std::string outName = audioEditor->outputNameEdit.getText();
+                    
+                    // Extract the directory of the input file and append the new output filename
+                    std::filesystem::path inPath(in);
+                    std::string outPath = (inPath.parent_path() / (outName + ".mp3")).string();
+                    
+                    std::string cmd = "ffmpeg -y -i \"" + in + "\" -filter:a \"asetrate=44100*" + std::to_string(audioEditor->pitchBox.getValue()) + ",atempo=" + std::to_string(audioEditor->speedBox.getValue()) + "\" \"" + outPath + "\"";
+                    get_system_output(cmd.c_str());
+                    g_resources.AudioManager.Load(outName, outPath);
+                    audioEditor->reset(); currentEditMode = modeBeforeDialog;
+                } else if (action == Gui::Dialog::Action::Cancel) { audioEditor->reset(); currentEditMode = modeBeforeDialog; }
+            }
             // ── AddChildDialog handling ────────────────────────────────────
             if (addChildDialog.isOpen()) {
                 auto action = addChildDialog.handleEvent(e);
@@ -593,11 +740,11 @@ int main(int argc, char* argv[]) {
                         std::string childType = addChildDialog.typeOption.getCurrentOption();
                         std::unique_ptr<Gui::IGuiElement> child;
                         if (childType == "Button") {
-                            child = std::make_unique<Gui::Button>(renderer, fontManager->Get("regularFont"), "Button", SDL_FPoint{0,0}, 100, 50);
+                            child = std::make_unique<Gui::Button>(renderer, g_resources.FontManager.Get("regularFont"), "Button", SDL_FPoint{0,0}, 100, 50);
                         } else if (childType == "LineEdit") {
-                            child = std::make_unique<Gui::LineEdit>(renderer, textEngine, fontManager->Get("regularFont"), SDL_FRect{0,0,200,36}, "Type here...");
+                            child = std::make_unique<Gui::LineEdit>(renderer, textEngine, g_resources.FontManager.Get("regularFont"), SDL_FRect{0,0,200,36}, "Type here...");
                         } else if (childType == "SpinBox") {
-                            child = std::make_unique<Gui::SpinBox>(renderer, textEngine, fontManager->Get("regularFont"), SDL_FRect{0,0,200,36}, 0.0f, 100.0f, 50.0f, 1.0f);
+                            child = std::make_unique<Gui::SpinBox>(renderer, textEngine, g_resources.FontManager.Get("regularFont"), SDL_FRect{0,0,200,36}, 0.0f, 100.0f, 50.0f, 1.0f);
                         }
                         if (child) {
                             int childY = (int)panel->getY() + 10;
@@ -745,7 +892,7 @@ int main(int argc, char* argv[]) {
                     if (action == Gui::Dialog::Action::Confirm) {
                         size_t countBefore = scene.guiElements.size();
                         create_gui_element_with_user_input(
-                            renderer, textEngine, fontManager->Get("regularFont"), scene.guiElements,
+                            renderer, textEngine, g_resources.FontManager.Get("regularFont"), scene.guiElements,
                             dialog2->guiElemType.getCurrentOption(), "untitled"
                         );
                         if (scene.guiElements.size() > countBefore) {
@@ -772,11 +919,11 @@ int main(int argc, char* argv[]) {
                         std::string childType = addChildDialog.typeOption.getCurrentOption();
                         std::unique_ptr<Gui::IGuiElement> child;
                         if (childType == "Button") {
-                            child = std::make_unique<Gui::Button>(renderer, fontManager->Get("regularFont"), "Button", SDL_FPoint{0,0}, 100, 50);
+                            child = std::make_unique<Gui::Button>(renderer, g_resources.FontManager.Get("regularFont"), "Button", SDL_FPoint{0,0}, 100, 50);
                         } else if (childType == "LineEdit") {
-                            child = std::make_unique<Gui::LineEdit>(renderer, textEngine, fontManager->Get("regularFont"), SDL_FRect{0,0,200,36}, "Type here...");
+                            child = std::make_unique<Gui::LineEdit>(renderer, textEngine, g_resources.FontManager.Get("regularFont"), SDL_FRect{0,0,200,36}, "Type here...");
                         } else if (childType == "SpinBox") {
-                            child = std::make_unique<Gui::SpinBox>(renderer, textEngine, fontManager->Get("regularFont"), SDL_FRect{0,0,200,36}, 0.0f, 100.0f, 50.0f, 1.0f);
+                            child = std::make_unique<Gui::SpinBox>(renderer, textEngine, g_resources.FontManager.Get("regularFont"), SDL_FRect{0,0,200,36}, 0.0f, 100.0f, 50.0f, 1.0f);
                         }
                         if (child) {
                             int childY = (int)panel->getY() + 10;
@@ -885,8 +1032,14 @@ int main(int argc, char* argv[]) {
 
         if (showCanvas) {
             render_editor_canvas(renderer);
-            render_system_and_scene_gui_in_editor(renderer, textEngine, fontManager->Get("regularFont"), world,
+            render_system_and_scene_gui_in_editor(renderer, textEngine, g_resources.FontManager.Get("regularFont"), world,
                                         canvasViewX, canvasViewY, editorScrollX, editorScrollY, guiElements);
+
+            //physics_sync_system(world, physicsWorld);
+            //physicsWorld.Step(delta_time, 4);
+            //movement_system(world, delta_time); // The Box2D version
+            //animation_system(world, delta_time);
+
             verticalScrollbar.render(renderer);
             horizontalScrollbar.render(renderer);
         } else {
@@ -908,13 +1061,13 @@ int main(int argc, char* argv[]) {
                 SDL_RenderFillRect(renderer, &bg);
                 SDL_SetRenderDrawColor(renderer, 60, 60, 75, 255);
                 SDL_RenderRect(renderer, &bg);
-                TTF_Text* t = TTF_CreateText(textEngine, fontManager->Get("regularFont"), "Inspector", 0);
+                TTF_Text* t = TTF_CreateText(textEngine, g_resources.FontManager.Get("regularFont"), "Inspector", 0);
                 if (t) {
                     TTF_SetTextColor(t, 180, 180, 200, 255);
                     TTF_DrawRendererText(t, bg.x + 10, bg.y + 10);
                     TTF_DestroyText(t);
                 }
-                t = TTF_CreateText(textEngine, fontManager->Get("regularFont"), "Click an entity\nor GUI element.", 0);
+                t = TTF_CreateText(textEngine, g_resources.FontManager.Get("regularFont"), "Click an entity\nor GUI element.", 0);
                 if (t) {
                     TTF_SetTextColor(t, 100, 100, 120, 255);
                     TTF_DrawRendererText(t, bg.x + 10, bg.y + 40);
@@ -932,6 +1085,9 @@ int main(int argc, char* argv[]) {
 
         addChildDialog.tick(delta_time);
         if (addChildDialog.isOpen()) addChildDialog.render();
+
+        audioEditor->tick(delta_time);
+        if (audioEditor->isOpen())  audioEditor->render();
 
         // FileExplorer is rendered on top of everything else
         fileExplorer.tick(delta_time);
@@ -954,7 +1110,7 @@ int main(int argc, char* argv[]) {
     delete dialog2;
     delete virtualKeyboard;
     if (gamepad) SDL_CloseGamepad(gamepad);
-    fontManager->Clear();
+    g_resources.FontManager.Clear();
     if (iconSurface) SDL_DestroySurface(iconSurface);
     TTF_DestroyRendererTextEngine(textEngine);
     SDL_DestroyRenderer(renderer);

@@ -14,6 +14,7 @@ static MainMenuScript* g_script = nullptr;
 static MainMenuContext* g_ctx = nullptr;
 static bool g_running = true;
 static Uint64 g_lastTime = 0;
+EngineResources g_resources;
 
 
 #ifdef __EMSCRIPTEN__

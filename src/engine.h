@@ -1,8 +1,4 @@
 #pragma once
-#include <SDL3/SDL.h>
-#include <SDL3_ttf/SDL_ttf.h>
-#include <SDL3_image/SDL_image.h>
-#include <SDL3_mixer/SDL_mixer.h>
 #include <iostream>
 #include <string>
 #include <cstdlib>
@@ -19,6 +15,11 @@
 #include <array>
 #include <tuple>
 #include <stdio.h>
+#include <SDL3/SDL.h>
+#include "physics.h"
+#include "music.h"
+#include "texture.h"
+#include "font.h"
 
 // ============================================================
 // Platform Detection and Path Helpers
@@ -120,6 +121,16 @@ inline std::string getEnginePath(const std::string& relativePath = "") {
 #endif
 }
 
+struct EngineResources {
+    Font::Manager FontManager;
+    Texture::Manager TextureManager;
+    MusicAndSfx::Manager AudioManager;
+    // Maps animation resource name to a list of loaded texture names (frames)
+    std::unordered_map<std::string, std::vector<std::string>> animations; 
+};
+
+extern EngineResources g_resources;
+
 inline std::filesystem::path getProjectsPathFS(const std::string& relativePath = "") {
     return std::filesystem::path(getProjectsPath(relativePath));
 }
@@ -181,8 +192,40 @@ namespace Components {
         bool isSelected = false;
         SDL_Color selectionColor = {0, 255, 0, 255};
     };
-    struct Velocity { float x = 0.0f, y = 0.0f; };
-    struct Acceleration { float x = 0.0f, y = 0.0f; };
+
+    struct TextureRef {
+        std::string resourceName;
+        bool isAnimation = false;
+        SDL_FRect sourceRect = {0, 0, 0, 0};
+    };
+
+    struct AnimationState {
+        float speed = 10.0f;
+        float timer = 0.0f;
+        int currentFrame = 0;
+        bool isPlaying = true;
+    };
+
+    struct SfxEmitter {
+        std::string sfxName;
+        float volume = 1.0f;
+        float pitch = 1.0f;
+        bool playOnCollision = false;
+    };
+
+    struct PhysicsBodyDef {
+        Physics::ShapeType shapeType = Physics::ShapeType::Rectangle;
+        b2BodyType bodyType  = b2_dynamicBody;
+        float width = 50.0f;
+        float height = 50.0f;
+        float radius = 25.0f;
+        std::vector<b2Vec2> polygonPoints;
+        float density = 1.0f;
+        bool isSensor = false;
+        uint16_t category = Physics::LAYER_1;
+        uint16_t mask = Physics::LAYER_ALL;
+        b2BodyId bodyId = b2_nullBodyId;
+    };
 }
 
 const float LOGICAL_CANVAS_WIDTH  = 1390.0f;
@@ -226,10 +269,16 @@ struct ECSWorld {
     std::vector<Components::ZIndex> z_index_pool;
     std::vector<uint8_t> has_selection;
     std::vector<Components::Selection> selection_pool;
-    std::vector<uint8_t> has_velocity;
-    std::vector<Components::Velocity> velocity_pool;
-    std::vector<uint8_t> has_acceleration;
-    std::vector<Components::Acceleration> acceleration_pool;
+    std::vector<uint8_t> has_texture_ref;
+    std::vector<Components::TextureRef> texture_ref_pool;
+    std::vector<uint8_t> has_animation_state;
+    std::vector<Components::AnimationState> animation_state_pool;
+    std::vector<uint8_t> has_sfx_emitter;
+    std::vector<Components::SfxEmitter> sfx_emitter_pool;
+    std::vector<uint8_t> has_physics_body;
+    std::vector<Components::PhysicsBodyDef> physics_body_pool;
+
+
     size_t entity_count = 0;
 
     ECSWorld() {
@@ -243,10 +292,14 @@ struct ECSWorld {
         z_index_pool.reserve(MAX_ENTITIES);
         has_selection.reserve(MAX_ENTITIES);
         selection_pool.reserve(MAX_ENTITIES);
-        has_velocity.reserve(MAX_ENTITIES);
-        velocity_pool.reserve(MAX_ENTITIES);
-        has_acceleration.reserve(MAX_ENTITIES);
-        acceleration_pool.reserve(MAX_ENTITIES);
+        has_texture_ref.reserve(MAX_ENTITIES);
+        texture_ref_pool.reserve(MAX_ENTITIES);
+        has_animation_state.reserve(MAX_ENTITIES);
+        animation_state_pool.reserve(MAX_ENTITIES);
+        has_sfx_emitter.reserve(MAX_ENTITIES);
+        sfx_emitter_pool.reserve(MAX_ENTITIES);
+        has_physics_body.reserve(MAX_ENTITIES);
+        physics_body_pool.reserve(MAX_ENTITIES);
     }
 
     Entity create_entity() {
@@ -261,10 +314,14 @@ struct ECSWorld {
         z_index_pool.emplace_back();
         has_selection.push_back(0);
         selection_pool.emplace_back();
-        has_velocity.push_back(0);
-        velocity_pool.emplace_back();
-        has_acceleration.push_back(0);
-        acceleration_pool.emplace_back();
+        has_texture_ref.push_back(0);
+        texture_ref_pool.emplace_back();
+        has_animation_state.push_back(0);
+        animation_state_pool.emplace_back();
+        has_sfx_emitter.push_back(0);
+        sfx_emitter_pool.emplace_back();
+        has_physics_body.push_back(0);
+        physics_body_pool.emplace_back();
         return id;
     }
 
@@ -282,10 +339,14 @@ struct ECSWorld {
             z_index_pool[id] = z_index_pool[last];
             has_selection[id] = has_selection[last];
             selection_pool[id] = selection_pool[last];
-            has_velocity[id] = has_velocity[last];
-            velocity_pool[id] = velocity_pool[last];
-            has_acceleration[id] = has_acceleration[last];
-            acceleration_pool[id] = acceleration_pool[last];
+            has_texture_ref[id] = has_texture_ref[last];
+            texture_ref_pool[id] = texture_ref_pool[last];
+            has_animation_state[id] = has_animation_state[last];
+            animation_state_pool[id] = animation_state_pool[last];
+            has_sfx_emitter[id] = has_sfx_emitter[last];
+            sfx_emitter_pool[id] = sfx_emitter_pool[last];
+            has_physics_body[id] = has_physics_body[last];
+            physics_body_pool[id] = physics_body_pool[last];
         }
         has_metadata.pop_back();
         metadata_pool.pop_back();
@@ -297,10 +358,14 @@ struct ECSWorld {
         z_index_pool.pop_back();
         has_selection.pop_back();
         selection_pool.pop_back();
-        has_velocity.pop_back();
-        velocity_pool.pop_back();
-        has_acceleration.pop_back();
-        acceleration_pool.pop_back();
+        has_texture_ref.pop_back();
+        texture_ref_pool.pop_back();
+        has_animation_state.pop_back();
+        animation_state_pool.pop_back();
+        has_sfx_emitter.pop_back();
+        sfx_emitter_pool.pop_back();
+        has_physics_body.pop_back();
+        physics_body_pool.pop_back();
         entity_count--;
     }
 
@@ -309,9 +374,32 @@ struct ECSWorld {
     void add_rectangle_shape(Entity id) { if (id < entity_count) has_rectangle_shape[id] = 1; }
     void add_z_index(Entity id) { if (id < entity_count) has_z_index[id] = 1; }
     void add_selection(Entity id) { if (id < entity_count) has_selection[id] = 1; }
-    void add_velocity(Entity id) { if (id < entity_count) has_velocity[id] = 1; }
-    void add_acceleration(Entity id) { if (id < entity_count) has_acceleration[id] = 1; }
+    void add_texture_ref(Entity id) { if (id < entity_count) has_texture_ref[id] = 1; }
+    void add_animation_state(Entity id) { if (id < entity_count) has_animation_state[id] = 1; }
+    void add_sfx_emitter(Entity id) { if (id < entity_count) has_sfx_emitter[id] = 1; }
+    void add_physics_body(Entity id) { if (id < entity_count) has_physics_body[id] = 1; }
 };
+
+void physics_sync_system(ECSWorld& world, Physics::PhysicsWorld& physWorld) {
+    for (Entity i = 0; i < world.entity_count; ++i) {
+        if (world.has_physics_body[i] && world.has_position[i]) {
+            auto& def = world.physics_body_pool[i];
+            if (!b2Body_IsValid(def.bodyId)) {
+                float cx = world.position_pool[i].x + (world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f) * 0.5f;
+                float cy = world.position_pool[i].y + (world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f) * 0.5f;
+                
+                auto body = std::make_unique<Physics::PhysicsBody>(physWorld.GetHandle(), def.bodyType, cx, cy);
+                if (def.shapeType == Physics::ShapeType::Rectangle) {
+                    body->AddRectangle(def.width, def.height, def.density, def.category, def.mask, def.isSensor);
+                } else if (def.shapeType == Physics::ShapeType::Circle) {
+                    body->AddCircle(def.radius, def.density, def.category, def.mask, def.isSensor);
+                }
+                def.bodyId = body->GetHandle();
+                physWorld.AddOwned(std::move(body));
+            }
+        }
+    }
+}
 
 enum DialogState { Closed = 0, Opening, Opened, Closing };
 
@@ -2362,11 +2450,6 @@ namespace Gui {
                         else if (f.key == "rect_w") world->rectangle_shape_pool[e].w = val;
                         else if (f.key == "rect_h") world->rectangle_shape_pool[e].h = val;
                         else if (f.key == "z_index") world->z_index_pool[e].z = (int)val;
-                        else if (f.key == "vel_x") world->velocity_pool[e].x = val;
-                        else if (f.key == "vel_y") world->velocity_pool[e].y = val;
-                        else if (f.key == "acc_x") world->acceleration_pool[e].x = val;
-                        else if (f.key == "acc_y") world->acceleration_pool[e].y = val;
-                        
                         f.lastSyncedValue = val;
                     }
                 } else if (f.widget->getType() == "LineEdit") {
@@ -2397,10 +2480,6 @@ namespace Gui {
                         else if (f.key == "rect_w") worldVal = world->rectangle_shape_pool[e].w;
                         else if (f.key == "rect_h") worldVal = world->rectangle_shape_pool[e].h;
                         else if (f.key == "z_index") worldVal = (float)world->z_index_pool[e].z;
-                        else if (f.key == "vel_x") worldVal = world->velocity_pool[e].x;
-                        else if (f.key == "vel_y") worldVal = world->velocity_pool[e].y;
-                        else if (f.key == "acc_x") worldVal = world->acceleration_pool[e].x;
-                        else if (f.key == "acc_y") worldVal = world->acceleration_pool[e].y;
 
                         if (worldVal != f.lastSyncedValue) {
                             sb->setValue(worldVal);
@@ -2488,17 +2567,31 @@ namespace Gui {
                 addSpinBox("Height", "rect_h", world->rectangle_shape_pool[e].h, 1.0f, 9999.0f);
             }
 
-            if (world->has_z_index[e])
+            if (world->has_z_index[e]) {
                 addSpinBox("Z-Index", "z_index", (float)world->z_index_pool[e].z, 0, 1000, 1.0f);
-
-            if (world->has_velocity[e]) {
-                addSpinBox("Vel X", "vel_x", world->velocity_pool[e].x, -9999.0f, 9999.0f);
-                addSpinBox("Vel Y", "vel_y", world->velocity_pool[e].y, -9999.0f, 9999.0f);
             }
 
-            if (world->has_acceleration[e]) {
-                addSpinBox("Acc X", "acc_x", world->acceleration_pool[e].x, -9999.0f, 9999.0f);
-                addSpinBox("Acc Y", "acc_y", world->acceleration_pool[e].y, -9999.0f, 9999.0f);
+            if (world->has_physics_body[e]) {
+                auto& p = world->physics_body_pool[e];
+                addSpinBox("Shape Type", "phys_shape", (float)p.shapeType, 0, 4, 1);
+                addSpinBox("Width", "phys_w", p.width, 1, 9999, 1);
+                addSpinBox("Height", "phys_h", p.height, 1, 9999, 1);
+                addSpinBox("Radius", "phys_r", p.radius, 1, 9999, 1);
+            }
+            if (world->has_texture_ref[e]) {
+                auto& t = world->texture_ref_pool[e];
+                addLineEdit("Tex Resource", "tex_res", t.resourceName);
+                addSpinBox("Is Anim", "tex_isAnim", t.isAnimation ? 1.0f : 0.0f, 0, 1, 1);
+            }
+            if (world->has_animation_state[e]) {
+                auto& a = world->animation_state_pool[e];
+                addSpinBox("Anim Speed", "anim_speed", a.speed, 0.1f, 60.0f, 0.5f);
+            }
+            if (world->has_sfx_emitter[e]) {
+                auto& s = world->sfx_emitter_pool[e];
+                addLineEdit("SFX Name", "sfx_name", s.sfxName);
+                addSpinBox("Volume", "sfx_vol", s.volume, 0.0f, 1.0f, 0.1f);
+                addSpinBox("Play On Col", "sfx_col", s.playOnCollision ? 1.0f : 0.0f, 0, 1, 1);
             }
         }
 
@@ -3207,6 +3300,7 @@ namespace Gui {
             if (hIcon)       SDL_DestroyTexture(hIcon);
             if (sceneIcon)   SDL_DestroyTexture(sceneIcon);
             if (textIcon)    SDL_DestroyTexture(textIcon);
+            if (musicIcon)   SDL_DestroyTexture(musicIcon);
         }
 
         void setCallback(std::function<void(const std::string&)> cb) { callback = cb; }
@@ -3545,6 +3639,7 @@ namespace Gui {
                     else if (ext == ".h") icon = hIcon;
                     else if (ext == ".json") icon = sceneIcon;
                     else if (ext == ".txt" || ext == "")  icon = textIcon;
+                    else if (ext == ".mp3" || ext == ".wav") icon = musicIcon;
                 }
 
                 if (icon) {
@@ -3700,6 +3795,7 @@ namespace Gui {
         SDL_Texture* hIcon      = nullptr;
         SDL_Texture* sceneIcon  = nullptr;
         SDL_Texture* textIcon   = nullptr;
+        SDL_Texture* musicIcon  = nullptr;
 
         bool showContextMenu = false;
         float contextMenuX = 0, contextMenuY = 0;
@@ -3746,7 +3842,8 @@ namespace Gui {
             if (!cppIcon)     cppIcon     = loadOrFallback("cpp_icon.svg",     SDL_Color{80,160,255,255}, "C++");
             if (!hIcon)       hIcon       = loadOrFallback("h_icon.svg",       SDL_Color{255,120,80,255}, "Head");
             if (!sceneIcon)   sceneIcon   = loadOrFallback("scene_icon.svg",   SDL_Color{80,200,120,255}, "Scne");
-            if (!textIcon)    textIcon    = loadOrFallback("file_icon.svg",     SDL_Color{80,100,120,255}, "Txt");
+            if (!textIcon)    textIcon    = loadOrFallback("file_icon.svg",    SDL_Color{80,100,120,255}, "Txt");
+            if (!musicIcon)   musicIcon   = loadOrFallback("music_icon.svg",   SDL_Color{80,100,120,255}, "Wav/Mp4");
         }
 
         SDL_FRect getContextMenuRect() const {
@@ -3956,6 +4053,7 @@ namespace Gui {
                 "static ProgramContext* g_ctx = nullptr;\n"
                 "static bool g_running = true;\n"
                 "static Uint64 g_lastTime = 0;\n"
+                "EngineResources g_resources;\n"
                 "\n"
                 "#ifdef __EMSCRIPTEN__\n"
                 "void main_loop_callback() {\n"
@@ -4172,13 +4270,137 @@ namespace Gui {
 
 // Scene and SceneParser are defined after the Gui namespace (at the bottom of this file).
 
+inline void animation_system(ECSWorld& world, float dt)
+{
+    for (Entity i = 0;  i < world.entity_count; i++)
+    {
+        if (world.has_animation_state[i] && world.has_texture_ref[i])
+        {
+            auto& state = world.animation_state_pool[i];
+            if (!state.isPlaying) continue;
+            
+            auto it = g_resources.animations.find(world.texture_ref_pool[i].resourceName);
+            if (it != g_resources.animations.end() && !it->second.empty()) {
+                state.timer += dt;
+                float frameDuration = 1.0f / state.speed;
+                if (state.timer >= frameDuration) {
+                    state.timer -= frameDuration;
+                    state.currentFrame = (state.currentFrame + 1) % it->second.size();
+                }
+            }
+        }
+    }
+}
+
+inline void render_entity_texture(SDL_Renderer* renderer, const ECSWorld& world, Entity i, float screenX, float screenY)
+{
+    if (!world.has_texture_ref[i]) return;
+
+    const auto& texRef = world.texture_ref_pool[i];
+    SDL_Texture* tex = nullptr;
+    if (texRef.isAnimation) {
+        auto it = g_resources.animations.find(texRef.resourceName);
+        if (it != g_resources.animations.end() && !it->second.empty())
+        {
+            int frameIdx = world.has_animation_state[i] ? world.animation_state_pool[i].currentFrame : 0;
+            frameIdx = frameIdx % it->second.size();
+            tex = g_resources.TextureManager.Get(it->second[frameIdx]);
+        }
+    } else {
+        tex = g_resources.TextureManager.Get(texRef.resourceName);
+    }
+
+    if (tex) {
+        float tw, th;
+        SDL_GetTextureSize(tex, &tw, &th);
+        SDL_FRect dst = {screenX, screenY, tw, th};
+        if (texRef.sourceRect.w > 0 && texRef.sourceRect.h > 0)
+        {
+            SDL_RenderTexture(renderer, tex, &texRef.sourceRect, &dst);
+        } else {
+            SDL_RenderTexture(renderer, tex, nullptr, &dst);
+        }
+    }
+}
+
+inline void render_physics_shape_overlay(SDL_Renderer* renderer, const Components::PhysicsBodyDef& phys, float screenX, float screenY)
+{
+    SDL_SetRenderDrawColor(renderer, 0, 255, 0, 150); // Semi-transparent green
+    switch (phys.shapeType)
+    {
+        case Physics::ShapeType::Rectangle: {
+            SDL_FRect r = {screenX - phys.width * 0.5f, screenY - phys.height * 0.5f, phys.width, phys.height};
+            SDL_RenderRect(renderer, &r);
+        }
+        case Physics::ShapeType::Circle: {
+            const int segs = 32;
+            for (int i = 0; i < segs; i++)
+            {
+                float a1 = (float)i / segs * 2.0f * M_PI;
+                float a2 = (float)(i + 1) / segs * 2.0f * M_PI;
+                SDL_RenderLine(
+                    renderer, 
+                    screenX + std::cos(a1) * phys.radius, screenY + std::sin(a1) * phys.radius,
+                    screenX + std::cos(a2) * phys.radius, screenY + std::sin(a2) * phys.radius
+                );
+            }
+            break;
+        }
+        case Physics::ShapeType::Polygon: {
+            for (size_t i = 0; i < phys.polygonPoints.size(); i++) {
+                auto p1 = phys.polygonPoints[i];
+                auto p2 = phys.polygonPoints[(i + 1) % phys.polygonPoints.size()];
+                SDL_RenderLine(renderer, screenX + p1.x, screenY + p1.y, screenX + p2.x, screenY + p2.y);
+            }
+            break;
+        }
+        default: break;
+    }
+}
+
+
+inline void render_transform_gizmo(SDL_Renderer* renderer, float screenX, float screenY, bool isSelected) {
+    if (!isSelected) return;
+    // Translation X
+    SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255); 
+    SDL_RenderLine(renderer, screenX, screenY, screenX + 30, screenY);
+    // Translation Y
+    SDL_SetRenderDrawColor(renderer, 0, 255, 0, 255); 
+    SDL_RenderLine(renderer, screenX, screenY, screenX, screenY + 30);
+    // Rotation Handle
+    SDL_SetRenderDrawColor(renderer, 0, 100, 255, 255);
+    SDL_RenderLine(renderer, screenX, screenY, screenX + 21, screenY - 21);
+    SDL_FRect rotHandle = { screenX + 15, screenY - 27, 12, 12 };
+    SDL_RenderRect(renderer, &rotHandle);
+}
+
+
 void movement_system(ECSWorld& world, float dt) {
+    // dt is kept in the signature for system consistency, but Box2D handles 
+    // the actual physics integration during PhysicsWorld::Step().
+    (void)dt; 
+
     for (Entity i = 0; i < world.entity_count; ++i) {
-        if (world.has_position[i] && world.has_velocity[i] && world.has_acceleration[i]) {
-            world.velocity_pool[i].x += world.acceleration_pool[i].x * dt;
-            world.velocity_pool[i].y += world.acceleration_pool[i].y * dt;
-            world.position_pool[i].x += world.velocity_pool[i].x * dt;
-            world.position_pool[i].y += world.velocity_pool[i].y * dt;
+        // Check if the entity has both a visual position and a physics body
+        if (world.has_position[i] && world.has_physics_body[i]) {
+            auto& phys = world.physics_body_pool[i];
+            
+            // Ensure the Box2D body handle is valid before querying
+            if (b2Body_IsValid(phys.bodyId)) {
+                // 1. Get the center position from Box2D (in meters)
+                b2Vec2 posM = b2Body_GetPosition(phys.bodyId);
+                
+                // 2. Convert meters back to pixels
+                b2Vec2 centerPx = Physics::MToPx(posM);
+                
+                // 3. Calculate the top-left ECS position based on the entity's bounds
+                float w = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f;
+                float h = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f;
+                
+                // Offset from center to top-left
+                world.position_pool[i].x = centerPx.x - (w * 0.5f);
+                world.position_pool[i].y = centerPx.y - (h * 0.5f);
+            }
         }
     }
 }
@@ -4215,6 +4437,23 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
             } else {
                 SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
             }
+
+            render_entity_texture(renderer, world, i, screenX, screenY);
+
+            if (world.has_physics_body[i]) {
+                // Render physics shape centered on the entity
+                float centerX = screenX + (world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f) * 0.5f;
+                float centerY = screenY + (world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f) * 0.5f;
+                render_physics_shape_overlay(renderer, world.physics_body_pool[i], centerX, centerY);
+            }
+
+            // Render gizmos if selected
+            if (world.has_selection[i] && world.selection_pool[i].isSelected) {
+                float centerX = screenX + (world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f) * 0.5f;
+                float centerY = screenY + (world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f) * 0.5f;
+                render_transform_gizmo(renderer, centerX, centerY, true);
+            }
+
             if (world.has_metadata[i]) {
                 // Fixed typo: "TTF_ CreateText" -> "TTF_CreateText"
                 TTF_Text* textObj = TTF_CreateText(textEngine, font, world.metadata_pool[i].name.c_str(), 0);
@@ -4738,16 +4977,6 @@ public:
                         scene.world.add_z_index(id);
                         scene.world.z_index_pool[id].z = comps["ZIndex"].value("z", 0);
                     }
-                    if (comps.contains("Velocity")) {
-                        scene.world.add_velocity(id);
-                        scene.world.velocity_pool[id].x = comps["Velocity"].value("x", 0.0f);
-                        scene.world.velocity_pool[id].y = comps["Velocity"].value("y", 0.0f);
-                    }
-                    if (comps.contains("Acceleration")) {
-                        scene.world.add_acceleration(id);
-                        scene.world.acceleration_pool[id].x = comps["Acceleration"].value("x", 0.0f);
-                        scene.world.acceleration_pool[id].y = comps["Acceleration"].value("y", 0.0f);
-                    }
                 }
             }
 
@@ -4845,16 +5074,6 @@ public:
                     scene.world.add_z_index(id);
                     scene.world.z_index_pool[id].z = comps["ZIndex"].value("z", 0);
                 }
-                if (comps.contains("Velocity")) {
-                    scene.world.add_velocity(id);
-                    scene.world.velocity_pool[id].x = comps["Velocity"].value("x", 0.0f);
-                    scene.world.velocity_pool[id].y = comps["Velocity"].value("y", 0.0f);
-                }
-                if (comps.contains("Acceleration")) {
-                    scene.world.add_acceleration(id);
-                    scene.world.acceleration_pool[id].x = comps["Acceleration"].value("x", 0.0f);
-                    scene.world.acceleration_pool[id].y = comps["Acceleration"].value("y", 0.0f);
-                }
             }
         }
 
@@ -4890,15 +5109,8 @@ public:
                 comps["RectangleShape"]["w"] = scene.world.rectangle_shape_pool[i].w;
                 comps["RectangleShape"]["h"] = scene.world.rectangle_shape_pool[i].h;
             }
-            if (scene.world.has_z_index[i])
+            if (scene.world.has_z_index[i]) {
                 comps["ZIndex"]["z"] = scene.world.z_index_pool[i].z;
-            if (scene.world.has_velocity[i]) {
-                comps["Velocity"]["x"] = scene.world.velocity_pool[i].x;
-                comps["Velocity"]["y"] = scene.world.velocity_pool[i].y;
-            }
-            if (scene.world.has_acceleration[i]) {
-                comps["Acceleration"]["x"] = scene.world.acceleration_pool[i].x;
-                comps["Acceleration"]["y"] = scene.world.acceleration_pool[i].y;
             }
             entitiesJson.push_back({{"components", comps}});
         }

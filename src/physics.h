@@ -1,7 +1,7 @@
 #pragma once
 
-#include <box2d.h>
-#include <SDL3/SDL.h>
+#define _USE_MATH_DEFINES
+#include <box2d/box2d.h>
 #include <SDL3_image/SDL_image.h>
 #include <SDL3_ttf/SDL_ttf.h>
 #include <vector>
@@ -15,7 +15,6 @@
 
 namespace Physics {
     constexpr float PIXELS_PER_METER = 32.0f;
-    constexpr float M_PI = 3.14;
 
     inline float PxToM(float px) {return px / PIXELS_PER_METER;};
     inline float MToPx(float m) {return m * PIXELS_PER_METER;};
@@ -429,8 +428,6 @@ namespace Physics {
         Mode m_mode = Mode::Idle;
         std::vector<b2Vec2> m_points;
     };
-
-
 };
 
 

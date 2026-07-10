@@ -4,7 +4,6 @@
 #include <unordered_map>
 #include <algorithm>
 #include <cstdio>
-#include <SDL3/SDL.h>
 #include <SDL3_mixer/SDL_mixer.h>
 
 // only use namespace and it's manager once you have initialized the sdl mixer lib

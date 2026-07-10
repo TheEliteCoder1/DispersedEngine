@@ -3,7 +3,6 @@
 #include <string>
 #include <unordered_map>
 #include <cstdio>
-#include <SDL3/SDL.h>
 #include <SDL3_image/SDL_image.h>
 
 // only use namespace and it's manager once you have initialized the sdl image lib

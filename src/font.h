@@ -3,7 +3,6 @@
 #include <string>
 #include <unordered_map>
 #include <cstdio>
-#include <SDL3/SDL.h>
 #include <SDL3_ttf/SDL_ttf.h>
 
 // only use namespace and it's manager once you have initialized the sdl ttf lib

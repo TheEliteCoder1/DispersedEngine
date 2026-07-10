@@ -2,7 +2,7 @@
 #include "engine.h"
 
 // Bare-bones context holding just what's needed for rendering
-struct ProgramContext {
+struct MainMenuContext {
     SDL_Renderer*   renderer    = nullptr;
     TTF_TextEngine* textEngine  = nullptr;
     TTF_Font*       titleFont   = nullptr;
@@ -13,7 +13,7 @@ struct ProgramContext {
 class ProgramScript : public ScriptBase {
 public:
     std::string getName() const override { return "ProgramScript"; }
-    ProgramContext* ctx = nullptr;
+    MainMenuContext* ctx = nullptr;
 
     void onStart() override;
     void onUpdate(float dt) override;
