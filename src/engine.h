@@ -834,7 +834,7 @@ namespace Gui {
             TTF_TextEngine* textEngine;
             TTF_Font* font;
             SDL_FRect optionRect;
-            const std::vector<std::string>& options;
+            std::vector<std::string> options;
             int currentOption = 0;
             
             // Dropdown state
@@ -2005,8 +2005,8 @@ namespace Gui {
         bool onHandleGamepad(float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame) override;
 
         Panel* parentPanel = nullptr;   // the panel we are adding a child to
-        OptionBox typeOption;
         std::vector<std::string> options = {"Button", "LineEdit", "SpinBox"};
+        OptionBox typeOption;
 
     protected:
         void onOpen() override;
@@ -3866,6 +3866,21 @@ namespace Gui {
             drawLabel("Enter = commit changes", panelX() + 8, y + 4, {80, 80, 100, 255});
             SDL_SetRenderClipRect(renderer, nullptr);
             inspectorScrollbar.render(renderer, 0.0f, 0.0f);
+
+            // Re-draw any currently-open dropdowns last so they render on top of
+            // everything else in the panel (buttons, other fields, the scrollbar, etc.)
+            // instead of being drawn-over by whatever happens to come after them in
+            // the layout (e.g. the Add Component button sitting right below the
+            // component-type dropdown).
+            for (auto& f : fields) {
+                for (auto& wgt : f.widgets) {
+                    if (wgt->getType() == "OptionBox") {
+                        auto* opt = static_cast<Gui::OptionBox*>(wgt.get());
+                        if (opt->isOpen()) opt->render(0.0f, 0.0f);
+                    }
+                }
+            }
+            if (componentSelector.isOpen()) componentSelector.render(0.0f, 0.0f);
         }
 
         void commitAllFields() {
@@ -4000,9 +4015,9 @@ namespace Gui {
         std::vector<Field> fields;
         Gui::Scrollbar inspectorScrollbar;
         float inspectorScrollOffset = 0.0f;
+        std::vector<std::string> componentOptions = {"PhysicsBody", "TextureRef", "AnimationState", "SfxEmitter", "Rotation", "Scale"};
         Gui::OptionBox componentSelector;
         Gui::Button addComponentBtn;
-        std::vector<std::string> componentOptions = {"PhysicsBody", "TextureRef", "AnimationState", "SfxEmitter", "Rotation", "Scale"};
         public:
             std::unique_ptr<Gui::AnimationFrameEditor> animFrameEditor;
 
@@ -4056,16 +4071,26 @@ namespace Gui {
 
             auto addAnimationState = [&]() {
                 auto& anim = world->animation_state_pool[e];
-                // Speed
+                
+                // Ensure at least one frame exists
+                if (anim.imageFrameResources.empty() && anim.spriteFrames.empty()) {
+                    anim.imageFrameResources.push_back("");
+                }
+
+                // Speed spinbox
                 addSpinBox("Anim Speed", "anim_speed", anim.speed, 0.1f, 60.0f, 0.5f);
+
                 // Mode option box
                 Field f; f.label = "Anim Mode"; f.key = "anim_mode"; f.lastSyncedText = "";
-                auto opt = std::make_unique<Gui::OptionBox>(renderer, textEngine, font, SDL_FRect{0,0,1,1},
-                                                        std::vector<std::string>{"ImageFrames", "SpritesheetFrames"});
+                auto opt = std::make_unique<Gui::OptionBox>(renderer, textEngine, font,
+                                                            SDL_FRect{0,0,1,1},
+                                                            std::vector<std::string>{"ImageFrames", "SpritesheetFrames"});
                 opt->setCurrentIndex((int)anim.mode);
                 f.widgets.push_back(std::move(opt));
+
                 // Edit Frames button
-                auto btn = std::make_unique<Gui::Button>(renderer, font, "Edit Frames", SDL_FPoint{0,0}, 100, 26);
+                auto btn = std::make_unique<Gui::Button>(renderer, font, "Edit Frames",
+                                                        SDL_FPoint{0,0}, 100, 26);
                 btn->onClicked = [this, &anim]() {
                     animFrameEditor->setTarget(&anim);
                     modeBeforeDialog = currentEditMode;
@@ -4819,14 +4844,17 @@ namespace Gui {
 
 inline void animation_system(ECSWorld& world, float dt)
 {
-    for (Entity i = 0;  i < world.entity_count; i++)
+    for (Entity i = 0; i < world.entity_count; i++)
     {
         if (world.has_animation_state[i] && world.has_texture_ref[i])
         {
             auto& state = world.animation_state_pool[i];
             if (!state.isPlaying) continue;
-            
-            auto it = g_resources.animations.find(world.texture_ref_pool[i].resourceName);
+
+            const std::string& resName = world.texture_ref_pool[i].resourceName;
+            if (resName.empty()) continue; // <--- ADD THIS
+
+            auto it = g_resources.animations.find(resName);
             if (it != g_resources.animations.end() && !it->second.empty()) {
                 state.timer += dt;
                 float frameDuration = 1.0f / state.speed;
@@ -4839,6 +4867,7 @@ inline void animation_system(ECSWorld& world, float dt)
     }
 }
 
+
 inline void render_entity_texture(SDL_Renderer* renderer, const ECSWorld& world, Entity i, float screenX, float screenY)
 {
     if (!world.has_texture_ref[i]) return;
@@ -4846,22 +4875,26 @@ inline void render_entity_texture(SDL_Renderer* renderer, const ECSWorld& world,
     const auto& texRef = world.texture_ref_pool[i];
     SDL_Texture* tex = nullptr;
     SDL_FRect srcRect = {0,0,0,0};
+    std::string texName;
+
     if (texRef.isAnimation) {
         if (world.has_animation_state[i]) {
-            auto [texName, rect] = world.animation_state_pool[i].getCurrentFrame();
+            auto [name, rect] = world.animation_state_pool[i].getCurrentFrame();
+            texName = name;
             srcRect = rect;
-            tex = g_resources.TextureManager.Get(texName);
         } else {
-            auto it = g_resources.animations.find(texRef.resourceName);
-            if (it != g_resources.animations.end() && !it->second.empty()) {
-                tex = g_resources.TextureManager.Get(it->second[0]);
-            }
+            // Fallback: if animation flag is set but no state, treat as single texture
+            texName = texRef.resourceName;
         }
     } else {
-        tex = g_resources.TextureManager.Get(texRef.resourceName);
+        texName = texRef.resourceName;
     }
 
+    if (texName.empty()) return; // <--- ADD THIS: skip if no texture name
+
+    tex = g_resources.TextureManager.Get(texName);
     if (!tex) return;
+
 
     float tw, th;
     SDL_GetTextureSize(tex, &tw, &th);
@@ -5077,18 +5110,17 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
         float screenX = viewX + logicalX - scrollX;
         float screenY = viewY + logicalY - scrollY;
 
-        // Determine entity dimensions (rectangle shape or fallback)
         float w = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f;
         float h = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f;
         float centerX = screenX + w * 0.5f;
         float centerY = screenY + h * 0.5f;
 
-        // --- Render texture (if present) ---
+        // Render texture
         if (world.has_texture_ref[i]) {
             render_entity_texture(renderer, world, i, screenX, screenY);
         }
 
-        // --- Render physics shape overlay (if present) ---
+        // Render physics overlay
         if (world.has_physics_body[i]) {
             float rot = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
             float sx = world.has_scale[i] ? world.scale_pool[i].x : 1.0f;
@@ -5096,11 +5128,10 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
             render_physics_shape_overlay(renderer, world.physics_body_pool[i], centerX, centerY, rot, sx, sy);
         }
 
-        // --- Draw transformed outline (only if no texture OR entity is selected) ---
+        // Draw transformed outline (if no texture or selected)
         bool hasTexture = world.has_texture_ref[i];
         bool isSelected = world.has_selection[i] && world.selection_pool[i].isSelected;
         if (!hasTexture || isSelected) {
-            // Compute rotated/scaled corners
             float rot = world.has_rotation[i] ? world.rotation_pool[i].degrees * (M_PI / 180.0f) : 0.0f;
             float sx = world.has_scale[i] ? world.scale_pool[i].x : 1.0f;
             float sy = world.has_scale[i] ? world.scale_pool[i].y : 1.0f;
@@ -5119,7 +5150,6 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
                 corners[j].y = centerY + x * sinA + y * cosA;
             }
 
-            // Set colour: selection colour if selected, otherwise white
             if (isSelected) {
                 SDL_SetRenderDrawColor(renderer,
                     world.selection_pool[i].selectionColor.r,
@@ -5129,8 +5159,6 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
             } else {
                 SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
             }
-
-            // Draw the four edges
             for (int j = 0; j < 4; ++j) {
                 int next = (j + 1) % 4;
                 SDL_RenderLine(renderer,
@@ -5139,12 +5167,12 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
             }
         }
 
-        // --- Draw transform gizmo if selected ---
+        // Gizmo
         if (isSelected) {
             render_transform_gizmo(renderer, centerX, centerY, true);
         }
 
-        // --- Draw metadata label ---
+        // Metadata label
         if (world.has_metadata[i]) {
             TTF_Text* textObj = TTF_CreateText(textEngine, font, world.metadata_pool[i].name.c_str(), 0);
             if (textObj) {
@@ -5155,7 +5183,7 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
         }
     }
 
-    // --- Render all GUI elements ---
+    // --- Render GUI elements ---
     float guiOffsetX = scrollX - viewX;
     float guiOffsetY = scrollY - viewY;
     for (auto & elem : guiElements) {
@@ -5163,7 +5191,7 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
         elem->renderSelectionOutline(renderer, guiOffsetX, guiOffsetY);
     }
 
-    // --- Draw Grid ---
+    // --- Draw Grid (if enabled) ---
     if (editor_showGrid) {
         SDL_SetRenderDrawColor(renderer, 100, 100, 100, 100);
         float startX = viewX - fmod(scrollX, editor_cellW);
@@ -5175,25 +5203,6 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
             SDL_RenderLine(renderer, viewX, y, viewX + canvasViewW, y);
         }
     }
-
-    // --- Legacy canvas buttons (Poly/Grid) – will be covered by new GUI buttons in main.cpp ---
-    // They are kept for backward compatibility but rendered underneath the new buttons.
-    float logicalBtnX1 = LOGICAL_CANVAS_WIDTH - 170.0f;
-    float logicalBtnX2 = LOGICAL_CANVAS_WIDTH - 80.0f;
-    float logicalBtnY = 10.0f;
-    float btnW = 80.0f, btnH = 26.0f;
-
-    float screenBtnX1 = viewX + logicalBtnX1 - scrollX;
-    float screenBtnX2 = viewX + logicalBtnX2 - scrollX;
-    float screenBtnY = viewY + logicalBtnY - scrollY;
-
-    SDL_FRect btnPoly = { screenBtnX1, screenBtnY, btnW, btnH };
-    SDL_FRect btnGrid = { screenBtnX2, screenBtnY, btnW, btnH };
-
-    SDL_Color polyCol = editor_isDrawingPolygon ? SDL_Color{255, 100, 100, 255} : SDL_Color{100, 100, 200, 255};
-    SDL_SetRenderDrawColor(renderer, polyCol.r, polyCol.g, polyCol.b, polyCol.a);
-    // The old buttons are drawn here (they will be covered by the new GUI buttons in main.cpp)
-    // We keep the drawing code for compatibility but they won't be visible if the new buttons overlay them.
 }
 
 // 2. Pure Game Render System (NO editor canvas offset)
@@ -5239,26 +5248,6 @@ const SDL_Event& e)
         float mx = e.button.x, my = e.button.y;
         float logicalX = mx - canvasViewX + editorScrollX;
         float logicalY = my - canvasViewY + editorScrollY;
-
-        float logicalBtnX1 = 1450.0f; 
-        float logicalBtnX2 = 1540.0f;
-        float logicalBtnY = 10.0f;
-        float btnW = 80.0f;
-        float btnH = 26.0f;
-
-        SDL_FRect btnPoly = { logicalBtnX1, logicalBtnY, btnW, btnH };
-        SDL_FRect btnGrid = { logicalBtnX2, logicalBtnY, btnW, btnH };
-
-        auto inRect = [](float x, float y, SDL_FRect r) { return x >= r.x && x <= r.x+r.w && y >= r.y && y <= r.y+r.h; };
-        
-        if (inRect(logicalX, logicalY, btnPoly)) {
-            editor_isDrawingPolygon = !editor_isDrawingPolygon;
-            return; 
-        }
-        if (inRect(logicalX, logicalY, btnGrid)) {
-            editor_showGrid = !editor_showGrid;
-            return; 
-        }
         
         if (editor_isDrawingPolygon && isInsideCanvas(mx, my)) {
             Entity ent = lastSelectedEntity;
@@ -5886,6 +5875,35 @@ public:
                 if (comps.contains("ZIndex")) {
                     scene.world.add_z_index(id);
                     scene.world.z_index_pool[id].z = comps["ZIndex"].value("z", 0);
+                }
+                if (comps.contains("Rotation")) {
+                    scene.world.add_rotation(id);
+                    scene.world.rotation_pool[id].degrees = comps["Rotation"].value("degrees", 0.0f);
+                }
+                if (comps.contains("Scale")) {
+                    scene.world.add_scale(id);
+                    scene.world.scale_pool[id].x = comps["Scale"].value("x", 1.0f);
+                    scene.world.scale_pool[id].y = comps["Scale"].value("y", 1.0f);
+                }
+                if (comps.contains("AnimationState")) {
+                    auto& anim = scene.world.animation_state_pool[id];
+                    if (!scene.world.has_animation_state[id]) scene.world.add_animation_state(id);
+                    anim.speed = comps["AnimationState"].value("speed", 10.0f);
+                    anim.isPlaying = comps["AnimationState"].value("isPlaying", true);
+                    std::string modeStr = comps["AnimationState"].value("mode", "ImageFrames");
+                    anim.mode = (modeStr == "SpritesheetFrames") ? Components::AnimationState::Mode::SpritesheetFrames
+                                                                : Components::AnimationState::Mode::ImageFrames;
+                    if (anim.mode == Components::AnimationState::Mode::ImageFrames) {
+                        anim.imageFrameResources = comps["AnimationState"]["imageFrames"].get<std::vector<std::string>>();
+                    } else {
+                        for (auto& f : comps["AnimationState"]["spriteFrames"]) {
+                            Components::AnimationState::SpriteFrame sf;
+                            sf.textureName = f.value("texture", "");
+                            sf.rect.x = f.value("x", 0.0f); sf.rect.y = f.value("y", 0.0f);
+                            sf.rect.w = f.value("w", 0.0f); sf.rect.h = f.value("h", 0.0f);
+                            anim.spriteFrames.push_back(sf);
+                        }
+                    }
                 }
             }
         }

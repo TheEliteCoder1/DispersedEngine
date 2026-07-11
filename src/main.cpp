@@ -109,12 +109,12 @@ protected:
 
 class AddGuiElemDialog: public Gui::Dialog {
 public:
-    Gui::OptionBox guiElemType;
     std::vector<std::string> options = {
         "LineEdit",
         "SpinBox",
         "Button"
     };
+    Gui::OptionBox guiElemType;
     AddGuiElemDialog(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font, SDL_Window* window)
         : Gui::Dialog(renderer, textEngine, font, window,
                       {480.0f, 245.0f, 480.0f, 310.0f},
@@ -550,6 +550,26 @@ int main(int argc, char* argv[]) {
             }
             confirmLastFrame = confirmNow;
         }
+
+        if (selectedEntity != (Entity)-1) {
+            if (selectedEntity >= world.entity_count || !world.has_position[selectedEntity]) {
+                selectedEntity = (Entity)-1;
+                entityInspector.clearTarget();
+                if (lastSelectedEntity != (Entity)-1) {
+                    lastSelectedEntity = (Entity)-1;
+                }
+            }
+        }
+        if (lastSelectedEntity != (Entity)-1) {
+            if (lastSelectedEntity >= world.entity_count || !world.has_position[lastSelectedEntity]) {
+                lastSelectedEntity = (Entity)-1;
+                if (selectedEntity != (Entity)-1) {
+                    selectedEntity = (Entity)-1;
+                    entityInspector.clearTarget();
+                }
+            }
+        }
+
         
         static Entity prevSelectedEntity = (Entity)-1;
         if (lastSelectedEntity != prevSelectedEntity) {
