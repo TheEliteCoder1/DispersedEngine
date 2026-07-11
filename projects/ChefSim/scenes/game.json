@@ -1,0 +1,6 @@
+{
+    "entities": [],
+    "gui_elements": [],
+    "scene_name": "SceneName",
+    "script_attached": "ProjectName/scripts/SceneName.cpp"
+}

@@ -41,36 +41,31 @@ namespace MusicAndSfx {
 
             // Play a sound whose volume scales with collision impulse.
             // typically used with the physics engine
-            void PlayHit(const std::string& name, float impulse) {
-                
+            void PlayHit(const std::string& name, float impulse, float pitch = 1.0f) {
                 auto it = m_samples.find(name);
                 if (it == m_samples.end()) return;
-
                 MIX_Track* track = MIX_CreateTrack(m_mixer);
                 if (!track) return;
-
                 MIX_SetTrackAudio(track, it->second);
-
                 float vol = std::clamp(impulse * 0.15f, 0.05f, 1.0f);
                 MIX_SetTrackGain(track, vol);
-
                 SDL_PropertiesID props = SDL_CreateProperties();
+                // Apply pitch via SDL3 properties (frequency ratio)
+                SDL_SetNumberProperty(props, "sdl3.mixer.frequency_ratio", (Sint64)(pitch * 1000.0f));
                 MIX_PlayTrack(track, props);
                 SDL_DestroyProperties(props);
             }
     
             // Plays a regular sound effect once at a given volume (defaults to 1.0f full volume)
-            void PlaySfx(const std::string& name, float volume = 1.0f) {
+            void PlaySfx(const std::string& name, float volume = 1.0f, float pitch = 1.0f) {
                 auto it = m_samples.find(name);
                 if (it == m_samples.end()) return;
-
                 MIX_Track* track = MIX_CreateTrack(m_mixer);
                 if (!track) return;
-
                 MIX_SetTrackAudio(track, it->second);
                 MIX_SetTrackGain(track, std::clamp(volume, 0.0f, 1.0f));
-
                 SDL_PropertiesID props = SDL_CreateProperties();
+                SDL_SetNumberProperty(props, "sdl3.mixer.frequency_ratio", (Sint64)(pitch * 1000.0f));
                 MIX_PlayTrack(track, props);
                 SDL_DestroyProperties(props);
             }

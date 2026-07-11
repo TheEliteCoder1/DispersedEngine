@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="backFlapGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0066cc" />
+      <stop offset="100%" stop-color="#003399" />
+    </linearGradient>
+
+    <linearGradient id="frontFlapGrad" x1="0%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#3399ff" />
+      <stop offset="60%" stop-color="#0055cc" />
+      <stop offset="100%" stop-color="#0033aa" />
+    </linearGradient>
+
+    <linearGradient id="glossGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.6" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.0" />
+    </linearGradient>
+
+    <linearGradient id="shadowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#000000" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.0" />
+    </linearGradient>
+  </defs>
+
+  <ellipse cx="64" cy="112" rx="48" ry="10" fill="url(#shadowGrad)" opacity="0.7" />
+
+  <path d="M 24,36 
+           L 48,36 
+           L 56,44 
+           L 104,44 
+           A 4,4 0 0,1 108,48
+           L 100,90 
+           A 4,4 0 0,1 96,94
+           L 16,94 
+           A 4,4 0 0,1 12,90
+           L 20,40
+           A 4,4 0 0,1 24,36 Z" 
+        fill="url(#backFlapGrad)" 
+        stroke="#0044aa" stroke-width="1.5" stroke-linejoin="round" />
+
+  <path d="M 32,48 
+           L 96,48 
+           L 90,82 
+           L 26,82 Z" 
+        fill="#ffffff" opacity="0.85" 
+        stroke="#dddddd" stroke-width="1" />
+
+  <path d="M 10,58 
+           A 5,5 0 0,1 15,54
+           L 102,54 
+           A 5,5 0 0,1 107,59
+           L 118,102 
+           A 5,5 0 0,1 113,108
+           L 20,108 
+           A 5,5 0 0,1 15,103
+           Z" 
+        fill="url(#frontFlapGrad)" 
+        stroke="#33aaff" stroke-width="1" stroke-linejoin="round" />
+
+  <path d="M 15,54 
+           L 102,54
+           L 108,80
+           Q 60,65 12,88 
+           Z" 
+        fill="url(#glossGrad)" pointer-events="none" />
+
+  <path d="M 12,56 L 105,56" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" opacity="0.6" />
+</svg>

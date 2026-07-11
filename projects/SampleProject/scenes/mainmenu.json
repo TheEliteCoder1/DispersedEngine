@@ -101,14 +101,6 @@
             "w": 300.0,
             "x": 654.0,
             "y": 62.0
-        },
-        {
-            "h": 36.0,
-            "placeholder": "Type here...",
-            "type": "LineEdit",
-            "w": 200.0,
-            "x": 730.0,
-            "y": 421.0
         }
     ],
     "scene_name": "Main Menu",
