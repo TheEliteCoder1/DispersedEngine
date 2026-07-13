@@ -3,14 +3,26 @@
         {
             "components": {
                 "AnimationState": {
-                    "imageFrames": [
-                        ""
-                    ],
-                    "isPlaying": true,
-                    "speed": 10.0
+                    "activeClipIndex": 0,
+                    "clips": [
+                        {
+                            "imageFrames": [
+                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\cpp_icon.svg",
+                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\file_icon.svg",
+                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\folder_icon.svg",
+                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\h_icon.svg",
+                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\icon.svg",
+                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\music_icon.svg",
+                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\scene_icon.svg"
+                            ],
+                            "isPlaying": true,
+                            "name": "default",
+                            "speed": 10.0
+                        }
+                    ]
                 },
                 "Metadata": {
-                    "name": "Player"
+                    "name": "d"
                 },
                 "Position": {
                     "x": 645.0,

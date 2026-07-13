@@ -243,7 +243,11 @@ namespace Components {
         float y = 1.0f;
     };
 
-    struct AnimationState {
+    // A single named animation (e.g. "idle", "walk", "attack"). Each clip owns
+    // its own frame list and playback state so switching clips doesn't stomp
+    // on another clip's progress.
+    struct AnimationClip {
+        std::string name = "default";
         float speed = 10.0f;
         float timer = 0.0f;
         int currentFrame = 0;
@@ -251,11 +255,67 @@ namespace Components {
 
         // Only image frames are supported now
         std::vector<std::string> imageFrameResources;
+    };
+
+    // Holds one or more named AnimationClips and tracks which one is
+    // currently active/playing. Kept backwards-compatible in spirit with the
+    // old single-animation component: active() gives direct access to the
+    // clip that's currently playing, so `.speed`, `.isPlaying`,
+    // `.imageFrameResources` etc. still work by going through active().
+    struct AnimationState {
+        std::vector<AnimationClip> clips = { AnimationClip{} };
+        int activeClipIndex = 0;
+
+        AnimationClip& active() {
+            if (clips.empty()) clips.push_back(AnimationClip{});
+            if (activeClipIndex < 0 || activeClipIndex >= (int)clips.size()) activeClipIndex = 0;
+            return clips[activeClipIndex];
+        }
+        const AnimationClip& active() const {
+            static const AnimationClip fallback{};
+            if (clips.empty()) return fallback;
+            size_t idx = (activeClipIndex < 0 || activeClipIndex >= (int)clips.size()) ? 0 : (size_t)activeClipIndex;
+            return clips[idx];
+        }
+
+        AnimationClip* find(const std::string& name) {
+            for (auto& c : clips) if (c.name == name) return &c;
+            return nullptr;
+        }
+        const AnimationClip* find(const std::string& name) const {
+            for (auto& c : clips) if (c.name == name) return &c;
+            return nullptr;
+        }
+
+        // Finds or creates a clip with the given name.
+        AnimationClip& getOrCreate(const std::string& name) {
+            if (auto* c = find(name)) return *c;
+            clips.push_back(AnimationClip{});
+            clips.back().name = name;
+            return clips.back();
+        }
+
+        // Switches playback to the named clip. Returns false if not found.
+        // Resets the clip's frame/timer by default so it starts clean.
+        bool play(const std::string& name, bool resetFrame = true) {
+            for (size_t i = 0; i < clips.size(); ++i) {
+                if (clips[i].name == name) {
+                    activeClipIndex = (int)i;
+                    if (resetFrame) { clips[i].currentFrame = 0; clips[i].timer = 0.0f; }
+                    clips[i].isPlaying = true;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        std::string activeName() const { return active().name; }
 
         std::pair<std::string, SDL_FRect> getCurrentFrame() const {
-            if (imageFrameResources.empty()) return {"", {0,0,0,0}};
-            size_t idx = (size_t)currentFrame % imageFrameResources.size();
-            return {imageFrameResources[idx], {0,0,0,0}};
+            const AnimationClip& c = active();
+            if (c.imageFrameResources.empty()) return {"", {0,0,0,0}};
+            size_t idx = (size_t)c.currentFrame % c.imageFrameResources.size();
+            return {c.imageFrameResources[idx], {0,0,0,0}};
         }
     };
 }
@@ -690,6 +750,8 @@ namespace Gui {
         SpinBox& operator=(SpinBox&&) = default;
         ~SpinBox() = default;
 
+        std::function<void(float)> onChange;
+
         void appendText(const std::string& str) override {
             for (char c : str) {
                 if (std::isdigit(c)) editBuf += c;
@@ -814,6 +876,7 @@ namespace Gui {
         void adjust(float delta) {
             value = snapToDecimal(std::clamp(value + delta, minVal, maxVal));
             rebuildDisplayStr();
+            if (onChange) onChange(value);
         }
         void commitEdit(SDL_Window* window) {
             if (!editBuf.empty()) {
@@ -826,6 +889,7 @@ namespace Gui {
             editBuf.clear();
             active = false;
             SDL_StopTextInput(window);
+            if (onChange) onChange(value); 
         }
         void cancelEdit(SDL_Window* window) {
             editBuf.clear();
@@ -2081,8 +2145,7 @@ namespace Gui {
             SDL_RenderRect(renderer, &r);
 
             if (value && checkTexture) {
-                float tw, th; SDL_GetTextureSize(checkTexture, &tw, &th);
-                SDL_FRect dst = { r.x + (r.w - tw)*0.5f, r.y + (r.h - th)*0.5f, tw, th };
+                SDL_FRect dst = { r.x + (r.w - 32)*0.5f, r.y + (r.h - 32)*0.5f, 32, 32 };
                 SDL_RenderTexture(renderer, checkTexture, nullptr, &dst);
             }
         }
@@ -3149,25 +3212,269 @@ namespace Gui {
         }
     };
 
-    class AnimationFrameEditor : public Dialog {
+    // ----------------------------------------------------------------
+    // OptionSpinBox – like a SpinBox but cycles through string options
+    // using left/right arrow buttons. No dropdown list. Has the ability to be editable/non-editable.
+    // ----------------------------------------------------------------
+    class OptionSpinBox : public IGuiElement {
+    public:
+        OptionSpinBox(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
+                      SDL_FRect rect, const std::vector<std::string>& opts = {},
+                      bool editable = false)
+            : renderer(renderer), textEngine(textEngine), font(font),
+              rect(rect), options(opts), currentIndex(0), editable(editable),
+              editLine(renderer, textEngine, font, SDL_FRect{0,0,1,1}, "rename...") {}
+
+        std::string getType() const override { return "OptionSpinBox"; }
+        float getX() const override { return rect.x; }
+        float getY() const override { return rect.y; }
+        float getWidth() const override { return rect.w; }
+        float getHeight() const override { return rect.h; }
+        void setRect(SDL_FRect r) override { rect = r; }
+        void setPos(SDL_Point p) override { rect.x = p.x; rect.y = p.y; }
+
+        void setOptions(const std::vector<std::string>& opts) {
+            options = opts;
+            if (currentIndex >= (int)options.size()) currentIndex = (int)options.size() - 1;
+            if (currentIndex < 0) currentIndex = 0;
+            if (isEditing) cancelEdit(nullptr);
+        }
+        void setCurrentIndex(int idx) {
+            if (idx >= 0 && idx < (int)options.size()) currentIndex = idx;
+            else if (options.empty()) currentIndex = -1;
+            else currentIndex = 0;
+        }
+        int getCurrentIndex() const { return currentIndex; }
+        std::string getCurrentOption() const {
+            if (currentIndex < 0 || currentIndex >= (int)options.size()) return "";
+            return options[currentIndex];
+        }
+
+        void setEditable(bool e) { editable = e; }
+        bool isEditable() const { return editable; }
+
+        std::function<void(int)> onChange;                     // when option changes (by arrows)
+        std::function<void(int, const std::string&)> onRenamed; // when option is renamed (if editable)
+
+        bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetX, float offsetY) override {
+            if (isEditing && editable) {
+                bool consumed = editLine.handleEvent(ev, window, offsetX, offsetY);
+                if (!editLine.isActive()) {
+                    commitRename(window);
+                }
+                if (ev.type == SDL_EVENT_KEY_DOWN && ev.key.key == SDLK_RETURN) {
+                    if (editLine.isActive()) {
+                        commitRename(window);
+                        return true;
+                    }
+                }
+                return consumed;
+            }
+
+            if (ev.type != SDL_EVENT_MOUSE_BUTTON_DOWN || ev.button.button != SDL_BUTTON_LEFT)
+                return false;
+
+            float mx = ev.button.x, my = ev.button.y;
+            SDL_FRect shifted = { rect.x - offsetX, rect.y - offsetY, rect.w, rect.h };
+            if (!inRect(mx, my, shifted)) return false;
+
+            SDL_FRect leftBtn = { shifted.x, shifted.y, 30, shifted.h };
+            SDL_FRect rightBtn = { shifted.x + shifted.w - 30, shifted.y, 30, shifted.h };
+            SDL_FRect textArea = { shifted.x + 30, shifted.y, shifted.w - 60, shifted.h };
+
+            if (inRect(mx, my, leftBtn)) {
+                cycle(-1);
+                return true;
+            }
+            if (inRect(mx, my, rightBtn)) {
+                cycle(+1);
+                return true;
+            }
+            if (editable && inRect(mx, my, textArea)) {
+                startEdit(window);
+                return true;
+            }
+            return false;
+        }
+
+        void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY,
+                           SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
+            if (isEditing && editable) {
+                editLine.handleGamepad(cursorX, cursorY, offsetX, offsetY, window,
+                                       confirmDown, confirmDownLastFrame);
+                if (!editLine.isActive()) {
+                    commitRename(window);
+                }
+                return;
+            }
+
+            SDL_FRect shifted = { rect.x - offsetX, rect.y - offsetY, rect.w, rect.h };
+            if (confirmDown && !confirmDownLastFrame && inRect(cursorX, cursorY, shifted)) {
+                cycle(+1);
+            }
+        }
+
+        void render(float offsetX, float offsetY) override {
+            SDL_FRect shifted = { rect.x - offsetX, rect.y - offsetY, rect.w, rect.h };
+
+            // Background
+            SDL_SetRenderDrawColor(renderer, 60, 60, 70, 255);
+            SDL_RenderFillRect(renderer, &shifted);
+            SDL_SetRenderDrawColor(renderer, 130, 130, 150, 255);
+            SDL_RenderRect(renderer, &shifted);
+
+            // Left button
+            SDL_FRect leftBtn = { shifted.x, shifted.y, 30, shifted.h };
+            SDL_SetRenderDrawColor(renderer, 60, 60, 60, 255);
+            SDL_RenderFillRect(renderer, &leftBtn);
+            drawCentredText("<", leftBtn, {220,220,220,255});
+
+            // Right button
+            SDL_FRect rightBtn = { shifted.x + shifted.w - 30, shifted.y, 30, shifted.h };
+            SDL_SetRenderDrawColor(renderer, 60, 60, 60, 255);
+            SDL_RenderFillRect(renderer, &rightBtn);
+            drawCentredText(">", rightBtn, {220,220,220,255});
+
+            // Text area
+            SDL_FRect textArea = { shifted.x + 30, shifted.y, shifted.w - 60, shifted.h };
+
+            if (isEditing && editable) {
+                editLine.setRect(textArea);
+                editLine.render(0.0f, 0.0f);
+            } else {
+                SDL_Color bg = {255,255,255,255};
+                SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, bg.a);
+                SDL_RenderFillRect(renderer, &textArea);
+                SDL_SetRenderDrawColor(renderer, 130,130,130,255);
+                SDL_RenderRect(renderer, &textArea);
+
+                std::string display = getCurrentOption();
+                if (display.empty()) display = "[empty]";
+                SDL_Color tc = {20,20,20,255};
+                TTF_Text* t = TTF_CreateText(textEngine, font, display.c_str(), 0);
+                if (t) {
+                    TTF_SetTextColor(t, tc.r, tc.g, tc.b, tc.a);
+                    TTF_DrawRendererText(t, textArea.x + 6.0f, textArea.y + (textArea.h - 20.0f) * 0.5f);
+                    TTF_DestroyText(t);
+                }
+            }
+        }
+
+    private:
+        SDL_Renderer* renderer;
+        TTF_TextEngine* textEngine;
+        TTF_Font* font;
+        SDL_FRect rect;
+        std::vector<std::string> options;
+        int currentIndex = 0;
+        bool editable = true;
+
+        bool isEditing = false;
+        Gui::LineEdit editLine;
+
+        void cycle(int dir) {
+            if (options.empty()) return;
+            int newIdx = currentIndex + dir;
+            if (newIdx < 0) newIdx = (int)options.size() - 1;
+            if (newIdx >= (int)options.size()) newIdx = 0;
+            if (newIdx != currentIndex) {
+                currentIndex = newIdx;
+                if (onChange) onChange(currentIndex);
+            }
+        }
+
+        void startEdit(SDL_Window* window) {
+            if (options.empty()) return;
+            isEditing = true;
+            editLine.setPlaceholder("rename...");
+            editLine.clear();
+            std::string current = getCurrentOption();
+            for (char c : current) editLine.appendText(std::string(1, c));
+            editLine.setActive(true);
+            SDL_StartTextInput(window);
+        }
+
+        void commitRename(SDL_Window* window) {
+            if (!isEditing) return;
+            std::string newName = editLine.getText();
+            if (!newName.empty() && currentIndex >= 0 && currentIndex < (int)options.size()) {
+                options[currentIndex] = newName;
+                if (onRenamed) onRenamed(currentIndex, newName);
+            }
+            cancelEdit(window);
+        }
+
+        void cancelEdit(SDL_Window* window) {
+            if (!isEditing) return;
+            isEditing = false;
+            editLine.setActive(false);
+            if (window) SDL_StopTextInput(window);
+        }
+
+        void drawCentredText(const char* str, SDL_FRect r, SDL_Color c) {
+            TTF_Text* t = TTF_CreateText(textEngine, font, str, 0);
+            if (!t) return;
+            TTF_SetTextColor(t, c.r, c.g, c.b, c.a);
+            int tw = 0, th = 0;
+            TTF_GetTextSize(t, &tw, &th);
+            TTF_DrawRendererText(t, r.x + (r.w - tw) * 0.5f, r.y + (r.h - th) * 0.5f);
+            TTF_DestroyText(t);
+        }
+
+        static bool inRect(float x, float y, SDL_FRect r) {
+            return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+        }
+    };
+
+
+   class AnimationFrameEditor : public Dialog {
     public:
         AnimationFrameEditor(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
                             SDL_Window* window, Gui::FileExplorer& fileExp)
-            : Dialog(renderer, textEngine, font, window, {0,0,700,650}, "Edit Animation Frames", "Save", "Cancel"),
+            : Dialog(renderer, textEngine, font, window, {0,0,750,680}, "Edit Animation Clips", "Save", "Cancel"),
             fileExplorer(fileExp),
+            clipSelector(renderer, textEngine, font, SDL_FRect{0,0,1,1}),
             addFrameBtn(renderer, font, "+", SDL_FPoint{0,0}, 40, 30),
             removeFrameBtn(renderer, font, "-", SDL_FPoint{0,0}, 40, 30),
             moveUpBtn(renderer, font, "up", SDL_FPoint{0,0}, 40, 30),
             moveDownBtn(renderer, font, "dn", SDL_FPoint{0,0}, 40, 30),
-            loadResourceBtn(renderer, font, "Load .resource", SDL_FPoint{0,0}, 120, 30),
-            saveResourceBtn(renderer, font, "Save .resource", SDL_FPoint{0,0}, 120, 30),
-            browseFrameBtn(renderer, font, "Browse Image", SDL_FPoint{0,0}, 100, 30),
-            selectPrevBtn(renderer, font, "/\\", SDL_FPoint{0,0}, 40, 30),
-            selectNextBtn(renderer, font, "\\/", SDL_FPoint{0,0}, 40, 30),
+            loadResourceBtn(renderer, font, "L-.animres", SDL_FPoint{0,0}, 120, 30),
+            saveResourceBtn(renderer, font, "S-.animres", SDL_FPoint{0,0}, 120, 30),
+            browseFrameBtn(renderer, font, "O-Img", SDL_FPoint{0,0}, 100, 30),
             playBtn(renderer, font, "Play", SDL_FPoint{0,0}, 40, 30),
-            stopBtn(renderer, font, "Stop", SDL_FPoint{0,0}, 40, 30)
+            stopBtn(renderer, font, "Stop", SDL_FPoint{0,0}, 40, 30),
+            addClipBtn(renderer, font, "+ Clip", SDL_FPoint{0,0}, 80, 30),
+            removeClipBtn(renderer, font, "- Clip", SDL_FPoint{0,0}, 90, 30),
+            setActiveBtn(renderer, font, "Activate", SDL_FPoint{0,0}, 90, 30)
         {
             setupCallbacks();
+            clipSelector.setEditable(true);
+            clipSelector.onChange = [this](int idx) {
+                if (target && idx >= 0 && idx < (int)target->clips.size()) {
+                    selectedClipIndex = idx;
+                    syncFramesFromSelectedClip();
+                }
+            };
+            clipSelector.onRenamed = [this](int idx, const std::string& newName) {
+                if (target && idx >= 0 && idx < (int)target->clips.size()) {
+                    target->clips[idx].name = newName;
+                    // Refresh the clip selector options list
+                    std::vector<std::string> clipNames;
+                    for (const auto& clip : target->clips) clipNames.push_back(clip.name);
+                    clipSelector.setOptions(clipNames);
+                    clipSelector.setCurrentIndex(idx);
+                    // Also update the active clip index if this was the active one?
+                    // Not needed; active index is separate.
+                }
+            };
+            speedSpinBox = std::make_unique<Gui::SpinBox>(renderer, textEngine, font,
+                                              SDL_FRect{0,0,1,1}, 0.1f, 60.0f, 10.0f, 0.5f);
+            speedSpinBox->onChange = [this](float newSpeed) {
+                auto* clip = getSelectedClip();
+                if (clip) {
+                    clip->speed = newSpeed;
+                }
+            };
         }
 
         void setTarget(Components::AnimationState* anim) {
@@ -3177,18 +3484,26 @@ namespace Gui {
         }
 
         bool onHandleGamepad(float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame) override {
-            // No interactive widgets that need gamepad handling besides buttons (handled by Dialog base)
-            return false;
+            // Delegate to interactive widgets; return true if consumed.
+            bool consumed = false;
+            // We can forward gamepad to buttons, but this is a simplified stub.
+            return consumed;
         }
 
     protected:
         void onOpen() override {
             int w, h; SDL_GetWindowSize(window, &w, &h);
-            logicalRect = { (w-700)*0.5f, (h-650)*0.5f, 700, 650 };
+            logicalRect = { (w-750)*0.5f, (h-680)*0.5f, 750, 680 };
             syncFromTarget();
         }
 
         bool onHandleEvent(const SDL_Event& ev) override {
+            // Clip management
+            if (clipSelector.handleEvent(ev, window, 0,0)) return true;
+            if (addClipBtn.handleEvent(ev, window, 0,0)) return true;
+            if (removeClipBtn.handleEvent(ev, window, 0,0)) return true;
+            if (setActiveBtn.handleEvent(ev, window, 0,0)) return true;
+            // Frame management
             if (addFrameBtn.handleEvent(ev, window, 0,0)) return true;
             if (removeFrameBtn.handleEvent(ev, window, 0,0)) return true;
             if (moveUpBtn.handleEvent(ev, window, 0,0)) return true;
@@ -3196,18 +3511,17 @@ namespace Gui {
             if (loadResourceBtn.handleEvent(ev, window, 0,0)) return true;
             if (saveResourceBtn.handleEvent(ev, window, 0,0)) return true;
             if (browseFrameBtn.handleEvent(ev, window, 0,0)) return true;
-            if (selectPrevBtn.handleEvent(ev, window, 0,0)) return true;
-            if (selectNextBtn.handleEvent(ev, window, 0,0)) return true;
             if (playBtn.handleEvent(ev, window, 0,0)) return true;
             if (stopBtn.handleEvent(ev, window, 0,0)) return true;
+            if (speedSpinBox->handleEvent(ev, window, 0,0)) return true;
 
             // Click on frame list
             if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                 float mx = ev.button.x, my = ev.button.y;
-                if (mx >= currentListRect.x && mx <= currentListRect.x + currentListRect.w &&
-                    my >= currentListRect.y && my <= currentListRect.y + currentListRect.h) {
+                if (mx >= frameListRect.x && mx <= frameListRect.x + frameListRect.w &&
+                    my >= frameListRect.y && my <= frameListRect.y + frameListRect.h) {
                     float rowH = 25;
-                    int idx = (int)((my - currentListRect.y) / rowH);
+                    int idx = (int)((my - frameListRect.y) / rowH);
                     if (idx >= 0 && idx < (int)frameEntries.size()) {
                         selectedFrameIndex = idx;
                         currentFrame = idx;
@@ -3221,40 +3535,46 @@ namespace Gui {
         void onRender(SDL_FRect win) override {
             float y = win.y + 50;
 
-            // Preview Canvas
-            const float previewH = 180.0f;
-            SDL_FRect previewRect = { win.x + 20, y, win.w - 40, previewH };
+            // --- Clip management area ---
+            // Clip selector dropdown
+            clipSelector.setRect({ win.x + 10, y, 200, 26 });
+            clipSelector.render(0,0);
+            // Clip buttons
+            float bx = win.x + 230;
+            addClipBtn.setRect({ bx, y, 80, 26 }); addClipBtn.render(0,0); bx += 100;
+            removeClipBtn.setRect({ bx, y, 90, 26 }); removeClipBtn.render(0,0); bx += 100;
+            setActiveBtn.setRect({ bx, y, 90, 26 }); setActiveBtn.render(0,0);
+            y += 35;
+
+            // --- Preview Canvas ---
+            const float previewH = 170.0f;
+            SDL_FRect previewRect = { win.x + 10, y, win.w - 30, previewH };
             SDL_SetRenderDrawColor(renderer, 40, 40, 50, 255);
             SDL_RenderFillRect(renderer, &previewRect);
             SDL_SetRenderDrawColor(renderer, 80, 80, 100, 255);
             SDL_RenderRect(renderer, &previewRect);
             renderPreview(previewRect);
+            y += previewH + 15;
 
-            y += previewH + 25;
-
-            // Frame List
-            drawText("Frames:", win.x + 20, y, {200,200,200,255});
-            y += 25;
-
-            currentListRect = { win.x + 20, y, win.w - 40, 150 };
+            // --- Frame list ---
+            drawText("Frames:", win.x + 10, y, {200,200,200,255}); y += 25;
+            frameListRect = { win.x + 10, y, win.w - 30, 150 };
             SDL_SetRenderDrawColor(renderer, 50,50,60,255);
-            SDL_RenderFillRect(renderer, &currentListRect);
-
-            SDL_Rect clip = { (int)currentListRect.x, (int)currentListRect.y, (int)currentListRect.w, (int)currentListRect.h };
-            SDL_SetRenderClipRect(renderer, &clip);
-
+            SDL_RenderFillRect(renderer, &frameListRect);
+            SDL_Rect clipRect = { (int)frameListRect.x, (int)frameListRect.y, (int)frameListRect.w, (int)frameListRect.h };
+            SDL_SetRenderClipRect(renderer, &clipRect);
             float rowH = 25;
             for (size_t i = 0; i < frameEntries.size(); ++i) {
-                SDL_FRect row = { currentListRect.x, currentListRect.y + i*rowH, currentListRect.w, rowH };
+                SDL_FRect row = { frameListRect.x, frameListRect.y + i*rowH, frameListRect.w, rowH };
                 if ((int)i == selectedFrameIndex) {
                     SDL_SetRenderDrawColor(renderer, 70,70,120,255);
                     SDL_RenderFillRect(renderer, &row);
                 }
-
                 std::string displayText = frameEntries[i];
+                if (displayText.empty()) displayText = "(empty)";
                 int textWidth = 0, textHeight = 0;
                 TTF_GetStringSize(font, displayText.c_str(), displayText.size(), &textWidth, &textHeight);
-                float maxWidth = currentListRect.w - 10;
+                float maxWidth = frameListRect.w - 10;
                 if (textWidth > maxWidth) {
                     std::string truncated = "...";
                     int truncWidth = 0;
@@ -3276,43 +3596,42 @@ namespace Gui {
                 drawText(displayText.c_str(), row.x+5, row.y+2, {220,220,220,255});
             }
             SDL_SetRenderClipRect(renderer, nullptr);
+            y = frameListRect.y + frameListRect.h + 10;
 
-            y = currentListRect.y + currentListRect.h + 10;
+            drawText("Speed:", win.x + 10, y, {200,200,200,255});
+            speedSpinBox->setRect({ win.x + 70, y + 20, 100, 26 });
+            speedSpinBox->render(0,0);
+            y += 60;
 
-            // Browse button for selected frame
-            browseFrameBtn.setRect({ win.x + 20, y, 100, 30 });
-            browseFrameBtn.render(0,0);
+            // --- Frame operation buttons ---
+            float btnX = win.x + 10;
+            addFrameBtn.setRect({ btnX, y, 40, 30 }); addFrameBtn.render(0,0); btnX += 45;
+            removeFrameBtn.setRect({ btnX, y, 40, 30 }); removeFrameBtn.render(0,0); btnX += 45;
+            moveUpBtn.setRect({ btnX, y, 40, 30 }); moveUpBtn.render(0,0); btnX += 45;
+            moveDownBtn.setRect({ btnX, y, 40, 30 }); moveDownBtn.render(0,0); btnX += 45;
+            browseFrameBtn.setRect({ btnX, y, 100, 30 }); browseFrameBtn.render(0,0); btnX += 105;
+            loadResourceBtn.setRect({ btnX, y, 120, 30 }); loadResourceBtn.render(0,0); btnX += 125;
+            saveResourceBtn.setRect({ btnX, y, 120, 30 }); saveResourceBtn.render(0,0);
             y += 40;
-
-            // Bottom row: add, remove, move, select, load/save
-            float bx = win.x + 20;
-            addFrameBtn.setRect({ bx, y, 40, 30 }); addFrameBtn.render(0,0); bx += 45;
-            removeFrameBtn.setRect({ bx, y, 40, 30 }); removeFrameBtn.render(0,0); bx += 45;
-            moveUpBtn.setRect({ bx, y, 40, 30 }); moveUpBtn.render(0,0); bx += 45;
-            moveDownBtn.setRect({ bx, y, 40, 30 }); moveDownBtn.render(0,0); bx += 45;
-            selectPrevBtn.setRect({ bx, y, 40, 30 }); selectPrevBtn.render(0,0); bx += 45;
-            selectNextBtn.setRect({ bx, y, 40, 30 }); selectNextBtn.render(0,0); bx += 45;
-            loadResourceBtn.setRect({ bx, y, 120, 30 }); loadResourceBtn.render(0,0); bx += 125;
-            saveResourceBtn.setRect({ bx, y, 120, 30 }); saveResourceBtn.render(0,0);
-            playBtn.setRect({ win.x + 20, y+40, 40, 30}); playBtn.render(0,0);
-            stopBtn.setRect({ win.x + 90, y+40, 120, 30 }); stopBtn.render(0,0);
+            playBtn.setRect({ win.x + 10, y, 40, 30 }); playBtn.render(0,0);
+            stopBtn.setRect({ win.x + 60, y, 120, 30 }); stopBtn.render(0,0);
         }
 
         void onReset() override {
-            // nothing specific to reset
+            // nothing specific
         }
 
     public:
         void tick(float dt) override {
             Dialog::tick(dt);
             if (isPlaying && target) {
-                frameTimer += dt;
-                float frameDuration = 1.0f / target->speed;
-                if (frameTimer >= frameDuration) {
-                    frameTimer -= frameDuration;
-                    currentFrame++;
-                    if (!target->imageFrameResources.empty()) {
-                        currentFrame = currentFrame % (int)target->imageFrameResources.size();
+                auto& clip = target->active();
+                if (!clip.imageFrameResources.empty() && clip.speed > 0.0001f) {
+                    frameTimer += dt;
+                    float frameDuration = 1.0f / clip.speed;
+                    if (frameTimer >= frameDuration) {
+                        frameTimer -= frameDuration;
+                        currentFrame = (currentFrame + 1) % (int)clip.imageFrameResources.size();
                     }
                 }
             }
@@ -3325,15 +3644,22 @@ namespace Gui {
         Components::AnimationState* target = nullptr;
         Gui::FileExplorer& fileExplorer;
 
+        // Clip management widgets
+        Gui::OptionSpinBox clipSelector;
+        Gui::Button addClipBtn, removeClipBtn, setActiveBtn;
+
+        // Frame management widgets
         Gui::Button addFrameBtn, removeFrameBtn, moveUpBtn, moveDownBtn;
         Gui::Button loadResourceBtn, saveResourceBtn;
         Gui::Button browseFrameBtn;
-        Gui::Button selectPrevBtn, selectNextBtn;
         Gui::Button playBtn, stopBtn;
+
+        std::unique_ptr<Gui::SpinBox> speedSpinBox;
 
         std::vector<std::string> frameEntries;
         int selectedFrameIndex = -1;
-        SDL_FRect currentListRect = {0,0,0,0};
+        SDL_FRect frameListRect = {0,0,0,0};
+        int selectedClipIndex = 0;
 
         // Preview playback state
         bool isPlaying = false;
@@ -3344,6 +3670,10 @@ namespace Gui {
         // Helpers
         // ------------------------------------------------------------------
         void setupCallbacks() {
+            addClipBtn.onClicked = [this]() { addClip(); };
+            removeClipBtn.onClicked = [this]() { removeClip(); };
+            setActiveBtn.onClicked = [this]() { setActiveClip(); };
+
             addFrameBtn.onClicked = [this]() { addFrame(); };
             removeFrameBtn.onClicked = [this]() { removeFrame(); };
             moveUpBtn.onClicked = [this]() { moveFrame(-1); };
@@ -3351,35 +3681,30 @@ namespace Gui {
             loadResourceBtn.onClicked = [this]() { loadResource(); };
             saveResourceBtn.onClicked = [this]() { saveResource(); };
             browseFrameBtn.onClicked = [this]() { browseSelectedFrame(); };
-            selectPrevBtn.onClicked = [this]() {
-                if (selectedFrameIndex > 0) {
-                    selectedFrameIndex--;
-                    currentFrame = selectedFrameIndex;
-                }
-            };
-            
-            selectNextBtn.onClicked = [this]() {
-                if (selectedFrameIndex < (int)frameEntries.size()-1) {
-                    selectedFrameIndex++;
-                    currentFrame = selectedFrameIndex;
-                }
-            };
-
-            playBtn.onClicked = [this]() {
-
-                isPlaying = true;
-
-            };
-
-            stopBtn.onClicked = [this]() {
-
-                isPlaying = false;
-            };
+            playBtn.onClicked = [this]() { isPlaying = true; };
+            stopBtn.onClicked = [this]() { isPlaying = false; };
         }
 
         void syncFromTarget() {
             if (!target) return;
-            frameEntries = target->imageFrameResources;
+            // Update clip selector
+            std::vector<std::string> clipNames;
+            for (const auto& clip : target->clips) clipNames.push_back(clip.name);
+            clipSelector.setOptions(clipNames);
+            selectedClipIndex = target->activeClipIndex;
+            clipSelector.setCurrentIndex(selectedClipIndex);
+            syncFramesFromSelectedClip();
+        }
+
+        void syncFramesFromSelectedClip() {
+            if (!target) return;
+            if (selectedClipIndex >= 0 && selectedClipIndex < (int)target->clips.size()) {
+                const auto& clip = target->clips[selectedClipIndex];  // <-- add this
+                frameEntries = clip.imageFrameResources;
+                speedSpinBox->setValue(clip.speed);
+            } else {
+                frameEntries.clear();
+            }
             if (!frameEntries.empty()) {
                 selectedFrameIndex = 0;
                 currentFrame = 0;
@@ -3388,37 +3713,74 @@ namespace Gui {
             }
         }
 
-        void addFrame() {
+        Components::AnimationClip* getSelectedClip() {
+            if (!target) return nullptr;
+            if (selectedClipIndex < 0 || selectedClipIndex >= (int)target->clips.size()) return nullptr;
+            return &target->clips[selectedClipIndex];
+        }
+
+        void addClip() {
             if (!target) return;
-            target->imageFrameResources.push_back("new_texture");
+            Components::AnimationClip newClip;
+            newClip.name = "clip" + std::to_string(target->clips.size() + 1);
+            target->clips.push_back(newClip);
+            selectedClipIndex = (int)target->clips.size() - 1;
             syncFromTarget();
+        }
+
+        void removeClip() {
+            if (!target || target->clips.size() <= 1) return;
+            if (selectedClipIndex < 0 || selectedClipIndex >= (int)target->clips.size()) return;
+            target->clips.erase(target->clips.begin() + selectedClipIndex);
+            if (target->activeClipIndex >= (int)target->clips.size())
+                target->activeClipIndex = (int)target->clips.size() - 1;
+            if (selectedClipIndex >= (int)target->clips.size())
+                selectedClipIndex = (int)target->clips.size() - 1;
+            syncFromTarget();
+        }
+
+        void setActiveClip() {
+            if (!target || selectedClipIndex < 0 || selectedClipIndex >= (int)target->clips.size()) return;
+            target->activeClipIndex = selectedClipIndex;
+            syncFromTarget();
+            clipSelector.setCurrentIndex(target->activeClipIndex);
+        }
+
+        void addFrame() {
+            auto* clip = getSelectedClip();
+            if (!clip) return;
+            clip->imageFrameResources.push_back("new_texture");
+            syncFramesFromSelectedClip();
         }
 
         void removeFrame() {
-            if (!target || selectedFrameIndex < 0 || selectedFrameIndex >= (int)target->imageFrameResources.size()) return;
-            target->imageFrameResources.erase(target->imageFrameResources.begin() + selectedFrameIndex);
-            syncFromTarget();
-            if (selectedFrameIndex >= (int)target->imageFrameResources.size())
-                selectedFrameIndex = (int)target->imageFrameResources.size() - 1;
+            auto* clip = getSelectedClip();
+            if (!clip || selectedFrameIndex < 0 || selectedFrameIndex >= (int)clip->imageFrameResources.size()) return;
+            clip->imageFrameResources.erase(clip->imageFrameResources.begin() + selectedFrameIndex);
+            syncFramesFromSelectedClip();
+            if (selectedFrameIndex >= (int)clip->imageFrameResources.size())
+                selectedFrameIndex = (int)clip->imageFrameResources.size() - 1;
         }
 
         void moveFrame(int dir) {
-            if (!target || selectedFrameIndex < 0) return;
+            auto* clip = getSelectedClip();
+            if (!clip || selectedFrameIndex < 0) return;
             int newIdx = selectedFrameIndex + dir;
-            if (newIdx < 0 || newIdx >= (int)target->imageFrameResources.size()) return;
-            std::swap(target->imageFrameResources[selectedFrameIndex], target->imageFrameResources[newIdx]);
-            syncFromTarget();
+            if (newIdx < 0 || newIdx >= (int)clip->imageFrameResources.size()) return;
+            std::swap(clip->imageFrameResources[selectedFrameIndex], clip->imageFrameResources[newIdx]);
+            syncFramesFromSelectedClip();
             selectedFrameIndex = newIdx;
         }
 
         void browseSelectedFrame() {
-            if (!target || selectedFrameIndex < 0) return;
+            auto* clip = getSelectedClip();
+            if (!clip || selectedFrameIndex < 0) return;
             fileExplorer.setFilter("*.png;*.jpg;*.svg;*.jpeg");
             fileExplorer.setSaveMode(false, "");
-            fileExplorer.setCallback([this](const std::string& path) {
-                if (selectedFrameIndex >= 0 && selectedFrameIndex < (int)target->imageFrameResources.size()) {
-                    target->imageFrameResources[selectedFrameIndex] = path;
-                    syncFromTarget();
+            fileExplorer.setCallback([this, clip](const std::string& path) {
+                if (selectedFrameIndex >= 0 && selectedFrameIndex < (int)clip->imageFrameResources.size()) {
+                    clip->imageFrameResources[selectedFrameIndex] = path;
+                    syncFramesFromSelectedClip();
                 }
                 fileExplorer.reset();
             });
@@ -3438,17 +3800,18 @@ namespace Gui {
                 try {
                     nlohmann::json j;
                     f >> j;
-                    if (!target) {
+                    auto* clip = getSelectedClip();
+                    if (!clip) {
                         fileExplorer.reset();
                         return;
                     }
                     // Only ImageFrames mode is supported now
                     if (j.contains("frames") && j["frames"].is_array()) {
-                        target->imageFrameResources = j["frames"].get<std::vector<std::string>>();
+                        clip->imageFrameResources = j["frames"].get<std::vector<std::string>>();
                     } else {
-                        target->imageFrameResources.clear();
+                        clip->imageFrameResources.clear();
                     }
-                    syncFromTarget();
+                    syncFramesFromSelectedClip();
                     if (onResourceLoaded) onResourceLoaded();
                 } catch (const std::exception& e) {
                     SDL_Log("Error loading animation resource: %s", e.what());
@@ -3459,17 +3822,15 @@ namespace Gui {
         }
 
         void saveResource() {
+            auto* clip = getSelectedClip();
+            if (!clip) return;
             fileExplorer.setFilter("*.animres");
             fileExplorer.setSaveMode(true, ".animres");
-            fileExplorer.setCallback([this](const std::string& path) {
-                if (!target) {
-                    fileExplorer.reset();
-                    return;
-                }
+            fileExplorer.setCallback([this, clip](const std::string& path) {
                 try {
                     nlohmann::json j;
                     j["mode"] = "ImageFrames";
-                    j["frames"] = target->imageFrameResources;
+                    j["frames"] = clip->imageFrameResources;
                     std::ofstream out(path);
                     if (out.is_open()) {
                         out << j.dump(4);
@@ -3486,9 +3847,10 @@ namespace Gui {
         }
 
         void renderPreview(SDL_FRect previewRect) {
-            if (!target) return;
-            if (currentFrame >= 0 && currentFrame < (int)target->imageFrameResources.size()) {
-                const std::string& path = target->imageFrameResources[currentFrame];
+            auto* clip = getSelectedClip();
+            if (!clip) return;
+            if (currentFrame >= 0 && currentFrame < (int)clip->imageFrameResources.size()) {
+                const std::string& path = clip->imageFrameResources[currentFrame];
                 if (!path.empty()) {
                     SDL_Texture* tex = g_resources.TextureManager.Get(path);
                     if (!tex) {
@@ -4109,10 +4471,26 @@ namespace Gui {
                                 }
                                 world->physics_body_pool[e].shapeType = newShape;
                             }
-                            else if (f.key == "phys_w") world->physics_body_pool[e].width = val;
-                            else if (f.key == "phys_h") world->physics_body_pool[e].height = val;
+                            else if (f.key == "phys_w") {
+                                auto& pb = world->physics_body_pool[e];
+                                float oldW = pb.width;
+                                if (!pb.polygonPoints.empty() && oldW > 0.0001f) {
+                                    float scale = val / oldW;
+                                    for (auto& pt : pb.polygonPoints) pt.x *= scale;
+                                }
+                                pb.width = val;
+                            }
+                            else if (f.key == "phys_h") {
+                                auto& pb = world->physics_body_pool[e];
+                                float oldH = pb.height;
+                                if (!pb.polygonPoints.empty() && oldH > 0.0001f) {
+                                    float scale = val / oldH;
+                                    for (auto& pt : pb.polygonPoints) pt.y *= scale;
+                                }
+                                pb.height = val;
+                            }
                             else if (f.key == "phys_r") world->physics_body_pool[e].radius = val;
-                            else if (f.key == "anim_speed") world->animation_state_pool[e].speed = val;
+                            else if (f.key == "anim_speed") world->animation_state_pool[e].active().speed = val;
                             else if (f.key == "sfx_vol") world->sfx_emitter_pool[e].volume = val;
                             else if (f.key == "sfx_pitch") world->sfx_emitter_pool[e].pitch = val;
                             else if (f.key == "sfx_speed") world->sfx_emitter_pool[e].speed = val;
@@ -4168,7 +4546,7 @@ namespace Gui {
                             else if (f.key == "phys_w") worldVal = world->physics_body_pool[e].width;
                             else if (f.key == "phys_h") worldVal = world->physics_body_pool[e].height;
                             else if (f.key == "phys_r") worldVal = world->physics_body_pool[e].radius;
-                            else if (f.key == "anim_speed") worldVal = world->animation_state_pool[e].speed;
+                            else if (f.key == "anim_speed") worldVal = world->animation_state_pool[e].active().speed;
                             else if (f.key == "sfx_vol") worldVal = world->sfx_emitter_pool[e].volume;
                             else if (f.key == "sfx_pitch") worldVal = world->sfx_emitter_pool[e].pitch;
                             else if (f.key == "sfx_speed") worldVal = world->sfx_emitter_pool[e].speed;
@@ -4288,13 +4666,12 @@ namespace Gui {
 
             auto addAnimationState = [&]() {
                 auto& anim = world->animation_state_pool[e];
-                if (anim.imageFrameResources.empty()) {
-                    anim.imageFrameResources.push_back("");
+                if (anim.active().imageFrameResources.empty()) {
+                    anim.active().imageFrameResources.push_back("");
                 }
-                addSpinBox("Anim Speed", "anim_speed", anim.speed, 0.1f, 60.0f, 0.5f);
-
-                // Button to open the frame editor (no mode selector)
-                auto btn = std::make_unique<Gui::Button>(renderer, font, "Edit Frames", SDL_FPoint{0,0}, 100, 26);
+                // Button to open the frame/clip editor.
+                auto btn = std::make_unique<Gui::Button>(renderer, font,
+                    "Edit Clips (" + anim.activeName() + ")", SDL_FPoint{0,0}, 160, 26);
                 btn->onClicked = [this, &anim]() {
                     animFrameEditor->setTarget(&anim);
                     animFrameEditor->onResourceLoaded = [this]() {
@@ -4305,7 +4682,6 @@ namespace Gui {
                     currentEditMode = EditMode::Dialog;
                     animFrameEditor->open();
                 };
-                // Create a Field and add the button (no OptionBox)
                 Field f;
                 f.label = "Animation";
                 f.key = "anim_edit";
@@ -5057,19 +5433,15 @@ inline void animation_system(ECSWorld& world, float dt)
         if (world.has_animation_state[i] && world.has_texture_ref[i])
         {
             auto& state = world.animation_state_pool[i];
-            if (!state.isPlaying) continue;
+            auto& clip = state.active();          // use active clip
+            if (!clip.isPlaying || clip.imageFrameResources.empty()) continue;
+            if (clip.speed <= 0.0001f) continue;
 
-            const std::string& resName = world.texture_ref_pool[i].resourceName;
-            if (resName.empty()) continue; // <--- ADD THIS
-
-            auto it = g_resources.animations.find(resName);
-            if (it != g_resources.animations.end() && !it->second.empty()) {
-                state.timer += dt;
-                float frameDuration = 1.0f / state.speed;
-                if (state.timer >= frameDuration) {
-                    state.timer -= frameDuration;
-                    state.currentFrame = (state.currentFrame + 1) % it->second.size();
-                }
+            clip.timer += dt;
+            float frameDuration = 1.0f / clip.speed;
+            if (clip.timer >= frameDuration) {
+                clip.timer -= frameDuration;
+                clip.currentFrame = (clip.currentFrame + 1) % (int)clip.imageFrameResources.size();
             }
         }
     }
@@ -6182,11 +6554,33 @@ public:
                 }
                 // --- AnimationState (simplified, only image frames) ---
                 if (comps.contains("AnimationState")) {
-                    auto& anim = scene.world.animation_state_pool[id];
                     if (!scene.world.has_animation_state[id]) scene.world.add_animation_state(id);
-                    anim.speed = comps["AnimationState"].value("speed", 10.0f);
-                    anim.isPlaying = comps["AnimationState"].value("isPlaying", true);
-                    anim.imageFrameResources = comps["AnimationState"]["imageFrames"].get<std::vector<std::string>>();
+                    auto& anim = scene.world.animation_state_pool[id];
+                    // Check for new format with clips array
+                    if (comps["AnimationState"].contains("clips") && comps["AnimationState"]["clips"].is_array()) {
+                        anim.clips.clear();
+                        for (const auto& clipJson : comps["AnimationState"]["clips"]) {
+                            Components::AnimationClip clip;
+                            clip.name = clipJson.value("name", "default");
+                            clip.speed = clipJson.value("speed", 10.0f);
+                            clip.isPlaying = clipJson.value("isPlaying", true);
+                            clip.imageFrameResources = clipJson.value("imageFrames", std::vector<std::string>());
+                            anim.clips.push_back(std::move(clip));
+                        }
+                        anim.activeClipIndex = comps["AnimationState"].value("activeClipIndex", 0);
+                        if (anim.activeClipIndex < 0 || anim.activeClipIndex >= (int)anim.clips.size())
+                            anim.activeClipIndex = 0;
+                    } else {
+                        // Old format: single clip
+                        Components::AnimationClip clip;
+                        clip.name = "default";
+                        clip.speed = comps["AnimationState"].value("speed", 10.0f);
+                        clip.isPlaying = comps["AnimationState"].value("isPlaying", true);
+                        clip.imageFrameResources = comps["AnimationState"]["imageFrames"].get<std::vector<std::string>>();
+                        anim.clips.clear();
+                        anim.clips.push_back(std::move(clip));
+                        anim.activeClipIndex = 0;
+                    }
                 }
             }
         }
@@ -6332,11 +6726,33 @@ public:
                 }
                 // --- AnimationState (simplified, only image frames) ---
                 if (comps.contains("AnimationState")) {
-                    auto& anim = scene.world.animation_state_pool[id];
                     if (!scene.world.has_animation_state[id]) scene.world.add_animation_state(id);
-                    anim.speed = comps["AnimationState"].value("speed", 10.0f);
-                    anim.isPlaying = comps["AnimationState"].value("isPlaying", true);
-                    anim.imageFrameResources = comps["AnimationState"]["imageFrames"].get<std::vector<std::string>>();
+                    auto& anim = scene.world.animation_state_pool[id];
+                    // Check for new format with clips array
+                    if (comps["AnimationState"].contains("clips") && comps["AnimationState"]["clips"].is_array()) {
+                        anim.clips.clear();
+                        for (const auto& clipJson : comps["AnimationState"]["clips"]) {
+                            Components::AnimationClip clip;
+                            clip.name = clipJson.value("name", "default");
+                            clip.speed = clipJson.value("speed", 10.0f);
+                            clip.isPlaying = clipJson.value("isPlaying", true);
+                            clip.imageFrameResources = clipJson.value("imageFrames", std::vector<std::string>());
+                            anim.clips.push_back(std::move(clip));
+                        }
+                        anim.activeClipIndex = comps["AnimationState"].value("activeClipIndex", 0);
+                        if (anim.activeClipIndex < 0 || anim.activeClipIndex >= (int)anim.clips.size())
+                            anim.activeClipIndex = 0;
+                    } else {
+                        // Old format: single clip
+                        Components::AnimationClip clip;
+                        clip.name = "default";
+                        clip.speed = comps["AnimationState"].value("speed", 10.0f);
+                        clip.isPlaying = comps["AnimationState"].value("isPlaying", true);
+                        clip.imageFrameResources = comps["AnimationState"]["imageFrames"].get<std::vector<std::string>>();
+                        anim.clips.clear();
+                        anim.clips.push_back(std::move(clip));
+                        anim.activeClipIndex = 0;
+                    }
                 }
             }
         }
@@ -6407,9 +6823,17 @@ public:
 
             if (scene.world.has_animation_state[i]) {
                 auto& anim = scene.world.animation_state_pool[i];
-                comps["AnimationState"]["speed"] = anim.speed;
-                comps["AnimationState"]["isPlaying"] = anim.isPlaying;
-                comps["AnimationState"]["imageFrames"] = anim.imageFrameResources;
+                nlohmann::json clipsJson = nlohmann::json::array();
+                for (const auto& clip : anim.clips) {
+                    nlohmann::json clipJson;
+                    clipJson["name"] = clip.name;
+                    clipJson["speed"] = clip.speed;
+                    clipJson["isPlaying"] = clip.isPlaying;
+                    clipJson["imageFrames"] = clip.imageFrameResources;
+                    clipsJson.push_back(std::move(clipJson));
+                }
+                comps["AnimationState"]["clips"] = std::move(clipsJson);
+                comps["AnimationState"]["activeClipIndex"] = anim.activeClipIndex;
             }
 
             if (scene.world.has_physics_body[i]) {
