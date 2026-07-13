@@ -355,9 +355,28 @@ int main(int argc, char* argv[]) {
     auto canvasTools = std::make_unique<Gui::RightAlignedHBoxContainer>();
     canvasTools->setPadding(5); canvasTools->setSpacing(5);
 
-    auto polyBtn = std::make_unique<Gui::Button>(renderer, g_resources.FontManager.Get("regularFont"),
-                                                 "Poly", SDL_FPoint{0,0}, 60, 30);
-    polyBtn->onClicked = [](){ editor_isDrawingPolygon = !editor_isDrawingPolygon; };
+    auto polyBtn = std::make_unique<Gui::Button>(renderer, g_resources.FontManager.Get("regularFont"), "Poly", SDL_FPoint{0,0}, 60, 30);
+    polyBtn->onClicked = [&world]() {
+        editor_isDrawingPolygon = !editor_isDrawingPolygon;
+        
+        // Automatically switch the selected entity to Polygon mode
+        if (lastSelectedEntity != (Entity)-1 && world.has_physics_body[lastSelectedEntity]) {
+            auto& phys = world.physics_body_pool[lastSelectedEntity];
+            if (phys.shapeType != Physics::ShapeType::Polygon) {
+                phys.shapeType = Physics::ShapeType::Polygon;
+                // Default to a basic triangle if no points exist yet. Points must be
+                // TOP-LEFT relative (range [0,w] x [0,h]) to match how the mouse
+                // polygon editor stores clicks and how render_physics_shape_overlay
+                // reads them back (both subtract width*0.5/height*0.5) - the old
+                // centered square here ({-hw,-hh}...) used the wrong convention,
+                // which is why the shape came out offset/mis-sized.
+                if (phys.polygonPoints.empty()) {
+                    phys.polygonPoints = MakeDefaultTrianglePoints(phys.width, phys.height);
+                }
+            }
+        }
+    };
+
     auto gridBtn = std::make_unique<Gui::Button>(renderer, g_resources.FontManager.Get("regularFont"),
                                                  "Grid", SDL_FPoint{0,0}, 60, 30);
     gridBtn->onClicked = [](){ editor_showGrid = !editor_showGrid; };
@@ -391,13 +410,17 @@ int main(int argc, char* argv[]) {
             toolbar->handleEvent(e, window, 0.0f, 0.0f);
             
             // --- NEW: Handle canvas tools buttons (Poly/Grid) ---
+            bool consumedByCanvasTools = false;
             if (showCanvas) {
-                canvasTools->handleEvent(e, window, 0.0f, 0.0f);
+                consumedByCanvasTools = canvasTools->handleEvent(e, window, 0.0f, 0.0f);
             }
             
             if (fileExplorer.isOpen()) {
                 auto action = fileExplorer.handleEvent(e);
-                if (action == Gui::Dialog::Action::Confirm) fileExplorer.triggerCallback();
+                if (action == Gui::Dialog::Action::Confirm) {
+                    if (fileExplorer.isSaveMode()) fileExplorer.triggerSaveCallback();
+                    else fileExplorer.triggerCallback();
+                }
                 else if (action == Gui::Dialog::Action::Cancel) fileExplorer.reset();
                 continue;
             }
@@ -461,6 +484,18 @@ int main(int argc, char* argv[]) {
                 } else if (action == Gui::Dialog::Action::Cancel) { addChildDialog.reset(); currentEditMode = modeBeforeDialog; }
                 continue;
             }
+
+            if (entityInspector.animFrameEditor && entityInspector.animFrameEditor->isOpen()) {
+                auto action = entityInspector.animFrameEditor->handleEvent(e);
+                if (action == Gui::Dialog::Action::Confirm) {
+                    entityInspector.animFrameEditor->reset();
+                    currentEditMode = modeBeforeDialog;
+                } else if (action == Gui::Dialog::Action::Cancel) {
+                    entityInspector.animFrameEditor->reset();
+                    currentEditMode = modeBeforeDialog;
+                }
+                continue;
+            }
             
             if (!showCanvas) { if (textEditor.handleEvent(e, window, 0.0f, 0.0f)) continue; }
             
@@ -479,7 +514,9 @@ int main(int argc, char* argv[]) {
                 }
             }
             
-            edit_object_with_editor_mouse(renderer, world, scene.guiElements, selectedGuiElem, e);
+            if (!consumedByCanvasTools) {
+                edit_object_with_editor_mouse(renderer, world, scene.guiElements, selectedGuiElem, e);
+            }
             
             if (selectedGuiElem) { if (inspector.handleEvent(e)) continue; }
             else if (selectedEntity != (Entity)-1) { if (entityInspector.handleEvent(e)) continue; }
@@ -633,13 +670,16 @@ int main(int argc, char* argv[]) {
         dialog->tick(delta_time); if (dialog->isOpen()) dialog->render();
         dialog2->tick(delta_time); if (dialog2->isOpen()) dialog2->render();
         addChildDialog.tick(delta_time); if (addChildDialog.isOpen()) addChildDialog.render();
-        fileExplorer.tick(delta_time); if (fileExplorer.isOpen()) fileExplorer.render();
-        // Handle animation frame editor dialog if open
+
         if (entityInspector.animFrameEditor && entityInspector.animFrameEditor->isOpen()) {
             entityInspector.animFrameEditor->tick(delta_time);
-            entityInspector.animFrameEditor->render();
-            // event handling is done inside the dialog's handleEvent loop (doesn't need to be done in main.cpp)
+            // Don't render if file explorer is open on top of it
+            if (!fileExplorer.isOpen()) {
+                entityInspector.animFrameEditor->render();
+            }
         }
+
+        fileExplorer.tick(delta_time); if (fileExplorer.isOpen()) fileExplorer.render();
         
         SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
         SDL_FRect crosshair_firstrect = { cursorX - 10.0f, cursorY - 1.0f, 20.0f, 2.0f };

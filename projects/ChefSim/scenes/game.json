@@ -2,6 +2,13 @@
     "entities": [
         {
             "components": {
+                "AnimationState": {
+                    "imageFrames": [
+                        ""
+                    ],
+                    "isPlaying": true,
+                    "speed": 10.0
+                },
                 "Metadata": {
                     "name": "Player"
                 },

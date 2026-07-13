@@ -187,6 +187,15 @@ bool gamepadDidDrag = false;
 float lastGamepadCursorX = 0.0f;
 float lastGamepadCursorY = 0.0f;
 
+struct VertexDragState {
+    Entity target = (Entity)-1;
+    int vertexIndex = -1;
+    float startMouseX = 0.0f, startMouseY = 0.0f;
+    float startVertexX = 0.0f, startVertexY = 0.0f;
+};
+VertexDragState vertexDrag;
+bool isDraggingVertex = false;
+
 namespace Components {
     struct Metadata { std::string name; };
     struct Position { float x = 0.0f, y = 0.0f; };
@@ -240,32 +249,47 @@ namespace Components {
         int currentFrame = 0;
         bool isPlaying = true;
 
-        enum class Mode {
-            ImageFrames,
-            SpritesheetFrames,
-        } mode = Mode::ImageFrames;
-
+        // Only image frames are supported now
         std::vector<std::string> imageFrameResources;
 
-        struct SpriteFrame {
-            std::string textureName;
-            SDL_FRect rect;
-        };
-        std::vector<SpriteFrame> spriteFrames;
-
         std::pair<std::string, SDL_FRect> getCurrentFrame() const {
-            if (mode == Mode::ImageFrames)
-            {
-                if (imageFrameResources.empty()) return {"", {0,0,0,0}};
-                size_t idx = (size_t)currentFrame % imageFrameResources.size();
-                return {imageFrameResources[idx], {0,0,0,0}};
-            } else {
-                if (spriteFrames.empty()) return {"", {0,0,0,0}};
-                size_t idx = (size_t)currentFrame % spriteFrames.size();
-                return {spriteFrames[idx].textureName, spriteFrames[idx].rect};
-            }
+            if (imageFrameResources.empty()) return {"", {0,0,0,0}};
+            size_t idx = (size_t)currentFrame % imageFrameResources.size();
+            return {imageFrameResources[idx], {0,0,0,0}};
         }
     };
+}
+
+// The "Shape" spinbox in the inspector uses a fixed UI order (0=Rectangle,
+// 1=Circle, 2=Polygon) that is intentionally decoupled from
+// Physics::ShapeType's own enum ordering (Circle=0, Triangle=1,
+// Rectangle=2, Polygon=3, Chain=4). Previously the spinbox value was cast
+// straight to Physics::ShapeType, so 0 showed Circle, 1 showed Triangle
+// (nothing was drawn for it), and 2 showed Rectangle instead of Polygon.
+// Always go through these two helpers instead of casting directly.
+inline Physics::ShapeType SpinboxIndexToShapeType(int idx) {
+    switch (idx) {
+        case 0:  return Physics::ShapeType::Rectangle;
+        case 1:  return Physics::ShapeType::Circle;
+        case 2:  return Physics::ShapeType::Polygon;
+        default: return Physics::ShapeType::Rectangle;
+    }
+}
+inline int ShapeTypeToSpinboxIndex(Physics::ShapeType t) {
+    switch (t) {
+        case Physics::ShapeType::Rectangle: return 0;
+        case Physics::ShapeType::Circle:    return 1;
+        case Physics::ShapeType::Polygon:   return 2;
+        default:                            return 0;
+    }
+}
+
+// Default triangle used when a shape is switched to Polygon with no points
+// yet defined. Points are stored TOP-LEFT relative (range [0,w] x [0,h]),
+// matching both the mouse-click polygon editor and render_physics_shape_overlay,
+// which subtract width*0.5/height*0.5 from each stored point before drawing.
+inline std::vector<b2Vec2> MakeDefaultTrianglePoints(float w, float h) {
+    return { { w * 0.5f, 0.0f }, { w, h }, { 0.0f, h } };
 }
 
 const float LOGICAL_CANVAS_WIDTH  = 1390.0f;
@@ -859,9 +883,17 @@ namespace Gui {
             float getHeight() const override { return optionRect.h; }
             void setRect(SDL_FRect r) override { optionRect = r; }
             void setPos(SDL_Point p) override { optionRect.x = p.x; optionRect.y = p.y; }
-
+            std::function<void(int)> onChange; 
             SDL_FRect decBtn() const { return { optionRect.x, optionRect.y, optionRect.h, optionRect.h }; }
             SDL_FRect incBtn() const { return { optionRect.x + optionRect.w - optionRect.h, optionRect.y, optionRect.h, optionRect.h }; }
+
+            void setOptions(const std::vector<std::string>& opts) {
+                options = opts;
+                currentOption = 0;
+                isDropdownOpen = false;
+            }
+
+
             SDL_FRect fieldLabel() const {
                 float bw = optionRect.h;
                 return { optionRect.x + bw, optionRect.y, optionRect.w - bw * 2.0f, optionRect.h };
@@ -892,15 +924,14 @@ namespace Gui {
                     float totalH = options.size() * 28.0f;
                     float visH = std::min(totalH, maxDropdownHeight);
                     SDL_FRect dropRect = { shiftedMain.x, shiftedMain.y + shiftedMain.h, shiftedMain.w, visH };
-                    
                     if (dropdownScrollbar.handleEvent(ev)) return true;
-
                     if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                         if (inRect(mx, my, dropRect)) {
                             int idx = (int)((my - dropRect.y + dropdownScrollOffset) / 28.0f);
                             if (idx >= 0 && idx < (int)options.size()) {
                                 currentOption = idx;
                                 isDropdownOpen = false;
+                                if (onChange) onChange(currentOption); // <-- ADD THIS LINE
                                 return true;
                             }
                         } else if (!inRect(mx, my, shiftedMain)) {
@@ -1850,7 +1881,7 @@ namespace Gui {
             return state == DialogState::Opening || state == DialogState::Opened;
         }
 
-        void tick(float dt) {
+        virtual void tick(float dt) {
             if (state == DialogState::Opening) {
                 progress += dt * 4.0f;
                 if (progress >= 1.0f) { progress = 1.0f; state = DialogState::Opened; }
@@ -1860,6 +1891,8 @@ namespace Gui {
         void setNewTitle(std::string newTitle) {
             title = std::move(newTitle);
         }
+
+        void setConfirmButtonText(const std::string& text) { confirmLabel = text; }
 
 
         Action handleEvent(const SDL_Event& ev) {
@@ -2095,9 +2128,10 @@ namespace Gui {
         rootPath(rootPath.empty() ? std::filesystem::current_path().string() : rootPath),
         filter(filter),
         pathEdit(r, te, f, {0,0,1,1}, "Path..."),
-        renameEdit(r, te, f, {0,0,1,1}, ""), // <--- ADD THIS
+        renameEdit(r, te, f, {0,0,1,1}, ""),
+        filenameEdit(r, te, f, {0,0,1,1}, "filename"),
         renderer(r), font(f), textEngine(te)
-    {
+        {
             refreshEntries();
             loadIcons();
         }
@@ -2119,7 +2153,38 @@ namespace Gui {
             refreshEntries();
         }
 
+        bool isSaveMode() const { return saveMode; }
+
+        void setSaveMode(bool enabled, const std::string& ext) {
+            saveMode = enabled;
+            saveExtension = ext;
+            if (enabled) {
+                setNewTitle("Save File");
+                setConfirmButtonText("Save");
+                filenameEdit.clear();
+                if (!ext.empty()) filenameEdit.appendText("new_file" + ext);
+            } else {
+                setNewTitle("Open File");
+                setConfirmButtonText("Open");
+            }
+        }
+
+        void triggerSaveCallback() {
+            if (!callback) return;
+            std::string fname = filenameEdit.getText();
+            if (fname.empty()) return;
+            if (!saveExtension.empty() && fname.find(saveExtension) == std::string::npos) {
+                fname += saveExtension;
+            }
+            std::string fullPath = (std::filesystem::path(currentPath) / fname).string();
+            callback(fullPath);
+        }
+
     private:
+        bool saveMode = false;
+        std::string saveExtension = "";
+        Gui::LineEdit filenameEdit;
+
         SDL_FRect getItemContextMenuRect() const {
             float w = 160.0f, h = 28.0f * itemContextMenuItems.size() + 6.0f;
             float x = itemContextMenuX, y = itemContextMenuY;
@@ -2130,6 +2195,8 @@ namespace Gui {
             if (y < win.y + 70) y = win.y + 70;
             return { x, y, w, h };
         }
+        
+
 
         void commitRename() {
             std::string newName = renameEdit.getText();
@@ -2184,6 +2251,9 @@ namespace Gui {
         }
 
         bool onHandleEvent(const SDL_Event& ev) override {
+            if (saveMode) {
+                if (filenameEdit.handleEvent(ev, window, 0.0f, 0.0f)) return true;
+            }
             if (showDeleteConfirmation) {
                 if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                     float mx = ev.button.x, my = ev.button.y;
@@ -2517,6 +2587,12 @@ namespace Gui {
                     drawText(itemContextMenuItems[i].c_str(), menuRect.x + 8, yPos + 4, {255,255,255,255});
                     yPos += itemH;
                 }
+            }
+            if (saveMode) {
+                drawText("File:", win.x + 10, win.y + win.h - 40, {220,220,220,255});
+                // Fix: Start after the Cancel button (which ends at x+120) and end before the Save button
+                filenameEdit.setRect({ win.x + 130, win.y + win.h - 45, win.w - 260, 28 });
+                filenameEdit.render(0.0f, 0.0f);
             }
             if (showDeleteConfirmation) {
                 SDL_FRect win = animRect();
@@ -3077,106 +3153,196 @@ namespace Gui {
     public:
         AnimationFrameEditor(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
                             SDL_Window* window, Gui::FileExplorer& fileExp)
-            : Dialog(renderer, textEngine, font, window, {0,0,700,500}, "Edit Animation Frames", "Save", "Cancel"),
+            : Dialog(renderer, textEngine, font, window, {0,0,700,650}, "Edit Animation Frames", "Save", "Cancel"),
             fileExplorer(fileExp),
-            modeOption(renderer, textEngine, font, {0,0,1,1}, std::vector<std::string>{"ImageFrames", "SpritesheetFrames"}),
-            texturePathEdit(renderer, textEngine, font, {0,0,1,1}, "spritesheet texture..."),
-            browseTextureBtn(renderer, font, "...", SDL_FPoint{0,0}, 30, 30),
             addFrameBtn(renderer, font, "+", SDL_FPoint{0,0}, 40, 30),
             removeFrameBtn(renderer, font, "-", SDL_FPoint{0,0}, 40, 30),
-            moveUpBtn(renderer, font, "↑", SDL_FPoint{0,0}, 40, 30),
-            moveDownBtn(renderer, font, "↓", SDL_FPoint{0,0}, 40, 30),
+            moveUpBtn(renderer, font, "up", SDL_FPoint{0,0}, 40, 30),
+            moveDownBtn(renderer, font, "dn", SDL_FPoint{0,0}, 40, 30),
             loadResourceBtn(renderer, font, "Load .resource", SDL_FPoint{0,0}, 120, 30),
-            saveResourceBtn(renderer, font, "Save .resource", SDL_FPoint{0,0}, 120, 30)
+            saveResourceBtn(renderer, font, "Save .resource", SDL_FPoint{0,0}, 120, 30),
+            browseFrameBtn(renderer, font, "Browse Image", SDL_FPoint{0,0}, 100, 30),
+            selectPrevBtn(renderer, font, "/\\", SDL_FPoint{0,0}, 40, 30),
+            selectNextBtn(renderer, font, "\\/", SDL_FPoint{0,0}, 40, 30),
+            playBtn(renderer, font, "Play", SDL_FPoint{0,0}, 40, 30),
+            stopBtn(renderer, font, "Stop", SDL_FPoint{0,0}, 40, 30)
         {
             setupCallbacks();
         }
 
         void setTarget(Components::AnimationState* anim) {
             target = anim;
+            onResourceLoaded = nullptr;
             syncFromTarget();
         }
 
         bool onHandleGamepad(float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame) override {
-            modeOption.handleGamepad(cursorX, cursorY, 0,0, window, confirmDown, confirmDownLastFrame);
-            texturePathEdit.handleGamepad(cursorX, cursorY, 0,0, window, confirmDown, confirmDownLastFrame);
-            return true;
+            // No interactive widgets that need gamepad handling besides buttons (handled by Dialog base)
+            return false;
         }
 
     protected:
         void onOpen() override {
             int w, h; SDL_GetWindowSize(window, &w, &h);
-            logicalRect = { (w-700)*0.5f, (h-500)*0.5f, 700, 500 };
+            logicalRect = { (w-700)*0.5f, (h-650)*0.5f, 700, 650 };
             syncFromTarget();
         }
 
         bool onHandleEvent(const SDL_Event& ev) override {
-            if (modeOption.handleEvent(ev, window, 0,0)) return true;
-            if (texturePathEdit.handleEvent(ev, window, 0,0)) return true;
-            if (browseTextureBtn.handleEvent(ev, window, 0,0)) return true;
             if (addFrameBtn.handleEvent(ev, window, 0,0)) return true;
             if (removeFrameBtn.handleEvent(ev, window, 0,0)) return true;
             if (moveUpBtn.handleEvent(ev, window, 0,0)) return true;
             if (moveDownBtn.handleEvent(ev, window, 0,0)) return true;
             if (loadResourceBtn.handleEvent(ev, window, 0,0)) return true;
             if (saveResourceBtn.handleEvent(ev, window, 0,0)) return true;
+            if (browseFrameBtn.handleEvent(ev, window, 0,0)) return true;
+            if (selectPrevBtn.handleEvent(ev, window, 0,0)) return true;
+            if (selectNextBtn.handleEvent(ev, window, 0,0)) return true;
+            if (playBtn.handleEvent(ev, window, 0,0)) return true;
+            if (stopBtn.handleEvent(ev, window, 0,0)) return true;
+
+            // Click on frame list
+            if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                float mx = ev.button.x, my = ev.button.y;
+                if (mx >= currentListRect.x && mx <= currentListRect.x + currentListRect.w &&
+                    my >= currentListRect.y && my <= currentListRect.y + currentListRect.h) {
+                    float rowH = 25;
+                    int idx = (int)((my - currentListRect.y) / rowH);
+                    if (idx >= 0 && idx < (int)frameEntries.size()) {
+                        selectedFrameIndex = idx;
+                        currentFrame = idx;
+                        return true;
+                    }
+                }
+            }
             return false;
         }
 
         void onRender(SDL_FRect win) override {
             float y = win.y + 50;
-            modeOption.setRect({ win.x + 20, y, 200, 30 });
-            modeOption.render(0,0);
-            y += 40;
 
-            if (modeOption.getCurrentOption() == "SpritesheetFrames") {
-                texturePathEdit.setRect({ win.x + 20, y, win.w - 140, 30 });
-                texturePathEdit.render(0,0);
-                browseTextureBtn.setRect({ win.x + win.w - 110, y, 30, 30 });
-                browseTextureBtn.render(0,0);
-                y += 40;
-                drawText("Rect selection canvas (click and drag) not implemented", win.x+20, y, {200,200,200,255});
-                y += 40;
-            }
+            // Preview Canvas
+            const float previewH = 180.0f;
+            SDL_FRect previewRect = { win.x + 20, y, win.w - 40, previewH };
+            SDL_SetRenderDrawColor(renderer, 40, 40, 50, 255);
+            SDL_RenderFillRect(renderer, &previewRect);
+            SDL_SetRenderDrawColor(renderer, 80, 80, 100, 255);
+            SDL_RenderRect(renderer, &previewRect);
+            renderPreview(previewRect);
 
-            drawText("Frames:", win.x+20, y, {200,200,200,255});
+            y += previewH + 25;
+
+            // Frame List
+            drawText("Frames:", win.x + 20, y, {200,200,200,255});
             y += 25;
-            SDL_FRect listRect = { win.x+20, y, win.w-40, 200 };
+
+            currentListRect = { win.x + 20, y, win.w - 40, 150 };
             SDL_SetRenderDrawColor(renderer, 50,50,60,255);
-            SDL_RenderFillRect(renderer, &listRect);
+            SDL_RenderFillRect(renderer, &currentListRect);
+
+            SDL_Rect clip = { (int)currentListRect.x, (int)currentListRect.y, (int)currentListRect.w, (int)currentListRect.h };
+            SDL_SetRenderClipRect(renderer, &clip);
+
             float rowH = 25;
             for (size_t i = 0; i < frameEntries.size(); ++i) {
-                SDL_FRect row = { listRect.x, listRect.y + i*rowH, listRect.w, rowH };
+                SDL_FRect row = { currentListRect.x, currentListRect.y + i*rowH, currentListRect.w, rowH };
                 if ((int)i == selectedFrameIndex) {
                     SDL_SetRenderDrawColor(renderer, 70,70,120,255);
                     SDL_RenderFillRect(renderer, &row);
                 }
-                drawText(frameEntries[i].c_str(), row.x+5, row.y+2, {220,220,220,255});
-            }
-            y += 210;
 
+                std::string displayText = frameEntries[i];
+                int textWidth = 0, textHeight = 0;
+                TTF_GetStringSize(font, displayText.c_str(), displayText.size(), &textWidth, &textHeight);
+                float maxWidth = currentListRect.w - 10;
+                if (textWidth > maxWidth) {
+                    std::string truncated = "...";
+                    int truncWidth = 0;
+                    TTF_GetStringSize(font, "...", 3, &truncWidth, nullptr);
+                    int availableWidth = maxWidth - truncWidth;
+                    int startIdx = (int)displayText.size() - 1;
+                    int currentWidth = 0;
+                    while (startIdx >= 0 && currentWidth < availableWidth) {
+                        int charW = 0;
+                        TTF_GetStringSize(font, displayText.substr(startIdx, 1).c_str(), 1, &charW, nullptr);
+                        currentWidth += charW;
+                        if (currentWidth > availableWidth) break;
+                        startIdx--;
+                    }
+                    startIdx++;
+                    truncated = "..." + displayText.substr(startIdx);
+                    displayText = truncated;
+                }
+                drawText(displayText.c_str(), row.x+5, row.y+2, {220,220,220,255});
+            }
+            SDL_SetRenderClipRect(renderer, nullptr);
+
+            y = currentListRect.y + currentListRect.h + 10;
+
+            // Browse button for selected frame
+            browseFrameBtn.setRect({ win.x + 20, y, 100, 30 });
+            browseFrameBtn.render(0,0);
+            y += 40;
+
+            // Bottom row: add, remove, move, select, load/save
             float bx = win.x + 20;
             addFrameBtn.setRect({ bx, y, 40, 30 }); addFrameBtn.render(0,0); bx += 45;
             removeFrameBtn.setRect({ bx, y, 40, 30 }); removeFrameBtn.render(0,0); bx += 45;
             moveUpBtn.setRect({ bx, y, 40, 30 }); moveUpBtn.render(0,0); bx += 45;
             moveDownBtn.setRect({ bx, y, 40, 30 }); moveDownBtn.render(0,0); bx += 45;
+            selectPrevBtn.setRect({ bx, y, 40, 30 }); selectPrevBtn.render(0,0); bx += 45;
+            selectNextBtn.setRect({ bx, y, 40, 30 }); selectNextBtn.render(0,0); bx += 45;
             loadResourceBtn.setRect({ bx, y, 120, 30 }); loadResourceBtn.render(0,0); bx += 125;
             saveResourceBtn.setRect({ bx, y, 120, 30 }); saveResourceBtn.render(0,0);
+            playBtn.setRect({ win.x + 20, y+40, 40, 30}); playBtn.render(0,0);
+            stopBtn.setRect({ win.x + 90, y+40, 120, 30 }); stopBtn.render(0,0);
         }
 
-        void onReset() override {}
+        void onReset() override {
+            // nothing specific to reset
+        }
+
+    public:
+        void tick(float dt) override {
+            Dialog::tick(dt);
+            if (isPlaying && target) {
+                frameTimer += dt;
+                float frameDuration = 1.0f / target->speed;
+                if (frameTimer >= frameDuration) {
+                    frameTimer -= frameDuration;
+                    currentFrame++;
+                    if (!target->imageFrameResources.empty()) {
+                        currentFrame = currentFrame % (int)target->imageFrameResources.size();
+                    }
+                }
+            }
+        }
+
+    public:
+        std::function<void()> onResourceLoaded;
 
     private:
         Components::AnimationState* target = nullptr;
         Gui::FileExplorer& fileExplorer;
-        Gui::OptionBox modeOption;
-        Gui::LineEdit texturePathEdit;
-        Gui::Button browseTextureBtn;
+
         Gui::Button addFrameBtn, removeFrameBtn, moveUpBtn, moveDownBtn;
         Gui::Button loadResourceBtn, saveResourceBtn;
+        Gui::Button browseFrameBtn;
+        Gui::Button selectPrevBtn, selectNextBtn;
+        Gui::Button playBtn, stopBtn;
+
         std::vector<std::string> frameEntries;
         int selectedFrameIndex = -1;
+        SDL_FRect currentListRect = {0,0,0,0};
 
+        // Preview playback state
+        bool isPlaying = false;
+        int currentFrame = 0;
+        float frameTimer = 0.0f;
+
+        // ------------------------------------------------------------------
+        // Helpers
+        // ------------------------------------------------------------------
         void setupCallbacks() {
             addFrameBtn.onClicked = [this]() { addFrame(); };
             removeFrameBtn.onClicked = [this]() { removeFrame(); };
@@ -3184,129 +3350,172 @@ namespace Gui {
             moveDownBtn.onClicked = [this]() { moveFrame(1); };
             loadResourceBtn.onClicked = [this]() { loadResource(); };
             saveResourceBtn.onClicked = [this]() { saveResource(); };
-            browseTextureBtn.onClicked = [this]() { openTexturePicker(); };
+            browseFrameBtn.onClicked = [this]() { browseSelectedFrame(); };
+            selectPrevBtn.onClicked = [this]() {
+                if (selectedFrameIndex > 0) {
+                    selectedFrameIndex--;
+                    currentFrame = selectedFrameIndex;
+                }
+            };
+            
+            selectNextBtn.onClicked = [this]() {
+                if (selectedFrameIndex < (int)frameEntries.size()-1) {
+                    selectedFrameIndex++;
+                    currentFrame = selectedFrameIndex;
+                }
+            };
+
+            playBtn.onClicked = [this]() {
+
+                isPlaying = true;
+
+            };
+
+            stopBtn.onClicked = [this]() {
+
+                isPlaying = false;
+            };
         }
 
         void syncFromTarget() {
             if (!target) return;
-            modeOption.setCurrentIndex((int)target->mode);
-            frameEntries.clear();
-            if (target->mode == Components::AnimationState::Mode::ImageFrames) {
-                frameEntries = target->imageFrameResources;
+            frameEntries = target->imageFrameResources;
+            if (!frameEntries.empty()) {
+                selectedFrameIndex = 0;
+                currentFrame = 0;
             } else {
-                for (auto& sf : target->spriteFrames) {
-                    frameEntries.push_back(sf.textureName + " [" + std::to_string((int)sf.rect.x) + "," +
-                                        std::to_string((int)sf.rect.y) + " " +
-                                        std::to_string((int)sf.rect.w) + "x" +
-                                        std::to_string((int)sf.rect.h) + "]");
-                }
+                selectedFrameIndex = -1;
             }
-            if (!frameEntries.empty()) selectedFrameIndex = 0;
         }
 
         void addFrame() {
             if (!target) return;
-            if (target->mode == Components::AnimationState::Mode::ImageFrames) {
-                target->imageFrameResources.push_back("new_texture");
-            } else {
-                Components::AnimationState::SpriteFrame sf;
-                sf.textureName = "spritesheet";
-                sf.rect = {0,0,64,64};
-                target->spriteFrames.push_back(sf);
-            }
+            target->imageFrameResources.push_back("new_texture");
             syncFromTarget();
         }
 
         void removeFrame() {
-            if (!target || selectedFrameIndex < 0 || selectedFrameIndex >= (int)frameEntries.size()) return;
-            if (target->mode == Components::AnimationState::Mode::ImageFrames) {
-                target->imageFrameResources.erase(target->imageFrameResources.begin() + selectedFrameIndex);
-            } else {
-                target->spriteFrames.erase(target->spriteFrames.begin() + selectedFrameIndex);
-            }
+            if (!target || selectedFrameIndex < 0 || selectedFrameIndex >= (int)target->imageFrameResources.size()) return;
+            target->imageFrameResources.erase(target->imageFrameResources.begin() + selectedFrameIndex);
             syncFromTarget();
+            if (selectedFrameIndex >= (int)target->imageFrameResources.size())
+                selectedFrameIndex = (int)target->imageFrameResources.size() - 1;
         }
 
         void moveFrame(int dir) {
             if (!target || selectedFrameIndex < 0) return;
             int newIdx = selectedFrameIndex + dir;
-            if (newIdx < 0 || newIdx >= (int)frameEntries.size()) return;
-            if (target->mode == Components::AnimationState::Mode::ImageFrames) {
-                std::swap(target->imageFrameResources[selectedFrameIndex], target->imageFrameResources[newIdx]);
-            } else {
-                std::swap(target->spriteFrames[selectedFrameIndex], target->spriteFrames[newIdx]);
-            }
+            if (newIdx < 0 || newIdx >= (int)target->imageFrameResources.size()) return;
+            std::swap(target->imageFrameResources[selectedFrameIndex], target->imageFrameResources[newIdx]);
             syncFromTarget();
             selectedFrameIndex = newIdx;
         }
 
+        void browseSelectedFrame() {
+            if (!target || selectedFrameIndex < 0) return;
+            fileExplorer.setFilter("*.png;*.jpg;*.svg;*.jpeg");
+            fileExplorer.setSaveMode(false, "");
+            fileExplorer.setCallback([this](const std::string& path) {
+                if (selectedFrameIndex >= 0 && selectedFrameIndex < (int)target->imageFrameResources.size()) {
+                    target->imageFrameResources[selectedFrameIndex] = path;
+                    syncFromTarget();
+                }
+                fileExplorer.reset();
+            });
+            fileExplorer.open();
+        }
+
         void loadResource() {
-            fileExplorer.setFilter("*.resource");
+            fileExplorer.setFilter("*.animres");
+            fileExplorer.setSaveMode(false, "");
             fileExplorer.setCallback([this](const std::string& path) {
                 std::ifstream f(path);
-                if (!f.is_open()) return;
-                nlohmann::json j;
-                f >> j;
-                std::string modeStr = j.value("mode", "ImageFrames");
-                if (!target) return;
-                target->mode = (modeStr == "SpritesheetFrames") ? Components::AnimationState::Mode::SpritesheetFrames
-                                                                : Components::AnimationState::Mode::ImageFrames;
-                if (target->mode == Components::AnimationState::Mode::ImageFrames) {
-                    target->imageFrameResources = j["frames"].get<std::vector<std::string>>();
-                    target->spriteFrames.clear();
-                } else {
-                    target->spriteFrames.clear();
-                    for (auto& f : j["frames"]) {
-                        Components::AnimationState::SpriteFrame sf;
-                        sf.textureName = f.value("texture", "");
-                        sf.rect.x = f.value("x", 0.0f);
-                        sf.rect.y = f.value("y", 0.0f);
-                        sf.rect.w = f.value("w", 0.0f);
-                        sf.rect.h = f.value("h", 0.0f);
-                        target->spriteFrames.push_back(sf);
-                    }
-                    target->imageFrameResources.clear();
+                if (!f.is_open()) {
+                    SDL_Log("Failed to open animation resource file: %s", path.c_str());
+                    fileExplorer.reset();
+                    return;
                 }
-                syncFromTarget();
+                try {
+                    nlohmann::json j;
+                    f >> j;
+                    if (!target) {
+                        fileExplorer.reset();
+                        return;
+                    }
+                    // Only ImageFrames mode is supported now
+                    if (j.contains("frames") && j["frames"].is_array()) {
+                        target->imageFrameResources = j["frames"].get<std::vector<std::string>>();
+                    } else {
+                        target->imageFrameResources.clear();
+                    }
+                    syncFromTarget();
+                    if (onResourceLoaded) onResourceLoaded();
+                } catch (const std::exception& e) {
+                    SDL_Log("Error loading animation resource: %s", e.what());
+                }
                 fileExplorer.reset();
             });
             fileExplorer.open();
         }
 
         void saveResource() {
-            if (!target) return;
-            std::string path = "animation.resource";
-            nlohmann::json j;
-            if (target->mode == Components::AnimationState::Mode::ImageFrames) {
-                j["mode"] = "ImageFrames";
-                j["frames"] = target->imageFrameResources;
-            } else {
-                j["mode"] = "SpritesheetFrames";
-                nlohmann::json frames = nlohmann::json::array();
-                for (auto& sf : target->spriteFrames) {
-                    nlohmann::json f;
-                    f["texture"] = sf.textureName;
-                    f["x"] = sf.rect.x; f["y"] = sf.rect.y; f["w"] = sf.rect.w; f["h"] = sf.rect.h;
-                    frames.push_back(f);
-                }
-                j["frames"] = frames;
-            }
-            std::ofstream out(path);
-            out << j.dump(4);
-            SDL_Log("Saved animation resource to %s", path.c_str());
-        }
-
-        void openTexturePicker() {
-            fileExplorer.setFilter("*.svg");
+            fileExplorer.setFilter("*.animres");
+            fileExplorer.setSaveMode(true, ".animres");
             fileExplorer.setCallback([this](const std::string& path) {
-                texturePathEdit.clear();
-                for (char c : path) texturePathEdit.appendText(std::string(1, c));
+                if (!target) {
+                    fileExplorer.reset();
+                    return;
+                }
+                try {
+                    nlohmann::json j;
+                    j["mode"] = "ImageFrames";
+                    j["frames"] = target->imageFrameResources;
+                    std::ofstream out(path);
+                    if (out.is_open()) {
+                        out << j.dump(4);
+                        SDL_Log("Saved animation resource to %s", path.c_str());
+                    } else {
+                        SDL_Log("Failed to save animation resource to %s", path.c_str());
+                    }
+                } catch (const std::exception& e) {
+                    SDL_Log("Error saving animation resource: %s", e.what());
+                }
                 fileExplorer.reset();
             });
             fileExplorer.open();
         }
-    };
 
+        void renderPreview(SDL_FRect previewRect) {
+            if (!target) return;
+            if (currentFrame >= 0 && currentFrame < (int)target->imageFrameResources.size()) {
+                const std::string& path = target->imageFrameResources[currentFrame];
+                if (!path.empty()) {
+                    SDL_Texture* tex = g_resources.TextureManager.Get(path);
+                    if (!tex) {
+                        g_resources.TextureManager.Load(path, path);
+                        tex = g_resources.TextureManager.Get(path);
+                    }
+                    if (tex) {
+                        float tw, th;
+                        SDL_GetTextureSize(tex, &tw, &th);
+                        float scaleX = previewRect.w / tw;
+                        float scaleY = previewRect.h / th;
+                        float scale = std::min(scaleX, scaleY);
+                        float drawW = tw * scale;
+                        float drawH = th * scale;
+                        SDL_FRect dst = {
+                            previewRect.x + (previewRect.w - drawW) * 0.5f,
+                            previewRect.y + (previewRect.h - drawH) * 0.5f,
+                            drawW, drawH
+                        };
+                        SDL_RenderTexture(renderer, tex, nullptr, &dst);
+                    } else {
+                        drawText("Image not found", previewRect.x + 10, previewRect.y + 10, {200,200,200,255});
+                    }
+                }
+            }
+        }
+    };
 
     class SceneInspector {
     private:
@@ -3745,16 +3954,14 @@ namespace Gui {
             return (float)w - PANEL_W;
         }
 
-
         EntityInspector(SDL_Renderer* r, TTF_TextEngine* te, TTF_Font* f, SDL_Window* w, FileExplorer& fileExp)
         : renderer(r), textEngine(te), font(f), window(w),
-          fileExplorer(fileExp),  // <-- reference initialized here
-          componentSelector(r, te, f, SDL_FRect{0,0,1,1}, componentOptions),
-          addComponentBtn(r, f, "Add Component", SDL_FPoint{0,0}, 100, 30)
+        fileExplorer(fileExp),
+        componentSelector(r, te, f, SDL_FRect{0,0,1,1}, componentOptions),
+        addComponentBtn(r, f, "Add Component", SDL_FPoint{0,0}, 100, 30)
         {
             inspectorScrollbar.setOrientation(Gui::ScrollOrientation::Vertical);
             inspectorScrollbar.onChange = [this](float v){ inspectorScrollOffset = v; };
-            // Create the AnimationFrameEditor after fileExplorer is initialized
             animFrameEditor = std::make_unique<Gui::AnimationFrameEditor>(renderer, textEngine, font, window, fileExplorer);
         }
 
@@ -3800,49 +4007,44 @@ namespace Gui {
             SDL_FRect bg = { panelX(), 0, PANEL_W, windowHeight };
             SDL_SetRenderDrawColor(renderer, 28, 28, 35, 245); SDL_RenderFillRect(renderer, &bg);
             SDL_SetRenderDrawColor(renderer, 60, 60, 75, 255); SDL_RenderRect(renderer, &bg);
-
+            
             float contentHeight = 0.0f;
-            contentHeight += 10.0f + 24.0f + 22.0f + 8.0f; // header
+            contentHeight += 10.0f + 24.0f + 22.0f + 8.0f;
             for (auto& f : fields) {
-                contentHeight += 32.0f; // label
+                contentHeight += 32.0f;
                 for (auto& wgt : f.widgets) contentHeight += 32.0f + 4.0f;
                 contentHeight += 8.0f;
             }
-            // Add Component UI
-            contentHeight += 80.0f; // "Add Component:" label, dropdown, button
+            contentHeight += 80.0f;
             contentHeight += 8.0f;
-
-            // Add extra height for any open dropdowns inside fields (e.g. OptionBox)
+            
             float extraDropdownHeight = 0.0f;
             for (auto& f : fields) {
                 for (auto& wgt : f.widgets) {
                     if (wgt->getType() == "OptionBox") {
                         auto* opt = static_cast<Gui::OptionBox*>(wgt.get());
-                        if (opt->isOpen()) {
-                            extraDropdownHeight += opt->getDropdownHeight();
-                        }
+                        if (opt->isOpen()) extraDropdownHeight += opt->getDropdownHeight();
                     }
                 }
             }
+            if (componentSelector.isOpen()) extraDropdownHeight += componentSelector.getDropdownHeight();
             contentHeight += extraDropdownHeight;
-
-            // Add bottom margin
             contentHeight += 20.0f;
 
             const float sbW = 12.0f;
             float viewHeight = windowHeight;
             inspectorScrollbar.setGeometry(panelX() + PANEL_W - sbW, 0.0f, sbW, viewHeight, contentHeight, viewHeight);
             inspectorScrollOffset = inspectorScrollbar.offset;
-
+            
             SDL_Rect clip = { (int)panelX(), 0, (int)(PANEL_W - sbW), (int)viewHeight };
             SDL_SetRenderClipRect(renderer, &clip);
-
+            
             float y = 10.0f - inspectorScrollOffset;
             drawLabel("Entity Inspector", panelX() + 10, y, {200,200,220,255}); y += 24;
             drawLabel(("ID: " + std::to_string(targetEntity)).c_str(), panelX() + 10, y, {140,140,180,255}); y += 22;
             SDL_SetRenderDrawColor(renderer, 60, 60, 80, 255);
             SDL_FRect div = { panelX() + 5, y, PANEL_W - sbW - 10, 1 }; SDL_RenderFillRect(renderer, &div); y += 8;
-
+            
             for (auto& f : fields) {
                 drawLabel(f.label.c_str(), panelX() + 8, y, {160,160,190,255}); y += 32;
                 float widgetY = y;
@@ -3853,7 +4055,7 @@ namespace Gui {
                 }
                 y = widgetY + 8;
             }
-
+            
             float addUIY = y + 20.0f;
             drawLabel("Add Component:", panelX() + 8, addUIY, {160,160,190,255}); 
             addUIY += 24.0f;
@@ -3862,16 +4064,12 @@ namespace Gui {
             addUIY += 32.0f;
             addComponentBtn.setRect({ panelX() + 8, addUIY, PANEL_W - sbW - 20, 30 });
             addComponentBtn.render(0.0f, 0.0f);
-
+            
             drawLabel("Enter = commit changes", panelX() + 8, y + 4, {80, 80, 100, 255});
+            
+            // --- FIX: DISABLE CLIPPING BEFORE RENDERING DROPDOWNS ---
             SDL_SetRenderClipRect(renderer, nullptr);
-            inspectorScrollbar.render(renderer, 0.0f, 0.0f);
-
-            // Re-draw any currently-open dropdowns last so they render on top of
-            // everything else in the panel (buttons, other fields, the scrollbar, etc.)
-            // instead of being drawn-over by whatever happens to come after them in
-            // the layout (e.g. the Add Component button sitting right below the
-            // component-type dropdown).
+            
             for (auto& f : fields) {
                 for (auto& wgt : f.widgets) {
                     if (wgt->getType() == "OptionBox") {
@@ -3881,6 +4079,8 @@ namespace Gui {
                 }
             }
             if (componentSelector.isOpen()) componentSelector.render(0.0f, 0.0f);
+            
+            inspectorScrollbar.render(renderer, 0.0f, 0.0f);
         }
 
         void commitAllFields() {
@@ -3897,7 +4097,18 @@ namespace Gui {
                             else if (f.key == "rect_w") world->rectangle_shape_pool[e].w = val;
                             else if (f.key == "rect_h") world->rectangle_shape_pool[e].h = val;
                             else if (f.key == "z_index") world->z_index_pool[e].z = (int)val;
-                            else if (f.key == "phys_shape") world->physics_body_pool[e].shapeType = (Physics::ShapeType)(int)val;
+                            else if (f.key == "phys_shape") {
+                                auto newShape = SpinboxIndexToShapeType((int)val);
+                                // Default to a basic triangle when switching to Polygon with no
+                                // points yet defined. Points are TOP-LEFT relative, matching the
+                                // convention used by the mouse polygon editor and the overlay
+                                // renderer (both subtract width*0.5/height*0.5 from stored points).
+                                if (newShape == Physics::ShapeType::Polygon && world->physics_body_pool[e].polygonPoints.empty()) {
+                                    world->physics_body_pool[e].polygonPoints = MakeDefaultTrianglePoints(
+                                        world->physics_body_pool[e].width, world->physics_body_pool[e].height);
+                                }
+                                world->physics_body_pool[e].shapeType = newShape;
+                            }
                             else if (f.key == "phys_w") world->physics_body_pool[e].width = val;
                             else if (f.key == "phys_h") world->physics_body_pool[e].height = val;
                             else if (f.key == "phys_r") world->physics_body_pool[e].radius = val;
@@ -3917,13 +4128,8 @@ namespace Gui {
                             if (f.key == "metadata_name") {
                                 world->metadata_pool[e].name = text;
                             } else if (f.key == "tex_res") {
-                                // --- NEW: Load the texture when the path changes ---
                                 if (!text.empty()) {
-                                    // The file picker provides a full absolute path.
-                                    // Use the same string as both the resource name and file path.
                                     g_resources.TextureManager.Load(text, text);
-                                } else {
-                                    // Optional: handle clearing the texture? You can leave as is.
                                 }
                                 world->texture_ref_pool[e].resourceName = text;
                             } else if (f.key == "sfx_name") {
@@ -3958,7 +4164,7 @@ namespace Gui {
                             else if (f.key == "rect_w") worldVal = world->rectangle_shape_pool[e].w;
                             else if (f.key == "rect_h") worldVal = world->rectangle_shape_pool[e].h;
                             else if (f.key == "z_index") worldVal = (float)world->z_index_pool[e].z;
-                            else if (f.key == "phys_shape") worldVal = (float)world->physics_body_pool[e].shapeType;
+                            else if (f.key == "phys_shape") worldVal = (float)ShapeTypeToSpinboxIndex(world->physics_body_pool[e].shapeType);
                             else if (f.key == "phys_w") worldVal = world->physics_body_pool[e].width;
                             else if (f.key == "phys_h") worldVal = world->physics_body_pool[e].height;
                             else if (f.key == "phys_r") worldVal = world->physics_body_pool[e].radius;
@@ -3984,7 +4190,6 @@ namespace Gui {
                         }
                     } else if (wgt->getType() == "CheckBox") {
                         auto* cb = static_cast<Gui::CheckBox*>(wgt.get());
-                        // no active state for CheckBox, so we always sync
                         bool worldVal = false;
                         if (f.key == "tex_isAnim") worldVal = world->texture_ref_pool[e].isAnimation;
                         else if (f.key == "sfx_col") worldVal = world->sfx_emitter_pool[e].playOnCollision;
@@ -4015,16 +4220,30 @@ namespace Gui {
         std::vector<Field> fields;
         Gui::Scrollbar inspectorScrollbar;
         float inspectorScrollOffset = 0.0f;
+        
         std::vector<std::string> componentOptions = {"PhysicsBody", "TextureRef", "AnimationState", "SfxEmitter", "Rotation", "Scale"};
         Gui::OptionBox componentSelector;
         Gui::Button addComponentBtn;
-        public:
-            std::unique_ptr<Gui::AnimationFrameEditor> animFrameEditor;
 
+    public:
+        std::unique_ptr<Gui::AnimationFrameEditor> animFrameEditor;
+
+    private:
         void rebuildFields() {
             fields.clear();
             if (!world || targetEntity == (Entity)-1) return;
             Entity e = targetEntity;
+
+            // --- FIX: FILTER COMPONENT OPTIONS ---
+            std::vector<std::string> availableComponents;
+            if (!world->has_physics_body[e]) availableComponents.push_back("PhysicsBody");
+            if (!world->has_texture_ref[e]) availableComponents.push_back("TextureRef");
+            if (!world->has_animation_state[e]) availableComponents.push_back("AnimationState");
+            if (!world->has_sfx_emitter[e]) availableComponents.push_back("SfxEmitter");
+            if (!world->has_rotation[e]) availableComponents.push_back("Rotation");
+            if (!world->has_scale[e]) availableComponents.push_back("Scale");
+            
+            componentSelector.setOptions(availableComponents);
 
             auto addSpinBox = [&](const std::string& label, const std::string& key, float val, float min=0.0f, float max=9999.0f, float step=0.5f) {
                 Field f; f.label = label; f.key = key; f.lastSyncedValue = val;
@@ -4050,17 +4269,15 @@ namespace Gui {
 
             auto addTexturePath = [&](const std::string& label, const std::string& key, const std::string& val) {
                 Field f; f.label = label; f.key = key; f.lastSyncedText = val;
-                // LineEdit for path
                 auto le = std::make_unique<Gui::LineEdit>(renderer, textEngine, font, SDL_FRect{0,0,1,1}, "texture path...");
                 for (char c : val) le->appendText(std::string(1, c));
-                // Button to browse
                 auto btn = std::make_unique<Gui::Button>(renderer, font, "...", SDL_FPoint{0,0}, 30, 26);
                 btn->onClicked = [this, lePtr = le.get()]() {
                     fileExplorer.setFilter("*.svg;");
                     fileExplorer.setCallback([lePtr](const std::string& path) {
                         lePtr->clear();
                         for (char c : path) lePtr->appendText(std::string(1, c));
-                        lePtr->deactivate(nullptr); // not needed but safe
+                        lePtr->deactivate(nullptr);
                     });
                     fileExplorer.open();
                 };
@@ -4071,37 +4288,31 @@ namespace Gui {
 
             auto addAnimationState = [&]() {
                 auto& anim = world->animation_state_pool[e];
-                
-                // Ensure at least one frame exists
-                if (anim.imageFrameResources.empty() && anim.spriteFrames.empty()) {
+                if (anim.imageFrameResources.empty()) {
                     anim.imageFrameResources.push_back("");
                 }
-
-                // Speed spinbox
                 addSpinBox("Anim Speed", "anim_speed", anim.speed, 0.1f, 60.0f, 0.5f);
 
-                // Mode option box
-                Field f; f.label = "Anim Mode"; f.key = "anim_mode"; f.lastSyncedText = "";
-                auto opt = std::make_unique<Gui::OptionBox>(renderer, textEngine, font,
-                                                            SDL_FRect{0,0,1,1},
-                                                            std::vector<std::string>{"ImageFrames", "SpritesheetFrames"});
-                opt->setCurrentIndex((int)anim.mode);
-                f.widgets.push_back(std::move(opt));
-
-                // Edit Frames button
-                auto btn = std::make_unique<Gui::Button>(renderer, font, "Edit Frames",
-                                                        SDL_FPoint{0,0}, 100, 26);
+                // Button to open the frame editor (no mode selector)
+                auto btn = std::make_unique<Gui::Button>(renderer, font, "Edit Frames", SDL_FPoint{0,0}, 100, 26);
                 btn->onClicked = [this, &anim]() {
                     animFrameEditor->setTarget(&anim);
+                    animFrameEditor->onResourceLoaded = [this]() {
+                        this->commitAllFields();
+                        this->syncFromWorld();
+                    };
                     modeBeforeDialog = currentEditMode;
                     currentEditMode = EditMode::Dialog;
                     animFrameEditor->open();
                 };
+                // Create a Field and add the button (no OptionBox)
+                Field f;
+                f.label = "Animation";
+                f.key = "anim_edit";
                 f.widgets.push_back(std::move(btn));
                 fields.push_back(std::move(f));
             };
 
-            // --- Existing components ---
             if (world->has_metadata[e]) addLineEdit("Name", "metadata_name", world->metadata_pool[e].name);
             if (world->has_position[e]) {
                 addSpinBox("X", "pos_x", world->position_pool[e].x, -9999.0f, 9999.0f);
@@ -4117,25 +4328,21 @@ namespace Gui {
                 addSpinBox("Scale X", "scale_x", world->scale_pool[e].x, 0.01f, 10.0f, 0.1f);
                 addSpinBox("Scale Y", "scale_y", world->scale_pool[e].y, 0.01f, 10.0f, 0.1f);
             }
-
             if (world->has_physics_body[e]) {
                 auto& p = world->physics_body_pool[e];
-                addSpinBox("Shape Type", "phys_shape", (float)p.shapeType, 0, 4, 1);
+                addSpinBox("Shape (0=Rct,1=Crc,2=Poly)", "phys_shape", (float)ShapeTypeToSpinboxIndex(p.shapeType), 0, 2, 1);
                 addSpinBox("Width", "phys_w", p.width, 1, 9999, 1);
                 addSpinBox("Height", "phys_h", p.height, 1, 9999, 1);
                 addSpinBox("Radius", "phys_r", p.radius, 1, 9999, 1);
             }
-
             if (world->has_texture_ref[e]) {
                 auto& t = world->texture_ref_pool[e];
                 addTexturePath("Tex Resource", "tex_res", t.resourceName);
                 addCheckBox("Is Anim", "tex_isAnim", t.isAnimation);
             }
-
             if (world->has_animation_state[e]) {
                 addAnimationState();
             }
-
             if (world->has_sfx_emitter[e]) {
                 auto& s = world->sfx_emitter_pool[e];
                 addLineEdit("SFX Name", "sfx_name", s.sfxName);
@@ -4155,7 +4362,8 @@ namespace Gui {
                 else if (comp == "SfxEmitter") world->add_sfx_emitter(e);
                 else if (comp == "Rotation") world->add_rotation(e);
                 else if (comp == "Scale") world->add_scale(e);
-                rebuildFields();
+                
+                rebuildFields(); // Automatically updates the dropdown to remove the added component
             };
         }
 
@@ -4917,82 +5125,130 @@ inline void render_physics_shape_overlay(SDL_Renderer* renderer, const Component
                                          float centerX, float centerY,
                                          float rotDeg = 0.0f, float scaleX = 1.0f, float scaleY = 1.0f)
 {
-    SDL_SetRenderDrawColor(renderer, 0, 255, 0, 150); // Semi-transparent green
+    // Save caller's draw color / blend mode so this overlay never leaks state
+    // into whatever gets rendered after it (grid, GUI panels, gizmos, etc.)
+    SDL_BlendMode prevBlend = SDL_BLENDMODE_NONE;
+    SDL_GetRenderDrawBlendMode(renderer, &prevBlend);
+    Uint8 prevR, prevG, prevB, prevA;
+    SDL_GetRenderDrawColor(renderer, &prevR, &prevG, &prevB, &prevA);
 
-    switch (phys.shapeType)
-    {
-        case Physics::ShapeType::Rectangle: {
-            float hw = phys.width * scaleX * 0.5f;
-            float hh = phys.height * scaleY * 0.5f;
-            SDL_FPoint corners[4] = {
-                {-hw, -hh},
-                { hw, -hh},
-                { hw,  hh},
-                {-hw,  hh}
-            };
-            float rot = rotDeg * (M_PI / 180.0f);
-            float cosA = cosf(rot), sinA = sinf(rot);
-            for (int i = 0; i < 4; ++i) {
-                float x = corners[i].x;
-                float y = corners[i].y;
-                corners[i].x = centerX + x * cosA - y * sinA;
-                corners[i].y = centerX + x * sinA + y * cosA; // fixed: should use centerY for y
-            }
-            // Actually fix the y translation:
-            for (int i = 0; i < 4; ++i) {
-                // Re‑apply translation correctly
-                float x = corners[i].x;
-                float y = corners[i].y;
-                corners[i].x = centerX + x * cosA - y * sinA;
-                corners[i].y = centerY + x * sinA + y * cosA;
-            }
-            for (int i = 0; i < 4; ++i) {
-                int j = (i + 1) % 4;
-                SDL_RenderLine(renderer, corners[i].x, corners[i].y,
-                                      corners[j].x, corners[j].y);
-            }
-            break;
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    // Bright, fully-opaque magenta outline + translucent fill. Using a color
+    // nothing else in the editor draws with, plus a filled body (not just
+    // 1px outline lines), means this overlay can never be silently painted
+    // over by another opaque draw call later in the frame. Previously the
+    // default 50x50 physics box exactly matched the default 50x50 selection
+    // bounding box drawn right after it, so the overlay's semi-transparent
+    // lines were fully overwritten pixel-for-pixel and effectively invisible.
+    const Uint8 fillR = 255, fillG = 0, fillB = 255, fillA = 90;
+    const Uint8 lineR = 255, lineG = 0, lineB = 255, lineA = 255;
+
+    float rotRad = rotDeg * 3.14159265f / 180.0f;
+    float cosR = cos(rotRad);
+    float sinR = sin(rotRad);
+
+    // Helper to transform local points (relative to center) to world space.
+    // Scale is applied FIRST, in unrotated local space, then the result is
+    // rotated. Doing it the other way around (rotate, then scale each axis
+    // independently) introduces shear whenever scaleX != scaleY and the
+    // shape is rotated off-axis - that's what made rectangles look "skewed"
+    // when rotated.
+    auto transformPoint = [&](float lx, float ly, float& outX, float& outY) {
+        float sx = lx * scaleX;
+        float sy = ly * scaleY;
+        float rx = sx * cosR - sy * sinR;
+        float ry = sx * sinR + sy * cosR;
+        outX = centerX + rx;
+        outY = centerY + ry;
+    };
+
+    // Fills a convex polygon (fan triangulation) with the translucent fill color.
+    auto fillConvex = [&](const std::vector<SDL_FPoint>& pts) {
+        if (pts.size() < 3) return;
+        SDL_FColor col = { fillR / 255.0f, fillG / 255.0f, fillB / 255.0f, fillA / 255.0f };
+        std::vector<SDL_Vertex> verts;
+        verts.reserve(pts.size());
+        for (const auto& p : pts) verts.push_back(SDL_Vertex{ { p.x, p.y }, col, { 0.0f, 0.0f } });
+        std::vector<int> idx;
+        idx.reserve((pts.size() - 2) * 3);
+        for (size_t i = 1; i + 1 < pts.size(); ++i) {
+            idx.push_back(0);
+            idx.push_back((int)i);
+            idx.push_back((int)i + 1);
         }
-        case Physics::ShapeType::Circle: {
-            // Circle radius scaled uniformly (use average scale or both? we use scaleX for radius)
-            float radius = phys.radius * scaleX; // simplest
-            const int segs = 32;
-            float rot = rotDeg * (M_PI / 180.0f);
-            for (int i = 0; i < segs; ++i) {
-                float a1 = (float)i / segs * 2.0f * M_PI + rot;
-                float a2 = (float)(i + 1) / segs * 2.0f * M_PI + rot;
-                float x1 = centerX + cosf(a1) * radius;
-                float y1 = centerY + sinf(a1) * radius;
-                float x2 = centerX + cosf(a2) * radius;
-                float y2 = centerY + sinf(a2) * radius;
-                SDL_RenderLine(renderer, x1, y1, x2, y2);
-            }
-            break;
-        }
-        case Physics::ShapeType::Polygon: {
-            if (phys.polygonPoints.empty()) break;
-            float rot = rotDeg * (M_PI / 180.0f);
-            float cosA = cosf(rot), sinA = sinf(rot);
-            std::vector<SDL_FPoint> transformed;
-            transformed.reserve(phys.polygonPoints.size());
-            for (const auto& pt : phys.polygonPoints) {
-                float x = pt.x * scaleX;
-                float y = pt.y * scaleY;
-                transformed.push_back({
-                    centerX + x * cosA - y * sinA,
-                    centerY + x * sinA + y * cosA
-                });
-            }
-            for (size_t i = 0; i < transformed.size(); ++i) {
-                size_t j = (i + 1) % transformed.size();
-                SDL_RenderLine(renderer,
-                               transformed[i].x, transformed[i].y,
-                               transformed[j].x, transformed[j].y);
-            }
-            break;
-        }
-        default: break;
+        SDL_RenderGeometry(renderer, nullptr, verts.data(), (int)verts.size(), idx.data(), (int)idx.size());
+    };
+
+    if (phys.shapeType == Physics::ShapeType::Rectangle) {
+        float hw = phys.width * 0.5f;
+        float hh = phys.height * 0.5f;
+        SDL_FPoint p[4];
+        transformPoint(-hw, -hh, p[0].x, p[0].y);
+        transformPoint( hw, -hh, p[1].x, p[1].y);
+        transformPoint( hw,  hh, p[2].x, p[2].y);
+        transformPoint(-hw,  hh, p[3].x, p[3].y);
+
+        fillConvex({ p[0], p[1], p[2], p[3] });
+
+        SDL_SetRenderDrawColor(renderer, lineR, lineG, lineB, lineA);
+        SDL_RenderLine(renderer, p[0].x, p[0].y, p[1].x, p[1].y);
+        SDL_RenderLine(renderer, p[1].x, p[1].y, p[2].x, p[2].y);
+        SDL_RenderLine(renderer, p[2].x, p[2].y, p[3].x, p[3].y);
+        SDL_RenderLine(renderer, p[3].x, p[3].y, p[0].x, p[0].y);
     }
+    else if (phys.shapeType == Physics::ShapeType::Circle) {
+        float r = phys.radius * scaleX;
+        const int segments = 32;
+        std::vector<SDL_FPoint> circlePts;
+        circlePts.reserve(segments);
+        for (int i = 0; i < segments; ++i) {
+            float angle = 2 * 3.14159f * i / segments;
+            circlePts.push_back({ centerX + cosf(angle) * r, centerY + sinf(angle) * r });
+        }
+
+        fillConvex(circlePts);
+
+        SDL_SetRenderDrawColor(renderer, lineR, lineG, lineB, lineA);
+        for (int i = 0; i < segments; ++i) {
+            const SDL_FPoint& a = circlePts[i];
+            const SDL_FPoint& b = circlePts[(i + 1) % segments];
+            SDL_RenderLine(renderer, a.x, a.y, b.x, b.y);
+        }
+    }
+    else if (phys.shapeType == Physics::ShapeType::Polygon) {
+        if (!phys.polygonPoints.empty()) {
+            // polygonPoints are stored relative to the TOP-LEFT in
+            // edit_object_with_editor_mouse. transformPoint expects
+            // coordinates relative to the CENTER, so subtract half-width /
+            // half-height before transforming.
+            float hw = phys.width * 0.5f;
+            float hh = phys.height * 0.5f;
+
+            std::vector<SDL_FPoint> pts;
+            pts.reserve(phys.polygonPoints.size());
+            for (const auto& pt : phys.polygonPoints) {
+                float lx = pt.x - hw;
+                float ly = pt.y - hh;
+                float px, py;
+                transformPoint(lx, ly, px, py);
+                pts.push_back({ px, py });
+            }
+
+            fillConvex(pts);
+
+            SDL_SetRenderDrawColor(renderer, lineR, lineG, lineB, lineA);
+            for (size_t i = 0; i < pts.size(); ++i) {
+                const SDL_FPoint& a = pts[i];
+                const SDL_FPoint& b = pts[(i + 1) % pts.size()];
+                SDL_RenderLine(renderer, a.x, a.y, b.x, b.y);
+            }
+        }
+    }
+
+    // Restore whatever the caller had set so nothing downstream is affected.
+    SDL_SetRenderDrawColor(renderer, prevR, prevG, prevB, prevA);
+    SDL_SetRenderDrawBlendMode(renderer, prevBlend);
 }
 
 struct GizmoHandles {
@@ -5120,14 +5376,6 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
             render_entity_texture(renderer, world, i, screenX, screenY);
         }
 
-        // Render physics overlay
-        if (world.has_physics_body[i]) {
-            float rot = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
-            float sx = world.has_scale[i] ? world.scale_pool[i].x : 1.0f;
-            float sy = world.has_scale[i] ? world.scale_pool[i].y : 1.0f;
-            render_physics_shape_overlay(renderer, world.physics_body_pool[i], centerX, centerY, rot, sx, sy);
-        }
-
         // Draw transformed outline (if no texture or selected)
         bool hasTexture = world.has_texture_ref[i];
         bool isSelected = world.has_selection[i] && world.selection_pool[i].isSelected;
@@ -5170,6 +5418,40 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
         // Gizmo
         if (isSelected) {
             render_transform_gizmo(renderer, centerX, centerY, true);
+        }
+
+        // Render physics overlay LAST (aside from metadata label and vertex handles)
+        if (world.has_physics_body[i]) {
+            float rot = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
+            float sx = world.has_scale[i] ? world.scale_pool[i].x : 1.0f;
+            float sy = world.has_scale[i] ? world.scale_pool[i].y : 1.0f;
+            render_physics_shape_overlay(renderer, world.physics_body_pool[i], centerX, centerY, rot, sx, sy);
+        }
+
+        // --- Vertex handles (only for selected polygon entities) ---
+        if (isSelected && world.has_physics_body[i] &&
+            world.physics_body_pool[i].shapeType == Physics::ShapeType::Polygon) {
+            auto& phys = world.physics_body_pool[i];
+            if (!phys.polygonPoints.empty()) {
+                float entityX = world.position_pool[i].x;
+                float entityY = world.position_pool[i].y;
+                float screenX_ent = viewX + entityX - scrollX;
+                float screenY_ent = viewY + entityY - scrollY;
+
+                // Draw a small square (or circle) at each vertex
+                for (const auto& pt : phys.polygonPoints) {
+                    float vx = screenX_ent + pt.x;
+                    float vy = screenY_ent + pt.y;
+                    SDL_FRect handleRect = { vx - 4.0f, vy - 4.0f, 8.0f, 8.0f };
+
+                    // Fill with cyan
+                    SDL_SetRenderDrawColor(renderer, 0, 255, 255, 255);
+                    SDL_RenderFillRect(renderer, &handleRect);
+                    // White border for contrast
+                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+                    SDL_RenderRect(renderer, &handleRect);
+                }
+            }
         }
 
         // Metadata label
@@ -5243,31 +5525,137 @@ const SDL_Event& e)
 {
     if (currentEditMode == EditMode::Dialog) return;
 
-    // --- Handle Canvas UI Buttons & Polygon Drawing (unchanged) ---
-    if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
+    const float kPolyPointPickRadius = 10.0f;
+
+    // --- Polygon point editing (left/right click) ---
+    if (editor_isDrawingPolygon &&
+        e.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+        (e.button.button == SDL_BUTTON_LEFT || e.button.button == SDL_BUTTON_RIGHT)) {
         float mx = e.button.x, my = e.button.y;
-        float logicalX = mx - canvasViewX + editorScrollX;
-        float logicalY = my - canvasViewY + editorScrollY;
-        
-        if (editor_isDrawingPolygon && isInsideCanvas(mx, my)) {
+
+        if (isInsideCanvas(mx, my)) {
+            float logicalX = mx - canvasViewX + editorScrollX;
+            float logicalY = my - canvasViewY + editorScrollY;
+
             Entity ent = lastSelectedEntity;
             if (ent != (Entity)-1 && world.has_physics_body[ent]) {
                 auto& phys = world.physics_body_pool[ent];
                 if (phys.shapeType == Physics::ShapeType::Polygon) {
-                    b2Vec2 localPt = { logicalX - world.position_pool[ent].x, logicalY - world.position_pool[ent].y };
-                    phys.polygonPoints.push_back(localPt);
-                    return; 
+                    b2Vec2 clickPt = { logicalX - world.position_pool[ent].x, logicalY - world.position_pool[ent].y };
+
+                    if (e.button.button == SDL_BUTTON_LEFT) {
+                        if (phys.polygonPoints.size() >= 3) {
+                            float dx = clickPt.x - phys.polygonPoints.front().x;
+                            float dy = clickPt.y - phys.polygonPoints.front().y;
+                            if (dx * dx + dy * dy <= kPolyPointPickRadius * kPolyPointPickRadius) {
+                                editor_isDrawingPolygon = false;
+                                return;
+                            }
+                        }
+                        phys.polygonPoints.push_back(clickPt);
+                        return;
+                    } else { // SDL_BUTTON_RIGHT: delete nearest point
+                        int nearestIdx = -1;
+                        float nearestDistSq = kPolyPointPickRadius * kPolyPointPickRadius;
+                        for (size_t i = 0; i < phys.polygonPoints.size(); ++i) {
+                            float dx = clickPt.x - phys.polygonPoints[i].x;
+                            float dy = clickPt.y - phys.polygonPoints[i].y;
+                            float distSq = dx * dx + dy * dy;
+                            if (distSq <= nearestDistSq) {
+                                nearestDistSq = distSq;
+                                nearestIdx = (int)i;
+                            }
+                        }
+                        if (nearestIdx != -1) {
+                            phys.polygonPoints.erase(phys.polygonPoints.begin() + nearestIdx);
+                        }
+                        return;
+                    }
                 }
             }
         }
     }
 
+    // --- Middle‑mouse vertex dragging (disabled while drawing polygon) ---
+    if (!editor_isDrawingPolygon) {
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_MIDDLE) {
+            float mx = e.button.x, my = e.button.y;
+            if (!isInsideCanvas(mx, my)) return;
+
+            Entity ent = lastSelectedEntity;
+            if (ent != (Entity)-1 && world.has_physics_body[ent] &&
+                world.physics_body_pool[ent].shapeType == Physics::ShapeType::Polygon) {
+
+                auto& phys = world.physics_body_pool[ent];
+                float entityX = world.position_pool[ent].x;
+                float entityY = world.position_pool[ent].y;
+
+                float logicalX = mx - canvasViewX + editorScrollX;
+                float logicalY = my - canvasViewY + editorScrollY;
+                float localX = logicalX - entityX;
+                float localY = logicalY - entityY;
+
+                int nearestIdx = -1;
+                float nearestDistSq = kPolyPointPickRadius * kPolyPointPickRadius;
+                for (size_t i = 0; i < phys.polygonPoints.size(); ++i) {
+                    float dx = localX - phys.polygonPoints[i].x;
+                    float dy = localY - phys.polygonPoints[i].y;
+                    float d2 = dx*dx + dy*dy;
+                    if (d2 < nearestDistSq) {
+                        nearestDistSq = d2;
+                        nearestIdx = (int)i;
+                    }
+                }
+
+                if (nearestIdx != -1) {
+                    vertexDrag.target = ent;
+                    vertexDrag.vertexIndex = nearestIdx;
+                    vertexDrag.startMouseX = mx;
+                    vertexDrag.startMouseY = my;
+                    vertexDrag.startVertexX = phys.polygonPoints[nearestIdx].x;
+                    vertexDrag.startVertexY = phys.polygonPoints[nearestIdx].y;
+                    isDraggingVertex = true;
+                    return;
+                }
+            }
+        }
+
+        if (e.type == SDL_EVENT_MOUSE_MOTION && isDraggingVertex) {
+            Entity ent = vertexDrag.target;
+            if (ent != (Entity)-1 && world.has_physics_body[ent]) {
+                auto& phys = world.physics_body_pool[ent];
+                if (phys.shapeType == Physics::ShapeType::Polygon &&
+                    vertexDrag.vertexIndex >= 0 &&
+                    vertexDrag.vertexIndex < (int)phys.polygonPoints.size()) {
+
+                    float logicalX = e.motion.x - canvasViewX + editorScrollX;
+                    float logicalY = e.motion.y - canvasViewY + editorScrollY;
+                    float entityX = world.position_pool[ent].x;
+                    float entityY = world.position_pool[ent].y;
+
+                    phys.polygonPoints[vertexDrag.vertexIndex].x = logicalX - entityX;
+                    phys.polygonPoints[vertexDrag.vertexIndex].y = logicalY - entityY;
+
+                    vertexDrag.startMouseX = e.motion.x;
+                    vertexDrag.startMouseY = e.motion.y;
+                }
+            }
+        }
+
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_MIDDLE) {
+            isDraggingVertex = false;
+            vertexDrag.target = (Entity)-1;
+            vertexDrag.vertexIndex = -1;
+        }
+    }
+
+    // --- Left‑button up (stop dragging) ---
     if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) {
         isDraggingLeftMouse = false;
         currentGizmoOp = GizmoNone;
     }
 
-    // --- Select mode (with gizmo interaction) ---
+    // --- Select mode (with gizmo) ---
     if (currentEditMode == EditMode::Select) {
         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
             float logicalX = e.button.x - canvasViewX + editorScrollX;
@@ -5282,7 +5670,6 @@ const SDL_Event& e)
                 GizmoHandles handles = render_transform_gizmo(renderer, screenCX, screenCY, true);
                 float mx = e.button.x, my = e.button.y;
 
-                // Red handle (Scale X)
                 if (mx >= handles.redHandle.x && mx <= handles.redHandle.x + handles.redHandle.w &&
                     my >= handles.redHandle.y && my <= handles.redHandle.y + handles.redHandle.h) {
                     currentGizmoOp = GizmoScaleX;
@@ -5292,10 +5679,9 @@ const SDL_Event& e)
                     gizmoDrag.startValue = world.has_scale[selectedEnt] ? world.scale_pool[selectedEnt].x : 1.0f;
                     gizmoDrag.startCenterX = screenCX;
                     gizmoDrag.startCenterY = screenCY;
-                    isDraggingLeftMouse = true;   // <--- FIX
+                    isDraggingLeftMouse = true;
                     return;
                 }
-                // Green handle (Scale Y)
                 else if (mx >= handles.greenHandle.x && mx <= handles.greenHandle.x + handles.greenHandle.w &&
                          my >= handles.greenHandle.y && my <= handles.greenHandle.y + handles.greenHandle.h) {
                     currentGizmoOp = GizmoScaleY;
@@ -5305,10 +5691,9 @@ const SDL_Event& e)
                     gizmoDrag.startValue = world.has_scale[selectedEnt] ? world.scale_pool[selectedEnt].y : 1.0f;
                     gizmoDrag.startCenterX = screenCX;
                     gizmoDrag.startCenterY = screenCY;
-                    isDraggingLeftMouse = true;   // <--- FIX
+                    isDraggingLeftMouse = true;
                     return;
                 }
-                // Blue handle (Rotation)
                 else if (mx >= handles.blueHandle.x && mx <= handles.blueHandle.x + handles.blueHandle.w &&
                          my >= handles.blueHandle.y && my <= handles.blueHandle.y + handles.blueHandle.h) {
                     currentGizmoOp = GizmoRotate;
@@ -5318,12 +5703,12 @@ const SDL_Event& e)
                     gizmoDrag.startValue = world.has_rotation[selectedEnt] ? world.rotation_pool[selectedEnt].degrees : 0.0f;
                     gizmoDrag.startCenterX = screenCX;
                     gizmoDrag.startCenterY = screenCY;
-                    isDraggingLeftMouse = true;   // <--- FIX
+                    isDraggingLeftMouse = true;
                     return;
                 }
             }
 
-            // 2. Otherwise, check GUI and entity picking (existing logic)
+            // Entity / GUI picking
             Gui::IGuiElement* topmostGui = nullptr;
             for (auto& elem : guiElements) {
                 float ex = elem->getX(); float ey = elem->getY();
@@ -5352,7 +5737,7 @@ const SDL_Event& e)
                 if (currentSelectionmode == SelectionMode::SingleSelect) {
                     bool wasSelected = world.selection_pool[topmostEntity].isSelected;
                     for (Entity i = 0; i < world.entity_count; i++) if (world.has_selection[i]) world.selection_pool[i].isSelected = false;
-                    if (!wasSelected) { world.selection_pool[topmostEntity].isSelected = true; lastSelectedEntity = topmostEntity; } 
+                    if (!wasSelected) { world.selection_pool[topmostEntity].isSelected = true; lastSelectedEntity = topmostEntity; }
                     else lastSelectedEntity = (Entity)-1;
                 } else if (currentSelectionmode == SelectionMode::MultiSelect) {
                     world.selection_pool[topmostEntity].isSelected = !world.selection_pool[topmostEntity].isSelected;
@@ -5367,14 +5752,14 @@ const SDL_Event& e)
             }
         }
 
-        // 3. Handle gizmo drag (mouse motion)
+        // Gizmo drag (motion)
         if (e.type == SDL_EVENT_MOUSE_MOTION && isDraggingLeftMouse && currentGizmoOp != GizmoNone) {
             Entity ent = gizmoDrag.target;
             if (ent != (Entity)-1 && world.has_position[ent]) {
                 float dx = e.motion.x - gizmoDrag.startMouseX;
                 float dy = e.motion.y - gizmoDrag.startMouseY;
                 if (currentGizmoOp == GizmoScaleX) {
-                    float newScale = gizmoDrag.startValue + dx * 0.02f; // sensitivity
+                    float newScale = gizmoDrag.startValue + dx * 0.02f;
                     if (newScale < 0.01f) newScale = 0.01f;
                     if (world.has_scale[ent]) world.scale_pool[ent].x = newScale;
                     gizmoDrag.startValue = newScale;
@@ -5395,7 +5780,6 @@ const SDL_Event& e)
                     float deltaDeg = (currentAngle - startAngle) * 180.0f / (float)M_PI;
                     float newDeg = gizmoDrag.startValue + deltaDeg;
                     if (world.has_rotation[ent]) world.rotation_pool[ent].degrees = newDeg;
-                    // Update start values to avoid jumps on next motion
                     gizmoDrag.startValue = newDeg;
                     gizmoDrag.startMouseX = e.motion.x;
                     gizmoDrag.startMouseY = e.motion.y;
@@ -5404,7 +5788,7 @@ const SDL_Event& e)
         }
     }
 
-    // --- MoveWithMouse mode (unchanged) ---
+    // --- MoveWithMouse mode ---
     else if (currentEditMode == EditMode::MoveWithMouse) {
         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
             if (isInsideCanvas(e.button.x, e.button.y)) { isDraggingLeftMouse = true; lastDragX = e.button.x; lastDragY = e.button.y; }
@@ -5430,7 +5814,7 @@ const SDL_Event& e)
         }
     }
 
-    // --- Delete mode (unchanged) ---
+    // --- Delete mode ---
     else if (currentEditMode == EditMode::Delete) {
         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
             float logicalX = e.button.x - canvasViewX + editorScrollX; float logicalY = e.button.y - canvasViewY + editorScrollY;
@@ -5654,7 +6038,6 @@ public:
     // LOAD SCENE
     // ==========================================
     Scene loadFromFile(const std::string& filepath) {
-        
         Scene scene;
         
         std::string fullPath = filepath;
@@ -5682,118 +6065,143 @@ public:
             }
         #endif
                     
-            std::ifstream file(fullPath);
-            if (!file.is_open()) {
-                SDL_Log("Current Working Directory: %s\n", std::filesystem::current_path().string().c_str());
-                SDL_Log("Failed to open scene file: %s (tried: %s)\n", filepath.c_str(), fullPath.c_str());
-                scene.scriptValid = false;
-                return scene;
-            }
+        std::ifstream file(fullPath);
+        if (!file.is_open()) {
+            SDL_Log("Current Working Directory: %s\n", std::filesystem::current_path().string().c_str());
+            SDL_Log("Failed to open scene file: %s (tried: %s)\n", filepath.c_str(), fullPath.c_str());
+            scene.scriptValid = false;
+            return scene;
+        }
 
-            nlohmann::json j;
-            file >> j;
+        nlohmann::json j;
+        file >> j;
 
-            scene.name = j.value("scene_name", "Untitled");
+        scene.name = j.value("scene_name", "Untitled");
 
-            // --- 0. Script attachment (required) ---
-            scene.scriptAttached = j.value("script_attached", "");
-            if (scene.scriptAttached.empty()) {
-                std::cerr << "[Editor] WARNING: Scene '" << scene.name
-                        << "' has no script_attached — scene marked INVALID.\n";
-                scene.scriptValid = false;
-            } else {
+        // --- 0. Script attachment (required) ---
+        scene.scriptAttached = j.value("script_attached", "");
+        if (scene.scriptAttached.empty()) {
+            std::cerr << "[Editor] WARNING: Scene '" << scene.name
+                    << "' has no script_attached — scene marked INVALID.\n";
+            scene.scriptValid = false;
+        } else {
         #ifdef EMSCRIPTEN
-                // On Emscripten, check in virtual FS
-                std::string trueScriptAttached = scene.scriptAttached;
-                if (!trueScriptAttached.empty() && trueScriptAttached[0] != '/') {
-                    trueScriptAttached = "/projects/" + trueScriptAttached;
-                }
-        #else
-                // On native, use projects_root
-                std::string trueScriptAttached = projects_root + scene.scriptAttached;
-        #endif
-                scene.scriptValid = std::filesystem::exists(trueScriptAttached);
-                if (!scene.scriptValid)
-                    std::cerr << "[Editor] WARNING: script_attached '"
-                            << scene.scriptAttached
-                            << "' not found on disk (tried: " << trueScriptAttached << ") — scene marked INVALID.\n";
-                else
-                    std::cout << "[Editor] Scene '" << scene.name
-                            << "' — script '" << scene.scriptAttached << "' OK.\n";
+            // On Emscripten, check in virtual FS
+            std::string trueScriptAttached = scene.scriptAttached;
+            if (!trueScriptAttached.empty() && trueScriptAttached[0] != '/') {
+                trueScriptAttached = "/projects/" + trueScriptAttached;
             }
+        #else
+            // On native, use projects_root
+            std::string trueScriptAttached = projects_root + scene.scriptAttached;
+        #endif
+            scene.scriptValid = std::filesystem::exists(trueScriptAttached);
+            if (!scene.scriptValid)
+                std::cerr << "[Editor] WARNING: script_attached '"
+                        << scene.scriptAttached
+                        << "' not found on disk (tried: " << trueScriptAttached << ") — scene marked INVALID.\n";
+            else
+                std::cout << "[Editor] Scene '" << scene.name
+                        << "' — script '" << scene.scriptAttached << "' OK.\n";
+        }
 
-            // --- 1. Parse ECS Entities ---
-            if (j.contains("entities")) {
-                for (const auto& entityJson : j["entities"]) {
-                    Entity id = scene.world.create_entity();
-                    scene.world.add_selection(id);
-                    scene.world.selection_pool[id].isSelected = false;
-                    scene.world.selection_pool[id].selectionColor = {0, 255, 0, 255};
+        // --- 1. Parse ECS Entities ---
+        if (j.contains("entities")) {
+            for (const auto& entityJson : j["entities"]) {
+                Entity id = scene.world.create_entity();
+                scene.world.add_selection(id);
+                scene.world.selection_pool[id].isSelected = false;
+                scene.world.selection_pool[id].selectionColor = {0, 255, 0, 255};
 
-                    const auto& comps = entityJson["components"];
+                const auto& comps = entityJson["components"];
 
-                    if (comps.contains("Metadata")) {
-                        scene.world.add_metadata(id);
-                        scene.world.metadata_pool[id].name = comps["Metadata"].value("name", "");
-                    }
-                    if (comps.contains("Position")) {
-                        scene.world.add_position(id);
-                        scene.world.position_pool[id].x = comps["Position"].value("x", 0.0f);
-                        scene.world.position_pool[id].y = comps["Position"].value("y", 0.0f);
-                    }
-                    if (comps.contains("RectangleShape")) {
-                        scene.world.add_rectangle_shape(id);
-                        scene.world.rectangle_shape_pool[id].w = comps["RectangleShape"].value("w", 50.0f);
-                        scene.world.rectangle_shape_pool[id].h = comps["RectangleShape"].value("h", 50.0f);
-                    }
-                    if (comps.contains("ZIndex")) {
-                        scene.world.add_z_index(id);
-                        scene.world.z_index_pool[id].z = comps["ZIndex"].value("z", 0);
-                    }
-                    if (comps.contains("Rotation")) {
-                        scene.world.add_rotation(id);
-                        scene.world.rotation_pool[id].degrees = comps["Rotation"].value("degrees", 0.0f);
-                    }
-                    if (comps.contains("Scale")) {
-                        scene.world.add_scale(id);
-                        scene.world.scale_pool[id].x = comps["Scale"].value("x", 1.0f);
-                        scene.world.scale_pool[id].y = comps["Scale"].value("y", 1.0f);
-                    }
-                    if (comps.contains("AnimationState")) {
-                        auto& anim = scene.world.animation_state_pool[id];
-                        if (!scene.world.has_animation_state[id]) scene.world.add_animation_state(id);
-                        anim.speed = comps["AnimationState"].value("speed", 10.0f);
-                        anim.isPlaying = comps["AnimationState"].value("isPlaying", true);
-                        std::string modeStr = comps["AnimationState"].value("mode", "ImageFrames");
-                        anim.mode = (modeStr == "SpritesheetFrames") ? Components::AnimationState::Mode::SpritesheetFrames
-                                                                    : Components::AnimationState::Mode::ImageFrames;
-                        if (anim.mode == Components::AnimationState::Mode::ImageFrames) {
-                            anim.imageFrameResources = comps["AnimationState"]["imageFrames"].get<std::vector<std::string>>();
-                        } else {
-                            for (auto& f : comps["AnimationState"]["spriteFrames"]) {
-                                Components::AnimationState::SpriteFrame sf;
-                                sf.textureName = f.value("texture", "");
-                                sf.rect.x = f.value("x", 0.0f); sf.rect.y = f.value("y", 0.0f);
-                                sf.rect.w = f.value("w", 0.0f); sf.rect.h = f.value("h", 0.0f);
-                                anim.spriteFrames.push_back(sf);
-                            }
+                if (comps.contains("Metadata")) {
+                    scene.world.add_metadata(id);
+                    scene.world.metadata_pool[id].name = comps["Metadata"].value("name", "");
+                }
+                if (comps.contains("Position")) {
+                    scene.world.add_position(id);
+                    scene.world.position_pool[id].x = comps["Position"].value("x", 0.0f);
+                    scene.world.position_pool[id].y = comps["Position"].value("y", 0.0f);
+                }
+                if (comps.contains("RectangleShape")) {
+                    scene.world.add_rectangle_shape(id);
+                    scene.world.rectangle_shape_pool[id].w = comps["RectangleShape"].value("w", 50.0f);
+                    scene.world.rectangle_shape_pool[id].h = comps["RectangleShape"].value("h", 50.0f);
+                }
+                if (comps.contains("ZIndex")) {
+                    scene.world.add_z_index(id);
+                    scene.world.z_index_pool[id].z = comps["ZIndex"].value("z", 0);
+                }
+                if (comps.contains("Rotation")) {
+                    scene.world.add_rotation(id);
+                    scene.world.rotation_pool[id].degrees = comps["Rotation"].value("degrees", 0.0f);
+                }
+                if (comps.contains("Scale")) {
+                    scene.world.add_scale(id);
+                    scene.world.scale_pool[id].x = comps["Scale"].value("x", 1.0f);
+                    scene.world.scale_pool[id].y = comps["Scale"].value("y", 1.0f);
+                }
+                // --- NEW: TextureRef ---
+                if (comps.contains("TextureRef")) {
+                    scene.world.add_texture_ref(id);
+                    auto& tex = scene.world.texture_ref_pool[id];
+                    tex.resourceName = comps["TextureRef"].value("resourceName", "");
+                    tex.isAnimation = comps["TextureRef"].value("isAnimation", false);
+                }
+                // --- NEW: SfxEmitter ---
+                if (comps.contains("SfxEmitter")) {
+                    scene.world.add_sfx_emitter(id);
+                    auto& sfx = scene.world.sfx_emitter_pool[id];
+                    sfx.sfxName = comps["SfxEmitter"].value("sfxName", "");
+                    sfx.volume = comps["SfxEmitter"].value("volume", 1.0f);
+                    sfx.pitch = comps["SfxEmitter"].value("pitch", 1.0f);
+                    sfx.speed = comps["SfxEmitter"].value("speed", 1.0f);
+                    sfx.playOnCollision = comps["SfxEmitter"].value("playOnCollision", false);
+                }
+                // --- NEW: PhysicsBody ---
+                if (comps.contains("PhysicsBody")) {
+                    scene.world.add_physics_body(id);
+                    auto& phys = scene.world.physics_body_pool[id];
+                    phys.shapeType = (Physics::ShapeType)comps["PhysicsBody"].value("shapeType", (int)Physics::ShapeType::Rectangle);
+                    phys.bodyType  = (b2BodyType)comps["PhysicsBody"].value("bodyType", (int)b2_dynamicBody);
+                    phys.width     = comps["PhysicsBody"].value("width", 50.0f);
+                    phys.height    = comps["PhysicsBody"].value("height", 50.0f);
+                    phys.radius    = comps["PhysicsBody"].value("radius", 25.0f);
+                    phys.density   = comps["PhysicsBody"].value("density", 1.0f);
+                    phys.isSensor  = comps["PhysicsBody"].value("isSensor", false);
+                    phys.category  = comps["PhysicsBody"].value("category", (uint16_t)Physics::LAYER_1);
+                    phys.mask      = comps["PhysicsBody"].value("mask", (uint16_t)Physics::LAYER_ALL);
+                    phys.polygonPoints.clear();
+                    if (comps["PhysicsBody"].contains("polygonPoints") && comps["PhysicsBody"]["polygonPoints"].is_array()) {
+                        for (const auto& pt : comps["PhysicsBody"]["polygonPoints"]) {
+                            phys.polygonPoints.push_back({pt.value("x", 0.0f), pt.value("y", 0.0f)});
                         }
                     }
+                    // bodyId remains null – will be re-created by physics_sync_system
+                }
+                // --- AnimationState (simplified, only image frames) ---
+                if (comps.contains("AnimationState")) {
+                    auto& anim = scene.world.animation_state_pool[id];
+                    if (!scene.world.has_animation_state[id]) scene.world.add_animation_state(id);
+                    anim.speed = comps["AnimationState"].value("speed", 10.0f);
+                    anim.isPlaying = comps["AnimationState"].value("isPlaying", true);
+                    anim.imageFrameResources = comps["AnimationState"]["imageFrames"].get<std::vector<std::string>>();
                 }
             }
+        }
 
-            // --- 2. Parse GUI Elements (top-level and Panels) ---
-            if (j.contains("gui_elements")) {
-                for (const auto& elemJson : j["gui_elements"]) {
-                    auto elem = parseGuiElement(elemJson);
-                    if (elem) scene.guiElements.push_back(std::move(elem));
-                }
+        // --- 2. Parse GUI Elements (top-level and Panels) ---
+        if (j.contains("gui_elements")) {
+            for (const auto& elemJson : j["gui_elements"]) {
+                auto elem = parseGuiElement(elemJson);
+                if (elem) scene.guiElements.push_back(std::move(elem));
             }
-            return scene;
+        }
+        return scene;
     }
 
-    Scene ProjectScript_loadFromFile(const std::string& filepath) 
-    {
+    Scene ProjectScript_loadFromFile(const std::string& filepath) {
         Scene scene;
         
     #ifdef __EMSCRIPTEN__
@@ -5850,7 +6258,6 @@ public:
         // --- 1. Parse ECS Entities ---
         if (j.contains("entities")) {
             for (const auto& entityJson : j["entities"]) {
-
                 Entity id = scene.world.create_entity();
                 scene.world.add_selection(id);
                 scene.world.selection_pool[id].isSelected = false;
@@ -5885,25 +6292,51 @@ public:
                     scene.world.scale_pool[id].x = comps["Scale"].value("x", 1.0f);
                     scene.world.scale_pool[id].y = comps["Scale"].value("y", 1.0f);
                 }
+                // --- NEW: TextureRef ---
+                if (comps.contains("TextureRef")) {
+                    scene.world.add_texture_ref(id);
+                    auto& tex = scene.world.texture_ref_pool[id];
+                    tex.resourceName = comps["TextureRef"].value("resourceName", "");
+                    tex.isAnimation = comps["TextureRef"].value("isAnimation", false);
+                }
+                // --- NEW: SfxEmitter ---
+                if (comps.contains("SfxEmitter")) {
+                    scene.world.add_sfx_emitter(id);
+                    auto& sfx = scene.world.sfx_emitter_pool[id];
+                    sfx.sfxName = comps["SfxEmitter"].value("sfxName", "");
+                    sfx.volume = comps["SfxEmitter"].value("volume", 1.0f);
+                    sfx.pitch = comps["SfxEmitter"].value("pitch", 1.0f);
+                    sfx.speed = comps["SfxEmitter"].value("speed", 1.0f);
+                    sfx.playOnCollision = comps["SfxEmitter"].value("playOnCollision", false);
+                }
+                // --- NEW: PhysicsBody ---
+                if (comps.contains("PhysicsBody")) {
+                    scene.world.add_physics_body(id);
+                    auto& phys = scene.world.physics_body_pool[id];
+                    phys.shapeType = (Physics::ShapeType)comps["PhysicsBody"].value("shapeType", (int)Physics::ShapeType::Rectangle);
+                    phys.bodyType  = (b2BodyType)comps["PhysicsBody"].value("bodyType", (int)b2_dynamicBody);
+                    phys.width     = comps["PhysicsBody"].value("width", 50.0f);
+                    phys.height    = comps["PhysicsBody"].value("height", 50.0f);
+                    phys.radius    = comps["PhysicsBody"].value("radius", 25.0f);
+                    phys.density   = comps["PhysicsBody"].value("density", 1.0f);
+                    phys.isSensor  = comps["PhysicsBody"].value("isSensor", false);
+                    phys.category  = comps["PhysicsBody"].value("category", (uint16_t)Physics::LAYER_1);
+                    phys.mask      = comps["PhysicsBody"].value("mask", (uint16_t)Physics::LAYER_ALL);
+                    phys.polygonPoints.clear();
+                    if (comps["PhysicsBody"].contains("polygonPoints") && comps["PhysicsBody"]["polygonPoints"].is_array()) {
+                        for (const auto& pt : comps["PhysicsBody"]["polygonPoints"]) {
+                            phys.polygonPoints.push_back({pt.value("x", 0.0f), pt.value("y", 0.0f)});
+                        }
+                    }
+                    // bodyId remains null – will be re-created by physics_sync_system
+                }
+                // --- AnimationState (simplified, only image frames) ---
                 if (comps.contains("AnimationState")) {
                     auto& anim = scene.world.animation_state_pool[id];
                     if (!scene.world.has_animation_state[id]) scene.world.add_animation_state(id);
                     anim.speed = comps["AnimationState"].value("speed", 10.0f);
                     anim.isPlaying = comps["AnimationState"].value("isPlaying", true);
-                    std::string modeStr = comps["AnimationState"].value("mode", "ImageFrames");
-                    anim.mode = (modeStr == "SpritesheetFrames") ? Components::AnimationState::Mode::SpritesheetFrames
-                                                                : Components::AnimationState::Mode::ImageFrames;
-                    if (anim.mode == Components::AnimationState::Mode::ImageFrames) {
-                        anim.imageFrameResources = comps["AnimationState"]["imageFrames"].get<std::vector<std::string>>();
-                    } else {
-                        for (auto& f : comps["AnimationState"]["spriteFrames"]) {
-                            Components::AnimationState::SpriteFrame sf;
-                            sf.textureName = f.value("texture", "");
-                            sf.rect.x = f.value("x", 0.0f); sf.rect.y = f.value("y", 0.0f);
-                            sf.rect.w = f.value("w", 0.0f); sf.rect.h = f.value("h", 0.0f);
-                            anim.spriteFrames.push_back(sf);
-                        }
-                    }
+                    anim.imageFrameResources = comps["AnimationState"]["imageFrames"].get<std::vector<std::string>>();
                 }
             }
         }
@@ -5930,44 +6363,74 @@ public:
         nlohmann::json entitiesJson = nlohmann::json::array();
         for (Entity i = 0; i < scene.world.entity_count; ++i) {
             nlohmann::json comps;
+
             if (scene.world.has_metadata[i])
                 comps["Metadata"]["name"] = scene.world.metadata_pool[i].name;
+
             if (scene.world.has_position[i]) {
                 comps["Position"]["x"] = scene.world.position_pool[i].x;
                 comps["Position"]["y"] = scene.world.position_pool[i].y;
             }
+
             if (scene.world.has_rectangle_shape[i]) {
                 comps["RectangleShape"]["w"] = scene.world.rectangle_shape_pool[i].w;
                 comps["RectangleShape"]["h"] = scene.world.rectangle_shape_pool[i].h;
             }
+
             if (scene.world.has_z_index[i]) {
                 comps["ZIndex"]["z"] = scene.world.z_index_pool[i].z;
             }
+
             if (scene.world.has_rotation[i]) {
                 comps["Rotation"]["degrees"] = scene.world.rotation_pool[i].degrees;
             }
+
             if (scene.world.has_scale[i]) {
                 comps["Scale"]["x"] = scene.world.scale_pool[i].x;
                 comps["Scale"]["y"] = scene.world.scale_pool[i].y;
             }
+
+            if (scene.world.has_texture_ref[i]) {
+                auto& tex = scene.world.texture_ref_pool[i];
+                comps["TextureRef"]["resourceName"] = tex.resourceName;
+                comps["TextureRef"]["isAnimation"] = tex.isAnimation;
+            }
+
+            if (scene.world.has_sfx_emitter[i]) {
+                auto& sfx = scene.world.sfx_emitter_pool[i];
+                comps["SfxEmitter"]["sfxName"] = sfx.sfxName;
+                comps["SfxEmitter"]["volume"] = sfx.volume;
+                comps["SfxEmitter"]["pitch"] = sfx.pitch;
+                comps["SfxEmitter"]["speed"] = sfx.speed;
+                comps["SfxEmitter"]["playOnCollision"] = sfx.playOnCollision;
+            }
+
             if (scene.world.has_animation_state[i]) {
                 auto& anim = scene.world.animation_state_pool[i];
                 comps["AnimationState"]["speed"] = anim.speed;
                 comps["AnimationState"]["isPlaying"] = anim.isPlaying;
-                comps["AnimationState"]["mode"] = (anim.mode == Components::AnimationState::Mode::ImageFrames) ? "ImageFrames" : "SpritesheetFrames";
-                if (anim.mode == Components::AnimationState::Mode::ImageFrames) {
-                    comps["AnimationState"]["imageFrames"] = anim.imageFrameResources;
-                } else {
-                    nlohmann::json frames = nlohmann::json::array();
-                    for (auto& sf : anim.spriteFrames) {
-                        nlohmann::json f;
-                        f["texture"] = sf.textureName;
-                        f["x"] = sf.rect.x; f["y"] = sf.rect.y; f["w"] = sf.rect.w; f["h"] = sf.rect.h;
-                        frames.push_back(f);
-                    }
-                    comps["AnimationState"]["spriteFrames"] = frames;
-                }
+                comps["AnimationState"]["imageFrames"] = anim.imageFrameResources;
             }
+
+            if (scene.world.has_physics_body[i]) {
+                auto& phys = scene.world.physics_body_pool[i];
+                comps["PhysicsBody"]["shapeType"] = (int)phys.shapeType;
+                comps["PhysicsBody"]["bodyType"]  = (int)phys.bodyType;
+                comps["PhysicsBody"]["width"]     = phys.width;
+                comps["PhysicsBody"]["height"]    = phys.height;
+                comps["PhysicsBody"]["radius"]    = phys.radius;
+                comps["PhysicsBody"]["density"]   = phys.density;
+                comps["PhysicsBody"]["isSensor"]  = phys.isSensor;
+                comps["PhysicsBody"]["category"]  = phys.category;
+                comps["PhysicsBody"]["mask"]      = phys.mask;
+                // Save polygon points as array of {x,y}
+                nlohmann::json pts = nlohmann::json::array();
+                for (const auto& p : phys.polygonPoints) {
+                    pts.push_back({{"x", p.x}, {"y", p.y}});
+                }
+                comps["PhysicsBody"]["polygonPoints"] = pts;
+            }
+
             entitiesJson.push_back({{"components", comps}});
         }
         j["entities"] = entitiesJson;
