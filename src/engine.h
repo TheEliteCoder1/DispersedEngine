@@ -7,6 +7,8 @@
 #include <cmath>
 #include <functional>
 #include <vector>
+#include <unordered_map>
+#include <unordered_set>
 #include <json.hpp>
 #include <fstream>
 #include <memory>
@@ -135,6 +137,18 @@ inline std::filesystem::path getProjectsPathFS(const std::string& relativePath =
     return std::filesystem::path(getProjectsPath(relativePath));
 }
 
+// Resolves a .animres/.physicsres path as stored in scene.json into an
+// actual filesystem path. Absolute paths (e.g. a file picked from
+// somewhere outside the project) are used as-is; everything else is
+// treated as relative to the project root, mirroring how scriptAttached
+// is resolved elsewhere in the engine.
+inline std::string resolveComponentResourcePath(const std::string& projectsRoot, const std::string& storedPath) {
+    if (storedPath.empty()) return storedPath;
+    std::filesystem::path p(storedPath);
+    if (p.is_absolute()) return storedPath;
+    return projectsRoot + storedPath;
+}
+
 using Entity = uint32_t;
 const size_t MAX_ENTITIES = 1000000;
 Entity lastSelectedEntity = (Entity)-1;
@@ -208,7 +222,6 @@ namespace Components {
 
     struct TextureRef {
         std::string resourceName;
-        bool isAnimation = false;
         SDL_FRect sourceRect = {0, 0, 0, 0};
     };
 
@@ -255,6 +268,9 @@ namespace Components {
 
         // Only image frames are supported now
         std::vector<std::string> imageFrameResources;
+
+        float frameWidth = 0.0f;
+        float frameHeight = 0.0f;
     };
 
     // Holds one or more named AnimationClips and tracks which one is
@@ -382,6 +398,240 @@ inline void clamp_guiElem_position_to_canvas(SDL_FPoint& pos, float guiElemWidth
     if (maxY >= minY) pos.y = std::clamp(pos.y, minY, maxY);
 }
 
+// Normalizes a filepath so "./x.animres" and "x.animres" (etc.) compare
+// equal. Falls back to the raw string if the path doesn't resolve yet
+// (e.g. about to be written for the first time). Shared by
+// ComponentResourceManager's cache keys and ECSWorld's broadcast helpers
+// so both agree on when two entities are "pointing at the same file".
+inline std::string canonicalComponentResourcePath(const std::string& filepath) {
+    std::error_code ec;
+    auto canon = std::filesystem::weakly_canonical(filepath, ec);
+    return ec ? filepath : canon.string();
+}
+
+// ============================================================
+// ComponentResourceManager
+// ------------------------------------------------------------
+// .animres and .physicsres are just JSON files holding exactly the same
+// fields the old inline "AnimationState": { ... } / "PhysicsBody": { ... }
+// blocks used to hold directly in scene.json. This manager is a flyweight
+// cache keyed by filepath: entities that reference the same resource FILE
+// only pay the disk-read + JSON-parse cost once (on the first load), and
+// only pay the disk-write cost once per save pass, no matter how many
+// entities point at that file.
+//
+// A note on pointer type: multiple entities sharing one object cannot be
+// modeled with std::unique_ptr — by definition only one unique_ptr can own
+// an object at a time, so handing the "same" unique_ptr to a second entity
+// would either fail to compile (it's move-only) or leave the first entity
+// holding a null pointer. std::shared_ptr is the smart pointer built for
+// "N owners, one object, freed automatically once the last owner lets go"
+// — exactly this situation — so that's what load*() returns below.
+// Nothing is ever manually deleted; in C++17 the shared_ptr's control
+// block frees the resource automatically once the last reference
+// (including the one held in this manager's own cache) goes away.
+// ============================================================
+class ComponentResourceManager {
+public:
+    // Loads (or returns the already-cached) AnimationState for a given
+    // .animres filepath. A second/third/Nth caller with the same filepath
+    // gets the exact same shared_ptr instance back — no disk I/O, no
+    // re-parse.
+    std::shared_ptr<Components::AnimationState> loadAnimation(const std::string& filepath) {
+        std::string key = canonicalKey(filepath);
+        auto it = animationCache.find(key);
+        if (it != animationCache.end()) return it->second;
+
+        std::ifstream in(filepath);
+        if (!in.is_open())
+            throw std::runtime_error("ComponentResourceManager: cannot open animation resource '" + filepath + "'");
+        nlohmann::json j;
+        in >> j;
+
+        auto anim = std::make_shared<Components::AnimationState>(parseAnimationJson(j));
+        animationCache[key] = anim;
+        return anim;
+    }
+
+    // Loads (or returns the already-cached) PhysicsBodyDef for a given
+    // .physicsres filepath. Same de-dupe behavior as loadAnimation().
+    std::shared_ptr<Components::PhysicsBodyDef> loadPhysics(const std::string& filepath) {
+        std::string key = canonicalKey(filepath);
+        auto it = physicsCache.find(key);
+        if (it != physicsCache.end()) return it->second;
+
+        std::ifstream in(filepath);
+        if (!in.is_open())
+            throw std::runtime_error("ComponentResourceManager: cannot open physics resource '" + filepath + "'");
+        nlohmann::json j;
+        in >> j;
+
+        auto phys = std::make_shared<Components::PhysicsBodyDef>(parsePhysicsJson(j));
+        physicsCache[key] = phys;
+        return phys;
+    }
+
+    // Writes `data` to `filepath` as a .animres file, but only the FIRST
+    // time it's asked to for that path during the current save pass (see
+    // beginSavePass()). Every later entity sharing the same path is a
+    // no-op write, since the file on disk would end up byte-identical
+    // anyway — this is where "reduced save times" actually comes from.
+    void saveAnimation(const std::string& filepath, const Components::AnimationState& data) {
+        std::string key = canonicalKey(filepath);
+        if (writtenThisPass.count(key)) return;
+        writtenThisPass.insert(key);
+
+        std::ofstream out(filepath);
+        if (!out.is_open())
+            throw std::runtime_error("ComponentResourceManager: cannot write animation resource '" + filepath + "'");
+        out << serializeAnimationJson(data).dump(4);
+
+        // Refresh the cache so a load() later in the same run sees the
+        // freshly saved data instead of a stale copy.
+        animationCache[key] = std::make_shared<Components::AnimationState>(data);
+    }
+
+    // Writes `data` to `filepath` as a .physicsres file. Same
+    // one-write-per-save-pass de-dupe as saveAnimation().
+    void savePhysics(const std::string& filepath, const Components::PhysicsBodyDef& data) {
+        std::string key = canonicalKey(filepath);
+        if (writtenThisPass.count(key)) return;
+        writtenThisPass.insert(key);
+
+        std::ofstream out(filepath);
+        if (!out.is_open())
+            throw std::runtime_error("ComponentResourceManager: cannot write physics resource '" + filepath + "'");
+        out << serializePhysicsJson(data).dump(4);
+
+        physicsCache[key] = std::make_shared<Components::PhysicsBodyDef>(data);
+    }
+
+    // Call once at the start of a save pass (top of saveToFile) so each
+    // unique resource path gets exactly one disk write during that pass,
+    // instead of being permanently "already written" forever.
+    void beginSavePass() { writtenThisPass.clear(); }
+
+    // Drops all cached resources. Call when closing/switching projects so
+    // stale data from the old project can't leak into the new one.
+    void clear() {
+        animationCache.clear();
+        physicsCache.clear();
+        writtenThisPass.clear();
+    }
+
+    size_t animationCacheSize() const { return animationCache.size(); }
+    size_t physicsCacheSize()   const { return physicsCache.size(); }
+
+private:
+    std::unordered_map<std::string, std::shared_ptr<Components::AnimationState>> animationCache;
+    std::unordered_map<std::string, std::shared_ptr<Components::PhysicsBodyDef>> physicsCache;
+    std::unordered_set<std::string> writtenThisPass;
+
+    // Normalizes a filepath so "./x.animres" and "x.animres" (etc.) hit the
+    // same cache entry. Falls back to the raw string if the path doesn't
+    // resolve yet (e.g. about to be written for the first time).
+    static std::string canonicalKey(const std::string& filepath) {
+        std::error_code ec;
+        auto canon = std::filesystem::weakly_canonical(filepath, ec);
+        return ec ? filepath : canon.string();
+    }
+
+public:
+
+    static Components::AnimationState parseAnimationJson(const nlohmann::json& j) {
+        Components::AnimationState anim;
+        anim.clips.clear();
+        if (j.contains("clips") && j["clips"].is_array()) {
+            for (const auto& clipJson : j["clips"]) {
+                Components::AnimationClip clip;
+                clip.name = clipJson.value("name", "default");
+                clip.speed = clipJson.value("speed", 10.0f);
+                clip.isPlaying = clipJson.value("isPlaying", true);
+                clip.imageFrameResources = clipJson.value("imageFrames", std::vector<std::string>());
+                clip.frameWidth = clipJson.value("frameWidth", 0.0f);
+                clip.frameHeight = clipJson.value("frameHeight", 0.0f);
+                anim.clips.push_back(std::move(clip));
+            }
+        }
+        if (anim.clips.empty()) anim.clips.push_back(Components::AnimationClip{});
+        anim.activeClipIndex = j.value("activeClipIndex", 0);
+        if (anim.activeClipIndex < 0 || anim.activeClipIndex >= (int)anim.clips.size())
+            anim.activeClipIndex = 0;
+        return anim;
+    }
+
+    static nlohmann::json serializeAnimationJson(const Components::AnimationState& data) {
+        nlohmann::json j;
+        nlohmann::json clipsJson = nlohmann::json::array();
+        for (const auto& clip : data.clips) {
+            nlohmann::json clipJson;
+            clipJson["name"] = clip.name;
+            clipJson["speed"] = clip.speed;
+            clipJson["isPlaying"] = clip.isPlaying;
+            clipJson["imageFrames"] = clip.imageFrameResources;
+            // Per-clip frame size override. parseAnimationJson() already reads
+            // these back (defaulting to 0.0f i.e. "use the texture's native
+            // size" when absent) -- they just weren't being written here, so
+            // any width/height set in the Inspector was silently lost on the
+            // next save/load round-trip through the shared .animres cache.
+            clipJson["frameWidth"] = clip.frameWidth;
+            clipJson["frameHeight"] = clip.frameHeight;
+            clipsJson.push_back(std::move(clipJson));
+        }
+        j["clips"] = std::move(clipsJson);
+        j["activeClipIndex"] = data.activeClipIndex;
+        return j;
+    }
+
+    static Components::PhysicsBodyDef parsePhysicsJson(const nlohmann::json& j) {
+        Components::PhysicsBodyDef phys;
+        phys.shapeType = (Physics::ShapeType)j.value("shapeType", (int)Physics::ShapeType::Rectangle);
+        phys.bodyType  = (b2BodyType)j.value("bodyType", (int)b2_dynamicBody);
+        phys.width     = j.value("width", 50.0f);
+        phys.height    = j.value("height", 50.0f);
+        phys.radius    = j.value("radius", 25.0f);
+        phys.density   = j.value("density", 1.0f);
+        phys.isSensor  = j.value("isSensor", false);
+        phys.category  = j.value("category", (uint16_t)Physics::LAYER_1);
+        phys.mask      = j.value("mask", (uint16_t)Physics::LAYER_ALL);
+        phys.polygonPoints.clear();
+        if (j.contains("polygonPoints") && j["polygonPoints"].is_array()) {
+            for (const auto& pt : j["polygonPoints"])
+                phys.polygonPoints.push_back({ pt.value("x", 0.0f), pt.value("y", 0.0f) });
+        }
+        // bodyId is intentionally NOT part of the resource file: it's a
+        // runtime Box2D handle, not saved data, and physics_sync_system
+        // re-creates it fresh for every entity regardless of where the
+        // rest of the def came from.
+        phys.bodyId = b2_nullBodyId;
+        return phys;
+    }
+
+    static nlohmann::json serializePhysicsJson(const Components::PhysicsBodyDef& data) {
+        nlohmann::json j;
+        j["shapeType"] = (int)data.shapeType;
+        j["bodyType"]  = (int)data.bodyType;
+        j["width"]     = data.width;
+        j["height"]    = data.height;
+        j["radius"]    = data.radius;
+        j["density"]   = data.density;
+        j["isSensor"]  = data.isSensor;
+        j["category"]  = data.category;
+        j["mask"]      = data.mask;
+        nlohmann::json pts = nlohmann::json::array();
+        for (const auto& p : data.polygonPoints)
+            pts.push_back({ {"x", p.x}, {"y", p.y} });
+        j["polygonPoints"] = pts;
+        return j;
+    }
+};
+
+// Single shared instance, engine-wide. Declared `inline` (a C++17 feature)
+// so this header can be included from multiple translation units without
+// duplicate-definition linker errors — the same trick used for the other
+// `inline` free functions in this file.
+inline ComponentResourceManager g_componentResources;
+
 struct ECSWorld {
     std::vector<uint8_t> has_metadata;
     std::vector<Components::Metadata> metadata_pool;
@@ -397,10 +647,18 @@ struct ECSWorld {
     std::vector<Components::TextureRef> texture_ref_pool;
     std::vector<uint8_t> has_animation_state;
     std::vector<Components::AnimationState> animation_state_pool;
+    // Path (relative to the project root, or absolute) of the .animres
+    // file this entity's AnimationState was loaded from / should be saved
+    // to. Empty means the component has no resource file yet (e.g. it was
+    // just added in-editor); saveToFile() will generate one the first time
+    // it's saved.
+    std::vector<std::string> animation_resource_path;
     std::vector<uint8_t> has_sfx_emitter;
     std::vector<Components::SfxEmitter> sfx_emitter_pool;
     std::vector<uint8_t> has_physics_body;
     std::vector<Components::PhysicsBodyDef> physics_body_pool;
+    // Same idea as animation_resource_path, but for .physicsres files.
+    std::vector<std::string> physics_resource_path;
     std::vector<uint8_t> has_rotation;
     std::vector<Components::Rotation> rotation_pool;
     std::vector<uint8_t> has_scale;
@@ -424,10 +682,12 @@ struct ECSWorld {
         texture_ref_pool.reserve(MAX_ENTITIES);
         has_animation_state.reserve(MAX_ENTITIES);
         animation_state_pool.reserve(MAX_ENTITIES);
+        animation_resource_path.reserve(MAX_ENTITIES);
         has_sfx_emitter.reserve(MAX_ENTITIES);
         sfx_emitter_pool.reserve(MAX_ENTITIES);
         has_physics_body.reserve(MAX_ENTITIES);
         physics_body_pool.reserve(MAX_ENTITIES);
+        physics_resource_path.reserve(MAX_ENTITIES);
         has_rotation.reserve(MAX_ENTITIES);
         rotation_pool.reserve(MAX_ENTITIES);
         has_scale.reserve(MAX_ENTITIES);
@@ -450,10 +710,12 @@ struct ECSWorld {
         texture_ref_pool.emplace_back();
         has_animation_state.push_back(0);
         animation_state_pool.emplace_back();
+        animation_resource_path.emplace_back();
         has_sfx_emitter.push_back(0);
         sfx_emitter_pool.emplace_back();
         has_physics_body.push_back(0);
         physics_body_pool.emplace_back();
+        physics_resource_path.emplace_back();
         has_rotation.push_back(0);
         rotation_pool.emplace_back();
         has_scale.push_back(0);
@@ -479,10 +741,12 @@ struct ECSWorld {
             texture_ref_pool[id] = texture_ref_pool[last];
             has_animation_state[id] = has_animation_state[last];
             animation_state_pool[id] = animation_state_pool[last];
+            animation_resource_path[id] = animation_resource_path[last];
             has_sfx_emitter[id] = has_sfx_emitter[last];
             sfx_emitter_pool[id] = sfx_emitter_pool[last];
             has_physics_body[id] = has_physics_body[last];
             physics_body_pool[id] = physics_body_pool[last];
+            physics_resource_path[id] = physics_resource_path[last];
             has_rotation[id] = has_rotation[last];
             rotation_pool[id] = rotation_pool[last];
             has_scale[id] = has_scale[last];
@@ -502,10 +766,12 @@ struct ECSWorld {
         texture_ref_pool.pop_back();
         has_animation_state.pop_back();
         animation_state_pool.pop_back();
+        animation_resource_path.pop_back();
         has_sfx_emitter.pop_back();
         sfx_emitter_pool.pop_back();
         has_physics_body.pop_back();
         physics_body_pool.pop_back();
+        physics_resource_path.pop_back();
         has_rotation.pop_back();
         rotation_pool.pop_back();
         has_scale.pop_back();
@@ -524,6 +790,31 @@ struct ECSWorld {
     void add_physics_body(Entity id) { if (id < entity_count) has_physics_body[id] = 1; }
     void add_rotation(Entity id) { if (id < entity_count) has_rotation[id] = 1; }
     void add_scale(Entity id)   { if (id < entity_count) has_scale[id] = 1; }
+
+    // Points this entity's AnimationState at the resource loaded from
+    // `filepath`. If some other entity already loaded that exact file, the
+    // disk read + JSON parse is skipped entirely (ComponentResourceManager
+    // returns its cached shared_ptr); only a cheap in-memory copy into this
+    // entity's pool slot happens here. `filepath` should already be a
+    // resolved filesystem path (see resolveComponentResourcePath).
+    void assign_animation_resource(Entity id, const std::string& filepath) {
+        if (id >= entity_count) return;
+        auto shared = g_componentResources.loadAnimation(filepath);
+        animation_state_pool[id] = *shared;
+        animation_resource_path[id] = filepath;
+        has_animation_state[id] = 1;
+    }
+
+    // Same idea as assign_animation_resource(), but for a .physicsres file
+    // and this entity's PhysicsBodyDef.
+    void assign_physics_resource(Entity id, const std::string& filepath) {
+        if (id >= entity_count) return;
+        auto shared = g_componentResources.loadPhysics(filepath);
+        physics_body_pool[id] = *shared;
+        physics_body_pool[id].bodyId = b2_nullBodyId; // always a fresh per-entity runtime handle
+        physics_resource_path[id] = filepath;
+        has_physics_body[id] = 1;
+    }
 };
 
 void physics_sync_system(ECSWorld& world, Physics::PhysicsWorld& physWorld) {
@@ -3625,13 +3916,20 @@ namespace Gui {
         void tick(float dt) override {
             Dialog::tick(dt);
             if (isPlaying && target) {
-                auto& clip = target->active();
-                if (!clip.imageFrameResources.empty() && clip.speed > 0.0001f) {
+                // Use the clip currently selected in the dropdown (the same
+                // one renderPreview() and the frame list show), not
+                // target->active() -- that's the entity's separately-tracked
+                // "live" clip, which only changes when Activate is pressed.
+                // Ticking against active() while previewing a different
+                // selected clip is what made Play/Stop look like they were
+                // animating the wrong clip after switching the dropdown.
+                auto* clip = getSelectedClip();
+                if (clip && !clip->imageFrameResources.empty() && clip->speed > 0.0001f) {
                     frameTimer += dt;
-                    float frameDuration = 1.0f / clip.speed;
+                    float frameDuration = 1.0f / clip->speed;
                     if (frameTimer >= frameDuration) {
                         frameTimer -= frameDuration;
-                        currentFrame = (currentFrame + 1) % (int)clip.imageFrameResources.size();
+                        currentFrame = (currentFrame + 1) % (int)clip->imageFrameResources.size();
                     }
                 }
             }
@@ -3711,6 +4009,9 @@ namespace Gui {
             } else {
                 selectedFrameIndex = -1;
             }
+            // Switching clips shouldn't carry over a partially-elapsed
+            // frame duration from the old clip's (possibly different) speed.
+            frameTimer = 0.0f;
         }
 
         Components::AnimationClip* getSelectedClip() {
@@ -3791,27 +4092,18 @@ namespace Gui {
             fileExplorer.setFilter("*.animres");
             fileExplorer.setSaveMode(false, "");
             fileExplorer.setCallback([this](const std::string& path) {
-                std::ifstream f(path);
-                if (!f.is_open()) {
-                    SDL_Log("Failed to open animation resource file: %s", path.c_str());
-                    fileExplorer.reset();
-                    return;
-                }
+                if (!target) return;
                 try {
-                    nlohmann::json j;
-                    f >> j;
-                    auto* clip = getSelectedClip();
-                    if (!clip) {
+                    std::ifstream f(path);
+                    if (!f.is_open()) {
+                        SDL_Log("Failed to open animation resource: %s", path.c_str());
                         fileExplorer.reset();
                         return;
                     }
-                    // Only ImageFrames mode is supported now
-                    if (j.contains("frames") && j["frames"].is_array()) {
-                        clip->imageFrameResources = j["frames"].get<std::vector<std::string>>();
-                    } else {
-                        clip->imageFrameResources.clear();
-                    }
-                    syncFramesFromSelectedClip();
+                    nlohmann::json j;
+                    f >> j;
+                    *target = ComponentResourceManager::parseAnimationJson(j);
+                    syncFromTarget();
                     if (onResourceLoaded) onResourceLoaded();
                 } catch (const std::exception& e) {
                     SDL_Log("Error loading animation resource: %s", e.what());
@@ -3822,15 +4114,12 @@ namespace Gui {
         }
 
         void saveResource() {
-            auto* clip = getSelectedClip();
-            if (!clip) return;
+            if (!target) return;
             fileExplorer.setFilter("*.animres");
             fileExplorer.setSaveMode(true, ".animres");
-            fileExplorer.setCallback([this, clip](const std::string& path) {
+            fileExplorer.setCallback([this](const std::string& path) {
                 try {
-                    nlohmann::json j;
-                    j["mode"] = "ImageFrames";
-                    j["frames"] = clip->imageFrameResources;
+                    nlohmann::json j = ComponentResourceManager::serializeAnimationJson(*target);
                     std::ofstream out(path);
                     if (out.is_open()) {
                         out << j.dump(4);
@@ -3845,6 +4134,7 @@ namespace Gui {
             });
             fileExplorer.open();
         }
+
 
         void renderPreview(SDL_FRect previewRect) {
             auto* clip = getSelectedClip();
@@ -4353,6 +4643,10 @@ namespace Gui {
                 // The dialog handles its own events in the main loop; we don't forward here.
             }
             if (ev.type == SDL_EVENT_KEY_DOWN && (ev.key.key == SDLK_RETURN || ev.key.key == SDLK_TAB)) commitAllFields();
+            // Safe now: we're fully done iterating `fields` above, so clearing
+            // and rebuilding it here can't yank widgets out from under an
+            // in-progress loop.
+            if (pendingRebuild) { pendingRebuild = false; rebuildFields(); }
             return consumed;
         }
 
@@ -4362,6 +4656,9 @@ namespace Gui {
                 for (auto& wgt : f.widgets)
                     wgt->handleGamepad(cursorX, cursorY, 0.0f, 0.0f, window, confirmDown, confirmDownLastFrame);
             }
+            // Same reasoning as handleEvent(): rebuild only after the loop above
+            // has fully finished, never from inside a widget's own callback.
+            if (pendingRebuild) { pendingRebuild = false; rebuildFields(); }
         }
 
         void render(float windowHeight) {
@@ -4519,8 +4816,7 @@ namespace Gui {
                         auto* cb = static_cast<Gui::CheckBox*>(wgt.get());
                         bool val = cb->getValue();
                         if (val != (f.lastSyncedValue > 0.5f)) {
-                            if (f.key == "tex_isAnim") world->texture_ref_pool[e].isAnimation = val;
-                            else if (f.key == "sfx_col") world->sfx_emitter_pool[e].playOnCollision = val;
+                            if (f.key == "sfx_col") world->sfx_emitter_pool[e].playOnCollision = val;
                             f.lastSyncedValue = val ? 1.0f : 0.0f;
                         }
                     }
@@ -4532,6 +4828,49 @@ namespace Gui {
             if (!world || targetEntity == (Entity)-1) return;
             Entity e = targetEntity;
             for (auto& f : fields) {
+                // Special handling for the animation panel
+                if (f.key == "anim_panel") {
+                    auto& anim = world->animation_state_pool[e];
+                    // Update clip selector (OptionSpinBox) - assume it's the first widget of that type
+                    Gui::OptionSpinBox* clipSelector = nullptr;
+                    Gui::SpinBox* widthSpin = nullptr;
+                    Gui::SpinBox* heightSpin = nullptr;
+                    for (auto& wgt : f.widgets) {
+                        if (wgt->getType() == "OptionSpinBox") {
+                            clipSelector = static_cast<Gui::OptionSpinBox*>(wgt.get());
+                        } else if (wgt->getType() == "SpinBox") {
+                            // We need to distinguish width vs height. We'll use the lastSyncedValue or a flag.
+                            // Since we have two spinboxes, we can check if we already assigned width.
+                            if (!widthSpin) {
+                                widthSpin = static_cast<Gui::SpinBox*>(wgt.get());
+                            } else {
+                                heightSpin = static_cast<Gui::SpinBox*>(wgt.get());
+                            }
+                        }
+                    }
+                    if (clipSelector) {
+                        // Update options list (in case clips were added/removed)
+                        std::vector<std::string> clipNames;
+                        for (const auto& clip : anim.clips) clipNames.push_back(clip.name);
+                        clipSelector->setOptions(clipNames);
+                        clipSelector->setCurrentIndex(anim.activeClipIndex);
+                    }
+                    if (widthSpin) {
+                        float val = anim.active().frameWidth;
+                        if (val != widthSpin->getValue()) widthSpin->setValue(val);
+                    }
+                    if (heightSpin) {
+                        float val = anim.active().frameHeight;
+                        if (val != heightSpin->getValue()) heightSpin->setValue(val);
+                    }
+                    // The spinboxes' onChange will update the world, so we don't need to update lastSyncedValue here.
+                    // But we also need to update the field's last synced values for spinboxes? Not necessary because we only sync from world.
+                    // However, we can update f.lastSyncedValue for them? Actually we don't store per-widget last synced for these.
+                    // We'll just leave as is; the spinboxes will be updated.
+                    continue; // skip the generic handling below
+                }
+
+                // Original generic handling for other fields
                 for (auto& wgt : f.widgets) {
                     if (wgt->getType() == "SpinBox") {
                         auto* sb = static_cast<Gui::SpinBox*>(wgt.get());
@@ -4569,8 +4908,7 @@ namespace Gui {
                     } else if (wgt->getType() == "CheckBox") {
                         auto* cb = static_cast<Gui::CheckBox*>(wgt.get());
                         bool worldVal = false;
-                        if (f.key == "tex_isAnim") worldVal = world->texture_ref_pool[e].isAnimation;
-                        else if (f.key == "sfx_col") worldVal = world->sfx_emitter_pool[e].playOnCollision;
+                        if (f.key == "sfx_col") worldVal = world->sfx_emitter_pool[e].playOnCollision;
                         if (worldVal != (f.lastSyncedValue > 0.5f)) {
                             cb->setValue(worldVal);
                             f.lastSyncedValue = worldVal ? 1.0f : 0.0f;
@@ -4582,10 +4920,17 @@ namespace Gui {
 
     private:
         struct Field {
-            std::string label, key;
-            std::vector<std::unique_ptr<Gui::IGuiElement>> widgets;
+            std::string label;
+            std::string key;
+            std::vector<std::unique_ptr<IGuiElement>> widgets;
             float lastSyncedValue = 0.0f;
             std::string lastSyncedText = "";
+
+            Field() = default;
+            Field(Field&&) = default;
+            Field& operator=(Field&&) = default;
+            Field(const Field&) = delete;
+            Field& operator=(const Field&) = delete;
         };
 
         SDL_Renderer* renderer;
@@ -4596,6 +4941,7 @@ namespace Gui {
         ECSWorld* world = nullptr;
         Entity targetEntity = (Entity)-1;
         std::vector<Field> fields;
+        bool pendingRebuild = false; // see handleEvent()/clipSelector onChange
         Gui::Scrollbar inspectorScrollbar;
         float inspectorScrollOffset = 0.0f;
         
@@ -4666,26 +5012,102 @@ namespace Gui {
 
             auto addAnimationState = [&]() {
                 auto& anim = world->animation_state_pool[e];
-                if (anim.active().imageFrameResources.empty()) {
-                    anim.active().imageFrameResources.push_back("");
+                if (anim.clips.empty()) {
+                    anim.clips.push_back(Components::AnimationClip{});
                 }
-                // Button to open the frame/clip editor.
-                auto btn = std::make_unique<Gui::Button>(renderer, font,
-                    "Edit Clips (" + anim.activeName() + ")", SDL_FPoint{0,0}, 160, 26);
-                btn->onClicked = [this, &anim]() {
+
+                // --- Clip selector (OptionSpinBox) ---
+                std::vector<std::string> clipNames;
+                for (const auto& clip : anim.clips) clipNames.push_back(clip.name);
+                auto clipSelector = std::make_unique<Gui::OptionSpinBox>(
+                    renderer, textEngine, font, SDL_FRect{0,0,1,1}, clipNames, false);
+                clipSelector->setCurrentIndex(anim.activeClipIndex);
+
+                clipSelector->onChange = [this, e](int idx) {
+                    if (!world || e >= world->entity_count) return;
+                    auto& anim = world->animation_state_pool[e];
+                    if (idx >= 0 && idx < (int)anim.clips.size()) {
+                        anim.activeClipIndex = idx;
+                        // Don't rebuild synchronously here: this callback fires
+                        // from inside handleEvent()'s "for (auto& f : fields) for
+                        // (auto& wgt : f.widgets)" loop, and this very widget
+                        // (plus the width/height spinboxes right after it in the
+                        // same field) lives in that vector. Clearing `fields` now
+                        // would destroy them mid-iteration -- handleEvent would
+                        // go on to call handleEvent() on already-destroyed
+                        // widgets, which is UB and only crashes intermittently.
+                        // Instead, just flag it; handleEvent() rebuilds once the
+                        // loop is done and it's safe to clear `fields`.
+                        this->pendingRebuild = true;
+                    }
+                };
+
+                // --- Play/Stop buttons ---
+                auto playBtn = std::make_unique<Gui::Button>(renderer, font, "Play", SDL_FPoint{0,0}, 50, 26);
+                playBtn->onClicked = [this, e]() {
+                    if (!world || e >= world->entity_count) return;
+                    world->animation_state_pool[e].active().isPlaying = true;
+                };
+
+                auto stopBtn = std::make_unique<Gui::Button>(renderer, font, "Stop", SDL_FPoint{0,0}, 50, 26);
+                stopBtn->onClicked = [this, e]() {
+                    if (!world || e >= world->entity_count) return;
+                    world->animation_state_pool[e].active().isPlaying = false;
+                };
+
+                // --- Width/Height spinboxes (per-clip override) ---
+                auto widthSpin = std::make_unique<Gui::SpinBox>(renderer, textEngine, font,
+                    SDL_FRect{0,0,1,1}, 0.0f, 9999.0f, anim.active().frameWidth, 1.0f);
+                widthSpin->onChange = [this, e](float val) {
+                    if (!world || e >= world->entity_count) return;
+                    world->animation_state_pool[e].active().frameWidth = val;
+                };
+
+                auto heightSpin = std::make_unique<Gui::SpinBox>(renderer, textEngine, font,
+                    SDL_FRect{0,0,1,1}, 0.0f, 9999.0f, anim.active().frameHeight, 1.0f);  // ← fixed: frameHeight
+                heightSpin->onChange = [this, e](float val) {
+                    if (!world || e >= world->entity_count) return;
+                    world->animation_state_pool[e].active().frameHeight = val;
+                };
+
+                // --- Edit Clips button (opens the dialog) ---
+                auto editBtn = std::make_unique<Gui::Button>(renderer, font,
+                    "Edit Clips...", SDL_FPoint{0,0}, 100, 26);
+                editBtn->onClicked = [this, e]() {
+                    if (!world || e >= world->entity_count) return;
+                    auto& anim = world->animation_state_pool[e];
                     animFrameEditor->setTarget(&anim);
                     animFrameEditor->onResourceLoaded = [this]() {
                         this->commitAllFields();
-                        this->syncFromWorld();
+                        this->rebuildFields();  // refresh after load
                     };
                     modeBeforeDialog = currentEditMode;
                     currentEditMode = EditMode::Dialog;
                     animFrameEditor->open();
                 };
+
+                // --- Assemble the field ---
                 Field f;
                 f.label = "Animation";
-                f.key = "anim_edit";
-                f.widgets.push_back(std::move(btn));
+                f.key = "anim_panel";
+
+                // Clip selector
+                f.widgets.push_back(std::move(clipSelector));
+
+                // HBox for Play/Stop
+                auto hbox = std::make_unique<Gui::HBoxContainer>();
+                hbox->setRect(SDL_FRect{0,0,120,30});
+                hbox->addChild(std::move(playBtn));
+                hbox->addChild(std::move(stopBtn));
+                f.widgets.push_back(std::move(hbox));
+
+                // Width and Height spinboxes
+                f.widgets.push_back(std::move(widthSpin));
+                f.widgets.push_back(std::move(heightSpin));
+
+                // Edit button
+                f.widgets.push_back(std::move(editBtn));
+
                 fields.push_back(std::move(f));
             };
 
@@ -4705,16 +5127,95 @@ namespace Gui {
                 addSpinBox("Scale Y", "scale_y", world->scale_pool[e].y, 0.01f, 10.0f, 0.1f);
             }
             if (world->has_physics_body[e]) {
-                auto& p = world->physics_body_pool[e];
-                addSpinBox("Shape (0=Rct,1=Crc,2=Poly)", "phys_shape", (float)ShapeTypeToSpinboxIndex(p.shapeType), 0, 2, 1);
-                addSpinBox("Width", "phys_w", p.width, 1, 9999, 1);
-                addSpinBox("Height", "phys_h", p.height, 1, 9999, 1);
-                addSpinBox("Radius", "phys_r", p.radius, 1, 9999, 1);
+                auto& phys = world->physics_body_pool[e];
+
+                // Existing spinboxes for editing
+                addSpinBox("Shape (0=Rct,1=Crc,2=Poly)", "phys_shape",
+                        (float)ShapeTypeToSpinboxIndex(phys.shapeType), 0, 2, 1);
+                addSpinBox("Width", "phys_w", phys.width, 1, 9999, 1);
+                addSpinBox("Height", "phys_h", phys.height, 1, 9999, 1);
+                addSpinBox("Radius", "phys_r", phys.radius, 1, 9999, 1);
+
+                // --- NEW: Load and Save buttons ---
+                // We'll add them as a separate field with two buttons side by side.
+                // We'll use a small HBox-like layout by manually placing them.
+                Field btnField;
+                btnField.label = "Physics Resource";
+                btnField.key = "phys_res_buttons";
+
+                // Load button
+                auto loadBtn = std::make_unique<Gui::Button>(renderer, font, "Load .physicsres",
+                                                            SDL_FPoint{0,0}, 120, 26);
+                loadBtn->onClicked = [this, e]() {
+                    if (!world || e >= world->entity_count) return;
+                    // Commit any pending edits first
+                    this->commitAllFields();
+                    fileExplorer.setFilter("*.physicsres");
+                    fileExplorer.setSaveMode(false, "");
+                    fileExplorer.setCallback([this, e](const std::string& path) {
+                        if (!world || e >= world->entity_count) return;
+                        try {
+                            std::ifstream f(path);
+                            if (!f.is_open()) {
+                                SDL_Log("Failed to open physics resource: %s", path.c_str());
+                                fileExplorer.reset();
+                                return;
+                            }
+                            nlohmann::json j;
+                            f >> j;
+                            auto& phys = world->physics_body_pool[e];
+                            phys = ComponentResourceManager::parsePhysicsJson(j);
+                            phys.bodyId = b2_nullBodyId;  // runtime handle fresh
+                            world->physics_resource_path[e] = path;
+                            world->has_physics_body[e] = 1;
+                            // Refresh inspector fields
+                            this->rebuildFields();
+                            if (this->animFrameEditor && this->animFrameEditor->isOpen()) {
+                                // Not needed for physics
+                            }
+                        } catch (const std::exception& ex) {
+                            SDL_Log("Error loading physics resource: %s", ex.what());
+                        }
+                        fileExplorer.reset();
+                    });
+                    fileExplorer.open();
+                };
+                btnField.widgets.push_back(std::move(loadBtn));
+
+                // Save button
+                auto saveBtn = std::make_unique<Gui::Button>(renderer, font, "Save .physicsres",
+                                                            SDL_FPoint{0,0}, 120, 26);
+                saveBtn->onClicked = [this, e]() {
+                    if (!world || e >= world->entity_count) return;
+                    this->commitAllFields();
+                    fileExplorer.setFilter("*.physicsres");
+                    fileExplorer.setSaveMode(true, ".physicsres");
+                    fileExplorer.setCallback([this, e](const std::string& path) {
+                        if (!world || e >= world->entity_count) return;
+                        try {
+                            nlohmann::json j = ComponentResourceManager::serializePhysicsJson(world->physics_body_pool[e]);
+                            std::ofstream out(path);
+                            if (out.is_open()) {
+                                out << j.dump(4);
+                                world->physics_resource_path[e] = path;
+                                SDL_Log("Saved physics resource to %s", path.c_str());
+                            } else {
+                                SDL_Log("Failed to save physics resource to %s", path.c_str());
+                            }
+                        } catch (const std::exception& ex) {
+                            SDL_Log("Error saving physics resource: %s", ex.what());
+                        }
+                        fileExplorer.reset();
+                    });
+                    fileExplorer.open();
+                };
+                btnField.widgets.push_back(std::move(saveBtn));
+
+                fields.push_back(std::move(btnField));
             }
             if (world->has_texture_ref[e]) {
                 auto& t = world->texture_ref_pool[e];
                 addTexturePath("Tex Resource", "tex_res", t.resourceName);
-                addCheckBox("Is Anim", "tex_isAnim", t.isAnimation);
             }
             if (world->has_animation_state[e]) {
                 addAnimationState();
@@ -5430,7 +5931,7 @@ inline void animation_system(ECSWorld& world, float dt)
 {
     for (Entity i = 0; i < world.entity_count; i++)
     {
-        if (world.has_animation_state[i] && world.has_texture_ref[i])
+        if (world.has_animation_state[i])
         {
             auto& state = world.animation_state_pool[i];
             auto& clip = state.active();          // use active clip
@@ -5448,32 +5949,48 @@ inline void animation_system(ECSWorld& world, float dt)
 }
 
 
-inline void render_entity_texture(SDL_Renderer* renderer, const ECSWorld& world, Entity i, float screenX, float screenY)
+inline bool render_entity_texture(SDL_Renderer* renderer, const ECSWorld& world, Entity i, float screenX, float screenY)
 {
-    if (!world.has_texture_ref[i]) return;
-
-    const auto& texRef = world.texture_ref_pool[i];
     SDL_Texture* tex = nullptr;
     SDL_FRect srcRect = {0,0,0,0};
     std::string texName;
 
-    if (texRef.isAnimation) {
-        if (world.has_animation_state[i]) {
-            auto [name, rect] = world.animation_state_pool[i].getCurrentFrame();
-            texName = name;
-            srcRect = rect;
-        } else {
-            // Fallback: if animation flag is set but no state, treat as single texture
-            texName = texRef.resourceName;
-        }
-    } else {
-        texName = texRef.resourceName;
+    // Only entities with a TextureRef have a static fallback texture; an
+    // animation-only entity (AnimationState with no TextureRef) has none,
+    // and relies entirely on the clip's current frame image below.
+    if (world.has_texture_ref[i]) {
+        texName = world.texture_ref_pool[i].resourceName;
     }
 
-    if (texName.empty()) return; // <--- ADD THIS: skip if no texture name
+    // --- Prefer the animation clip's current frame image, if one exists ---
+    // Previously this block only pulled frameWidth/frameHeight from the clip
+    // and left texName/tex pointing at the static TextureRef, so Play/Stop
+    // (and the frame advancing done by animation_system) never changed what
+    // was actually drawn here -- only the Dialog's own preview did that.
+    // Selecting the current frame's image is what makes playback visible on
+    // the entity itself (e.g. from the Inspector).
+    if (world.has_animation_state[i]) {
+        const auto& anim = world.animation_state_pool[i];
+        const auto& clip = anim.active();
+        if (!clip.imageFrameResources.empty()) {
+            size_t frameIdx = (size_t)clip.currentFrame % clip.imageFrameResources.size();
+            const std::string& framePath = clip.imageFrameResources[frameIdx];
+            if (!framePath.empty()) {
+                tex = g_resources.TextureManager.Get(framePath);
+                if (!tex) {
+                    g_resources.TextureManager.Load(framePath, framePath);
+                    tex = g_resources.TextureManager.Get(framePath);
+                }
+                if (tex) texName = framePath;
+            }
+        }
+    }
 
-    tex = g_resources.TextureManager.Get(texName);
-    if (!tex) return;
+    if (!tex) {
+        if (texName.empty()) return false;
+        tex = g_resources.TextureManager.Get(texName);
+    }
+    if (!tex) return false;
 
 
     float tw, th;
@@ -5481,6 +5998,14 @@ inline void render_entity_texture(SDL_Renderer* renderer, const ECSWorld& world,
     float scaleX = world.has_scale[i] ? world.scale_pool[i].x : 1.0f;
     float scaleY = world.has_scale[i] ? world.scale_pool[i].y : 1.0f;
     float rot = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
+
+    // --- Override frame size from animation clip if available ---
+    if (world.has_animation_state[i]) {
+        const auto& anim = world.animation_state_pool[i];
+        const auto& clip = anim.active();
+        if (clip.frameWidth > 0.0f) tw = clip.frameWidth;
+        if (clip.frameHeight > 0.0f) th = clip.frameHeight;
+    }
 
     SDL_FRect dst = { screenX, screenY, tw * scaleX, th * scaleY };
     SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
@@ -5491,6 +6016,7 @@ inline void render_entity_texture(SDL_Renderer* renderer, const ECSWorld& world,
     } else {
         SDL_RenderTextureRotated(renderer, tex, nullptr, &dst, rot, &center, SDL_FLIP_NONE);
     }
+    return true;
 }
 
 inline void render_physics_shape_overlay(SDL_Renderer* renderer, const Components::PhysicsBodyDef& phys,
@@ -5743,13 +6269,17 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
         float centerX = screenX + w * 0.5f;
         float centerY = screenY + h * 0.5f;
 
-        // Render texture
-        if (world.has_texture_ref[i]) {
-            render_entity_texture(renderer, world, i, screenX, screenY);
+        // Render texture (static TextureRef, or an AnimationState's current
+        // frame image even when there's no TextureRef component at all).
+        // hasTexture reflects whether something was actually drawn, not just
+        // whether the component exists -- an AnimationState with no frames
+        // loaded yet should still fall back to the outline below.
+        bool hasTexture = false;
+        if (world.has_texture_ref[i] || world.has_animation_state[i]) {
+            hasTexture = render_entity_texture(renderer, world, i, screenX, screenY);
         }
 
         // Draw transformed outline (if no texture or selected)
-        bool hasTexture = world.has_texture_ref[i];
         bool isSelected = world.has_selection[i] && world.selection_pool[i].isSelected;
         if (!hasTexture || isSelected) {
             float rot = world.has_rotation[i] ? world.rotation_pool[i].degrees * (M_PI / 180.0f) : 0.0f;
@@ -5792,11 +6322,15 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
             render_transform_gizmo(renderer, centerX, centerY, true);
         }
 
+        // rot/sx/sy hoisted here (out of the physics-overlay `if` below) so the
+        // vertex-handle block further down can reuse the exact same values/transform
+        // instead of drawing handles that ignore rotation and scale.
+        float rot = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
+        float sx = world.has_scale[i] ? world.scale_pool[i].x : 1.0f;
+        float sy = world.has_scale[i] ? world.scale_pool[i].y : 1.0f;
+
         // Render physics overlay LAST (aside from metadata label and vertex handles)
         if (world.has_physics_body[i]) {
-            float rot = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
-            float sx = world.has_scale[i] ? world.scale_pool[i].x : 1.0f;
-            float sy = world.has_scale[i] ? world.scale_pool[i].y : 1.0f;
             render_physics_shape_overlay(renderer, world.physics_body_pool[i], centerX, centerY, rot, sx, sy);
         }
 
@@ -5805,21 +6339,39 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
             world.physics_body_pool[i].shapeType == Physics::ShapeType::Polygon) {
             auto& phys = world.physics_body_pool[i];
             if (!phys.polygonPoints.empty()) {
-                float entityX = world.position_pool[i].x;
-                float entityY = world.position_pool[i].y;
-                float screenX_ent = viewX + entityX - scrollX;
-                float screenY_ent = viewY + entityY - scrollY;
+                // IMPORTANT: polygonPoints are stored relative to the physics
+                // body's OWN width/height (phys.width/phys.height, edited via
+                // "phys_w"/"phys_h"), NOT the entity's rectangle-shape w/h
+                // (edited via "rect_w"/"rect_h", the `w`/`h` variables above).
+                // Those two sizes are independent fields and can differ, so
+                // using `w`/`h` here made the handles drift away from the
+                // actual polygon fill whenever the rectangle shape was resized
+                // without also resizing the physics body.
+                float hw = phys.width * 0.5f;
+                float hh = phys.height * 0.5f;
+                float rotRad = rot * 3.14159265f / 180.0f;
+                float cosR = cos(rotRad);
+                float sinR = sin(rotRad);
 
                 // Draw a small square (or circle) at each vertex
                 for (const auto& pt : phys.polygonPoints) {
-                    float vx = screenX_ent + pt.x;
-                    float vy = screenY_ent + pt.y;
+                    // Re-center like render_physics_shape_overlay does, then
+                    // apply the SAME scale-then-rotate transform, so handles
+                    // track the shape exactly instead of only the fill/outline doing so.
+                    float lx = pt.x - hw;
+                    float ly = pt.y - hh;
+                    float sxp = lx * sx;
+                    float syp = ly * sy;
+                    float rx = sxp * cosR - syp * sinR;
+                    float ry = sxp * sinR + syp * cosR;
+
+                    float vx = centerX + rx;
+                    float vy = centerY + ry;
+
                     SDL_FRect handleRect = { vx - 4.0f, vy - 4.0f, 8.0f, 8.0f };
 
-                    // Fill with cyan
                     SDL_SetRenderDrawColor(renderer, 0, 255, 255, 255);
                     SDL_RenderFillRect(renderer, &handleRect);
-                    // White border for contrast
                     SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
                     SDL_RenderRect(renderer, &handleRect);
                 }
@@ -5899,6 +6451,49 @@ const SDL_Event& e)
 
     const float kPolyPointPickRadius = 10.0f;
 
+    // ------------------------------------------------------------------
+    // Helper: convert world (canvas) coordinates to local polygon space
+    // ------------------------------------------------------------------
+    auto worldToLocalPolygon = [&](Entity ent, float wx, float wy) -> b2Vec2 {
+        if (ent >= world.entity_count) return {0,0};
+
+        // entity rectangle (used for center)
+        float rectW = world.has_rectangle_shape[ent] ? world.rectangle_shape_pool[ent].w : 50.0f;
+        float rectH = world.has_rectangle_shape[ent] ? world.rectangle_shape_pool[ent].h : 50.0f;
+        float posX = world.position_pool[ent].x;
+        float posY = world.position_pool[ent].y;
+        float centerX = posX + rectW * 0.5f;
+        float centerY = posY + rectH * 0.5f;
+
+        // rotation & scale
+        float rotDeg = world.has_rotation[ent] ? world.rotation_pool[ent].degrees : 0.0f;
+        float scaleX = world.has_scale[ent] ? world.scale_pool[ent].x : 1.0f;
+        float scaleY = world.has_scale[ent] ? world.scale_pool[ent].y : 1.0f;
+
+        // physics body half extents
+        auto& phys = world.physics_body_pool[ent];
+        float halfW = phys.width * 0.5f;
+        float halfH = phys.height * 0.5f;
+
+        // World → center‑relative
+        float dx = wx - centerX;
+        float dy = wy - centerY;
+
+        // Inverse rotation
+        float rad = -rotDeg * 3.14159265f / 180.0f;
+        float cosA = cos(rad);
+        float sinA = sin(rad);
+        float rx = dx * cosA - dy * sinA;
+        float ry = dx * sinA + dy * cosA;
+
+        // Inverse scale (guard against zero)
+        float sx = (fabs(scaleX) > 1e-6f) ? rx / scaleX : 0.0f;
+        float sy = (fabs(scaleY) > 1e-6f) ? ry / scaleY : 0.0f;
+
+        // Convert to top‑left relative
+        return { sx + halfW, sy + halfH };
+    };
+
     // --- Polygon point editing (left/right click) ---
     if (editor_isDrawingPolygon &&
         e.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
@@ -5913,13 +6508,14 @@ const SDL_Event& e)
             if (ent != (Entity)-1 && world.has_physics_body[ent]) {
                 auto& phys = world.physics_body_pool[ent];
                 if (phys.shapeType == Physics::ShapeType::Polygon) {
-                    b2Vec2 clickPt = { logicalX - world.position_pool[ent].x, logicalY - world.position_pool[ent].y };
+                    b2Vec2 clickPt = worldToLocalPolygon(ent, logicalX, logicalY);
 
                     if (e.button.button == SDL_BUTTON_LEFT) {
+                        // Close polygon if clicking near first point (and we have at least 3 points)
                         if (phys.polygonPoints.size() >= 3) {
                             float dx = clickPt.x - phys.polygonPoints.front().x;
                             float dy = clickPt.y - phys.polygonPoints.front().y;
-                            if (dx * dx + dy * dy <= kPolyPointPickRadius * kPolyPointPickRadius) {
+                            if (dx*dx + dy*dy <= kPolyPointPickRadius * kPolyPointPickRadius) {
                                 editor_isDrawingPolygon = false;
                                 return;
                             }
@@ -5932,7 +6528,7 @@ const SDL_Event& e)
                         for (size_t i = 0; i < phys.polygonPoints.size(); ++i) {
                             float dx = clickPt.x - phys.polygonPoints[i].x;
                             float dy = clickPt.y - phys.polygonPoints[i].y;
-                            float distSq = dx * dx + dy * dy;
+                            float distSq = dx*dx + dy*dy;
                             if (distSq <= nearestDistSq) {
                                 nearestDistSq = distSq;
                                 nearestIdx = (int)i;
@@ -5959,19 +6555,15 @@ const SDL_Event& e)
                 world.physics_body_pool[ent].shapeType == Physics::ShapeType::Polygon) {
 
                 auto& phys = world.physics_body_pool[ent];
-                float entityX = world.position_pool[ent].x;
-                float entityY = world.position_pool[ent].y;
-
                 float logicalX = mx - canvasViewX + editorScrollX;
                 float logicalY = my - canvasViewY + editorScrollY;
-                float localX = logicalX - entityX;
-                float localY = logicalY - entityY;
+                b2Vec2 localPt = worldToLocalPolygon(ent, logicalX, logicalY);
 
                 int nearestIdx = -1;
                 float nearestDistSq = kPolyPointPickRadius * kPolyPointPickRadius;
                 for (size_t i = 0; i < phys.polygonPoints.size(); ++i) {
-                    float dx = localX - phys.polygonPoints[i].x;
-                    float dy = localY - phys.polygonPoints[i].y;
+                    float dx = localPt.x - phys.polygonPoints[i].x;
+                    float dy = localPt.y - phys.polygonPoints[i].y;
                     float d2 = dx*dx + dy*dy;
                     if (d2 < nearestDistSq) {
                         nearestDistSq = d2;
@@ -6002,12 +6594,11 @@ const SDL_Event& e)
 
                     float logicalX = e.motion.x - canvasViewX + editorScrollX;
                     float logicalY = e.motion.y - canvasViewY + editorScrollY;
-                    float entityX = world.position_pool[ent].x;
-                    float entityY = world.position_pool[ent].y;
+                    b2Vec2 newLocal = worldToLocalPolygon(ent, logicalX, logicalY);
 
-                    phys.polygonPoints[vertexDrag.vertexIndex].x = logicalX - entityX;
-                    phys.polygonPoints[vertexDrag.vertexIndex].y = logicalY - entityY;
+                    phys.polygonPoints[vertexDrag.vertexIndex] = newLocal;
 
+                    // Update drag start to avoid jumping
                     vertexDrag.startMouseX = e.motion.x;
                     vertexDrag.startMouseY = e.motion.y;
                 }
@@ -6519,7 +7110,6 @@ public:
                     scene.world.add_texture_ref(id);
                     auto& tex = scene.world.texture_ref_pool[id];
                     tex.resourceName = comps["TextureRef"].value("resourceName", "");
-                    tex.isAnimation = comps["TextureRef"].value("isAnimation", false);
                 }
                 // --- NEW: SfxEmitter ---
                 if (comps.contains("SfxEmitter")) {
@@ -6531,55 +7121,75 @@ public:
                     sfx.speed = comps["SfxEmitter"].value("speed", 1.0f);
                     sfx.playOnCollision = comps["SfxEmitter"].value("playOnCollision", false);
                 }
-                // --- NEW: PhysicsBody ---
+                // --- PhysicsBody ---
+                // New format: a plain string filename pointing at a shared
+                // .physicsres resource. assign_physics_resource() reuses the
+                // cached shared_ptr if some earlier entity in this same load
+                // already pulled in that exact file, so the file is only
+                // actually read + parsed once no matter how many entities
+                // reference it.
                 if (comps.contains("PhysicsBody")) {
                     scene.world.add_physics_body(id);
-                    auto& phys = scene.world.physics_body_pool[id];
-                    phys.shapeType = (Physics::ShapeType)comps["PhysicsBody"].value("shapeType", (int)Physics::ShapeType::Rectangle);
-                    phys.bodyType  = (b2BodyType)comps["PhysicsBody"].value("bodyType", (int)b2_dynamicBody);
-                    phys.width     = comps["PhysicsBody"].value("width", 50.0f);
-                    phys.height    = comps["PhysicsBody"].value("height", 50.0f);
-                    phys.radius    = comps["PhysicsBody"].value("radius", 25.0f);
-                    phys.density   = comps["PhysicsBody"].value("density", 1.0f);
-                    phys.isSensor  = comps["PhysicsBody"].value("isSensor", false);
-                    phys.category  = comps["PhysicsBody"].value("category", (uint16_t)Physics::LAYER_1);
-                    phys.mask      = comps["PhysicsBody"].value("mask", (uint16_t)Physics::LAYER_ALL);
-                    phys.polygonPoints.clear();
-                    if (comps["PhysicsBody"].contains("polygonPoints") && comps["PhysicsBody"]["polygonPoints"].is_array()) {
-                        for (const auto& pt : comps["PhysicsBody"]["polygonPoints"]) {
-                            phys.polygonPoints.push_back({pt.value("x", 0.0f), pt.value("y", 0.0f)});
+                    const auto& pb = comps["PhysicsBody"];
+                    if (pb.is_string()) {
+                        std::string resPath = resolveComponentResourcePath(projects_root, pb.get<std::string>());
+                        try {
+                            scene.world.assign_physics_resource(id, resPath);
+                        } catch (const std::exception& e) {
+                            std::cerr << "[SceneParser] " << e.what() << "\n";
+                        }
+                    } else {
+                        // Legacy format: full inline PhysicsBody JSON, kept so
+                        // scene files saved before .physicsres existed still load.
+                        auto& phys = scene.world.physics_body_pool[id];
+                        phys.shapeType = (Physics::ShapeType)pb.value("shapeType", (int)Physics::ShapeType::Rectangle);
+                        phys.bodyType  = (b2BodyType)pb.value("bodyType", (int)b2_dynamicBody);
+                        phys.width     = pb.value("width", 50.0f);
+                        phys.height    = pb.value("height", 50.0f);
+                        phys.radius    = pb.value("radius", 25.0f);
+                        phys.density   = pb.value("density", 1.0f);
+                        phys.isSensor  = pb.value("isSensor", false);
+                        phys.category  = pb.value("category", (uint16_t)Physics::LAYER_1);
+                        phys.mask      = pb.value("mask", (uint16_t)Physics::LAYER_ALL);
+                        phys.polygonPoints.clear();
+                        if (pb.contains("polygonPoints") && pb["polygonPoints"].is_array()) {
+                            for (const auto& pt : pb["polygonPoints"])
+                                phys.polygonPoints.push_back({pt.value("x", 0.0f), pt.value("y", 0.0f)});
                         }
                     }
                     // bodyId remains null – will be re-created by physics_sync_system
                 }
-                // --- AnimationState (simplified, only image frames) ---
+                // --- AnimationState ---
+                // Same idea: a plain string filename means a shared .animres
+                // resource; assign_animation_resource() dedupes the load
+                // across entities. An inline object is still accepted for
+                // backward compatibility with older scene files.
                 if (comps.contains("AnimationState")) {
                     if (!scene.world.has_animation_state[id]) scene.world.add_animation_state(id);
-                    auto& anim = scene.world.animation_state_pool[id];
-                    // Check for new format with clips array
-                    if (comps["AnimationState"].contains("clips") && comps["AnimationState"]["clips"].is_array()) {
+                    const auto& as = comps["AnimationState"];
+                    if (as.is_string()) {
+                        std::string resPath = resolveComponentResourcePath(projects_root, as.get<std::string>());
+                        try {
+                            scene.world.assign_animation_resource(id, resPath);
+                        } catch (const std::exception& e) {
+                            std::cerr << "[SceneParser] " << e.what() << "\n";
+                        }
+                    } else if (as.contains("clips") && as["clips"].is_array()) {
+                        auto& anim = scene.world.animation_state_pool[id];
                         anim.clips.clear();
-                        for (const auto& clipJson : comps["AnimationState"]["clips"]) {
+                        for (const auto& clipJson : as["clips"]) {
                             Components::AnimationClip clip;
                             clip.name = clipJson.value("name", "default");
                             clip.speed = clipJson.value("speed", 10.0f);
                             clip.isPlaying = clipJson.value("isPlaying", true);
                             clip.imageFrameResources = clipJson.value("imageFrames", std::vector<std::string>());
+                            clip.frameWidth = clipJson.value("frameWidth", 0.0f);
+                            clip.frameHeight = clipJson.value("frameHeight", 0.0f);
                             anim.clips.push_back(std::move(clip));
                         }
-                        anim.activeClipIndex = comps["AnimationState"].value("activeClipIndex", 0);
+                        anim.activeClipIndex = as.value("activeClipIndex", 0);
                         if (anim.activeClipIndex < 0 || anim.activeClipIndex >= (int)anim.clips.size())
                             anim.activeClipIndex = 0;
-                    } else {
-                        // Old format: single clip
-                        Components::AnimationClip clip;
-                        clip.name = "default";
-                        clip.speed = comps["AnimationState"].value("speed", 10.0f);
-                        clip.isPlaying = comps["AnimationState"].value("isPlaying", true);
-                        clip.imageFrameResources = comps["AnimationState"]["imageFrames"].get<std::vector<std::string>>();
-                        anim.clips.clear();
-                        anim.clips.push_back(std::move(clip));
-                        anim.activeClipIndex = 0;
                     }
                 }
             }
@@ -6691,7 +7301,6 @@ public:
                     scene.world.add_texture_ref(id);
                     auto& tex = scene.world.texture_ref_pool[id];
                     tex.resourceName = comps["TextureRef"].value("resourceName", "");
-                    tex.isAnimation = comps["TextureRef"].value("isAnimation", false);
                 }
                 // --- NEW: SfxEmitter ---
                 if (comps.contains("SfxEmitter")) {
@@ -6703,55 +7312,74 @@ public:
                     sfx.speed = comps["SfxEmitter"].value("speed", 1.0f);
                     sfx.playOnCollision = comps["SfxEmitter"].value("playOnCollision", false);
                 }
-                // --- NEW: PhysicsBody ---
+                // --- PhysicsBody ---
+                // New format: a plain string filename pointing at a shared
+                // .physicsres resource (resolved against the compiled
+                // project's root, same convention used for scriptAttached
+                // above). assign_physics_resource() dedupes the load across
+                // entities via ComponentResourceManager.
                 if (comps.contains("PhysicsBody")) {
                     scene.world.add_physics_body(id);
-                    auto& phys = scene.world.physics_body_pool[id];
-                    phys.shapeType = (Physics::ShapeType)comps["PhysicsBody"].value("shapeType", (int)Physics::ShapeType::Rectangle);
-                    phys.bodyType  = (b2BodyType)comps["PhysicsBody"].value("bodyType", (int)b2_dynamicBody);
-                    phys.width     = comps["PhysicsBody"].value("width", 50.0f);
-                    phys.height    = comps["PhysicsBody"].value("height", 50.0f);
-                    phys.radius    = comps["PhysicsBody"].value("radius", 25.0f);
-                    phys.density   = comps["PhysicsBody"].value("density", 1.0f);
-                    phys.isSensor  = comps["PhysicsBody"].value("isSensor", false);
-                    phys.category  = comps["PhysicsBody"].value("category", (uint16_t)Physics::LAYER_1);
-                    phys.mask      = comps["PhysicsBody"].value("mask", (uint16_t)Physics::LAYER_ALL);
-                    phys.polygonPoints.clear();
-                    if (comps["PhysicsBody"].contains("polygonPoints") && comps["PhysicsBody"]["polygonPoints"].is_array()) {
-                        for (const auto& pt : comps["PhysicsBody"]["polygonPoints"]) {
-                            phys.polygonPoints.push_back({pt.value("x", 0.0f), pt.value("y", 0.0f)});
+                    const auto& pb = comps["PhysicsBody"];
+                    if (pb.is_string()) {
+                        std::string resPath = (getProjectsRootForScripts() / std::filesystem::path(pb.get<std::string>())).string();
+                        try {
+                            scene.world.assign_physics_resource(id, resPath);
+                        } catch (const std::exception& e) {
+                            std::cerr << "[SceneParser] " << e.what() << "\n";
+                        }
+                    } else {
+                        // Legacy format: full inline PhysicsBody JSON, kept so
+                        // scene files saved before .physicsres existed still load.
+                        auto& phys = scene.world.physics_body_pool[id];
+                        phys.shapeType = (Physics::ShapeType)pb.value("shapeType", (int)Physics::ShapeType::Rectangle);
+                        phys.bodyType  = (b2BodyType)pb.value("bodyType", (int)b2_dynamicBody);
+                        phys.width     = pb.value("width", 50.0f);
+                        phys.height    = pb.value("height", 50.0f);
+                        phys.radius    = pb.value("radius", 25.0f);
+                        phys.density   = pb.value("density", 1.0f);
+                        phys.isSensor  = pb.value("isSensor", false);
+                        phys.category  = pb.value("category", (uint16_t)Physics::LAYER_1);
+                        phys.mask      = pb.value("mask", (uint16_t)Physics::LAYER_ALL);
+                        phys.polygonPoints.clear();
+                        if (pb.contains("polygonPoints") && pb["polygonPoints"].is_array()) {
+                            for (const auto& pt : pb["polygonPoints"])
+                                phys.polygonPoints.push_back({pt.value("x", 0.0f), pt.value("y", 0.0f)});
                         }
                     }
                     // bodyId remains null – will be re-created by physics_sync_system
                 }
-                // --- AnimationState (simplified, only image frames) ---
+                // --- AnimationState ---
+                // Same idea: a plain string filename means a shared .animres
+                // resource; assign_animation_resource() dedupes the load
+                // across entities. An inline object is still accepted for
+                // backward compatibility with older scene files.
                 if (comps.contains("AnimationState")) {
                     if (!scene.world.has_animation_state[id]) scene.world.add_animation_state(id);
-                    auto& anim = scene.world.animation_state_pool[id];
-                    // Check for new format with clips array
-                    if (comps["AnimationState"].contains("clips") && comps["AnimationState"]["clips"].is_array()) {
+                    const auto& as = comps["AnimationState"];
+                    if (as.is_string()) {
+                        std::string resPath = (getProjectsRootForScripts() / std::filesystem::path(as.get<std::string>())).string();
+                        try {
+                            scene.world.assign_animation_resource(id, resPath);
+                        } catch (const std::exception& e) {
+                            std::cerr << "[SceneParser] " << e.what() << "\n";
+                        }
+                    } else if (as.contains("clips") && as["clips"].is_array()) {
+                        auto& anim = scene.world.animation_state_pool[id];
                         anim.clips.clear();
-                        for (const auto& clipJson : comps["AnimationState"]["clips"]) {
+                        for (const auto& clipJson : as["clips"]) {
                             Components::AnimationClip clip;
                             clip.name = clipJson.value("name", "default");
                             clip.speed = clipJson.value("speed", 10.0f);
                             clip.isPlaying = clipJson.value("isPlaying", true);
                             clip.imageFrameResources = clipJson.value("imageFrames", std::vector<std::string>());
+                            clip.frameWidth = clipJson.value("frameWidth", 0.0f);
+                            clip.frameHeight = clipJson.value("frameHeight", 0.0f);
                             anim.clips.push_back(std::move(clip));
                         }
-                        anim.activeClipIndex = comps["AnimationState"].value("activeClipIndex", 0);
+                        anim.activeClipIndex = as.value("activeClipIndex", 0);
                         if (anim.activeClipIndex < 0 || anim.activeClipIndex >= (int)anim.clips.size())
                             anim.activeClipIndex = 0;
-                    } else {
-                        // Old format: single clip
-                        Components::AnimationClip clip;
-                        clip.name = "default";
-                        clip.speed = comps["AnimationState"].value("speed", 10.0f);
-                        clip.isPlaying = comps["AnimationState"].value("isPlaying", true);
-                        clip.imageFrameResources = comps["AnimationState"]["imageFrames"].get<std::vector<std::string>>();
-                        anim.clips.clear();
-                        anim.clips.push_back(std::move(clip));
-                        anim.activeClipIndex = 0;
                     }
                 }
             }
@@ -6770,7 +7398,12 @@ public:
     // ==========================================
     // SAVE SCENE
     // ==========================================
-    void saveToFile(const Scene& scene, const std::string& filepath) {
+    void saveToFile(Scene& scene, const std::string& filepath) {
+        // Fresh de-dupe pass: each unique .animres/.physicsres path this
+        // scene references gets written to disk at most once below, no
+        // matter how many entities share it.
+        g_componentResources.beginSavePass();
+
         nlohmann::json j;
         j["scene_name"]      = scene.name;
         j["script_attached"] = scene.scriptAttached;
@@ -6809,7 +7442,6 @@ public:
             if (scene.world.has_texture_ref[i]) {
                 auto& tex = scene.world.texture_ref_pool[i];
                 comps["TextureRef"]["resourceName"] = tex.resourceName;
-                comps["TextureRef"]["isAnimation"] = tex.isAnimation;
             }
 
             if (scene.world.has_sfx_emitter[i]) {
@@ -6823,36 +7455,38 @@ public:
 
             if (scene.world.has_animation_state[i]) {
                 auto& anim = scene.world.animation_state_pool[i];
-                nlohmann::json clipsJson = nlohmann::json::array();
-                for (const auto& clip : anim.clips) {
-                    nlohmann::json clipJson;
-                    clipJson["name"] = clip.name;
-                    clipJson["speed"] = clip.speed;
-                    clipJson["isPlaying"] = clip.isPlaying;
-                    clipJson["imageFrames"] = clip.imageFrameResources;
-                    clipsJson.push_back(std::move(clipJson));
+                std::string& resPath = scene.world.animation_resource_path[i];
+                if (resPath.empty()) {
+                    // Never been saved to a resource file before (e.g. the
+                    // component was just added in-editor). Give it one of
+                    // its own; the path is stored back onto the entity so
+                    // every later save reuses this same file instead of
+                    // generating a new one each time.
+                    std::string label = scene.world.has_metadata[i] ? scene.world.metadata_pool[i].name : "";
+                    if (label.empty()) label = "entity";
+                    resPath = "resources/" + label + "_" + std::to_string(i) + ".animres";
                 }
-                comps["AnimationState"]["clips"] = std::move(clipsJson);
-                comps["AnimationState"]["activeClipIndex"] = anim.activeClipIndex;
+                std::string fullResPath = resolveComponentResourcePath(projects_root, resPath);
+                std::filesystem::create_directories(std::filesystem::path(fullResPath).parent_path());
+                // Writes to disk only once per unique path per save pass —
+                // if another entity already saved this exact file this
+                // pass, this is a no-op.
+                g_componentResources.saveAnimation(fullResPath, anim);
+                comps["AnimationState"] = resPath; // store the filename, not inline JSON
             }
 
             if (scene.world.has_physics_body[i]) {
                 auto& phys = scene.world.physics_body_pool[i];
-                comps["PhysicsBody"]["shapeType"] = (int)phys.shapeType;
-                comps["PhysicsBody"]["bodyType"]  = (int)phys.bodyType;
-                comps["PhysicsBody"]["width"]     = phys.width;
-                comps["PhysicsBody"]["height"]    = phys.height;
-                comps["PhysicsBody"]["radius"]    = phys.radius;
-                comps["PhysicsBody"]["density"]   = phys.density;
-                comps["PhysicsBody"]["isSensor"]  = phys.isSensor;
-                comps["PhysicsBody"]["category"]  = phys.category;
-                comps["PhysicsBody"]["mask"]      = phys.mask;
-                // Save polygon points as array of {x,y}
-                nlohmann::json pts = nlohmann::json::array();
-                for (const auto& p : phys.polygonPoints) {
-                    pts.push_back({{"x", p.x}, {"y", p.y}});
+                std::string& resPath = scene.world.physics_resource_path[i];
+                if (resPath.empty()) {
+                    std::string label = scene.world.has_metadata[i] ? scene.world.metadata_pool[i].name : "";
+                    if (label.empty()) label = "entity";
+                    resPath = "resources/" + label + "_" + std::to_string(i) + ".physicsres";
                 }
-                comps["PhysicsBody"]["polygonPoints"] = pts;
+                std::string fullResPath = resolveComponentResourcePath(projects_root, resPath);
+                std::filesystem::create_directories(std::filesystem::path(fullResPath).parent_path());
+                g_componentResources.savePhysics(fullResPath, phys);
+                comps["PhysicsBody"] = resPath; // store the filename, not inline JSON
             }
 
             entitiesJson.push_back({{"components", comps}});

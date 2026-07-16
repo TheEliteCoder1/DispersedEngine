@@ -588,6 +588,12 @@ int main(int argc, char* argv[]) {
             confirmLastFrame = confirmNow;
         }
 
+        // Advance animation clips every frame. This runs unconditionally
+        // (not just in some future "play-test" mode) so that toggling
+        // Play/Stop in the Inspector is visible immediately while editing,
+        // rather than requiring a separate runtime/play mode.
+        animation_system(world, delta_time);
+
         if (selectedEntity != (Entity)-1) {
             if (selectedEntity >= world.entity_count || !world.has_position[selectedEntity]) {
                 selectedEntity = (Entity)-1;

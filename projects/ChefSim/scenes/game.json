@@ -2,38 +2,46 @@
     "entities": [
         {
             "components": {
-                "AnimationState": {
-                    "activeClipIndex": 0,
-                    "clips": [
-                        {
-                            "imageFrames": [
-                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\cpp_icon.svg",
-                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\file_icon.svg",
-                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\folder_icon.svg",
-                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\h_icon.svg",
-                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\icon.svg",
-                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\music_icon.svg",
-                                "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\scene_icon.svg"
-                            ],
-                            "isPlaying": true,
-                            "name": "default",
-                            "speed": 10.0
-                        }
-                    ]
-                },
+                "AnimationState": "../../../projects/../../../projects/resources/player_0.animres",
                 "Metadata": {
-                    "name": "d"
+                    "name": "player"
                 },
+                "PhysicsBody": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\testphysicsbody.physicsres",
                 "Position": {
-                    "x": 645.0,
-                    "y": 395.0
+                    "x": 748.0,
+                    "y": 329.5
                 },
                 "RectangleShape": {
-                    "h": 50.0,
-                    "w": 50.0
+                    "h": 200.0,
+                    "w": 100.0
                 },
                 "ZIndex": {
-                    "z": 1
+                    "z": 2
+                }
+            }
+        },
+        {
+            "components": {
+                "Metadata": {
+                    "name": "Dog"
+                },
+                "PhysicsBody": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\testphysicsbody.physicsres",
+                "Position": {
+                    "x": 1013.0,
+                    "y": 306.5
+                },
+                "RectangleShape": {
+                    "h": 128.0,
+                    "w": 126.0
+                },
+                "Rotation": {
+                    "degrees": -0.5
+                },
+                "TextureRef": {
+                    "resourceName": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\ChefSim\\assets\\icon.svg"
+                },
+                "ZIndex": {
+                    "z": 3
                 }
             }
         }
