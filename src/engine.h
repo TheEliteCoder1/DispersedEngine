@@ -146,7 +146,13 @@ inline std::string resolveComponentResourcePath(const std::string& projectsRoot,
     if (storedPath.empty()) return storedPath;
     std::filesystem::path p(storedPath);
     if (p.is_absolute()) return storedPath;
-    return projectsRoot + storedPath;
+    // Use filesystem path joining (not raw string concatenation) so a
+    // missing separator between projectsRoot and storedPath can't glue the
+    // two together (e.g. ".../ChefSim" + "resources/x.animres" becoming
+    // ".../ChefSimresources/x.animres"), and normalize away any stray ".."
+    // segments so repeated resolve/store round-trips can't pile up into
+    // paths like "ChefSim../../../projects/../../../projects/...".
+    return (std::filesystem::path(projectsRoot) / p).lexically_normal().string();
 }
 
 using Entity = uint32_t;
@@ -409,6 +415,35 @@ inline std::string canonicalComponentResourcePath(const std::string& filepath) {
     return ec ? filepath : canon.string();
 }
 
+// Resolves every per-frame image path inside an AnimationState's clips
+// against the project root, same convention as .animres/.physicsres/
+// TextureRef paths. Call this right after parsing an .animres file (or a
+// scene's inline legacy AnimationState block) so the in-memory frame paths
+// are always real, loadable filesystem paths -- TextureManager loads them
+// directly with no resolution step of its own.
+inline void resolveAnimationFramePaths(Components::AnimationState& anim, const std::string& projectRoot) {
+    for (auto& clip : anim.clips)
+        for (auto& frame : clip.imageFrameResources)
+            frame = resolveComponentResourcePath(projectRoot, frame);
+}
+
+// Inverse of resolveAnimationFramePaths: turns each frame's absolute
+// in-memory path back into one relative to the project root before it's
+// written out to disk, so .animres files (and scenes using the legacy
+// inline format) stay portable instead of baking in one machine's absolute
+// folder layout. Operates on a copy the caller passes in -- never call
+// this on the entity's live AnimationState, since rendering needs the
+// absolute in-memory paths to keep working.
+inline void relativizeAnimationFramePaths(Components::AnimationState& anim, const std::string& projectRoot) {
+    for (auto& clip : anim.clips) {
+        for (auto& frame : clip.imageFrameResources) {
+            if (frame.empty()) continue;
+            std::string rel = std::filesystem::relative(frame, projectRoot).string();
+            if (!rel.empty()) frame = rel; // fallback: keep absolute if relative() fails
+        }
+    }
+}
+
 // ============================================================
 // ComponentResourceManager
 // ------------------------------------------------------------
@@ -437,7 +472,7 @@ public:
     // .animres filepath. A second/third/Nth caller with the same filepath
     // gets the exact same shared_ptr instance back — no disk I/O, no
     // re-parse.
-    std::shared_ptr<Components::AnimationState> loadAnimation(const std::string& filepath) {
+    std::shared_ptr<Components::AnimationState> loadAnimation(const std::string& filepath, const std::string& projectRoot = "") {
         std::string key = canonicalKey(filepath);
         auto it = animationCache.find(key);
         if (it != animationCache.end()) return it->second;
@@ -449,6 +484,7 @@ public:
         in >> j;
 
         auto anim = std::make_shared<Components::AnimationState>(parseAnimationJson(j));
+        resolveAnimationFramePaths(*anim, projectRoot);
         animationCache[key] = anim;
         return anim;
     }
@@ -476,15 +512,21 @@ public:
     // beginSavePass()). Every later entity sharing the same path is a
     // no-op write, since the file on disk would end up byte-identical
     // anyway — this is where "reduced save times" actually comes from.
-    void saveAnimation(const std::string& filepath, const Components::AnimationState& data) {
+    void saveAnimation(const std::string& filepath, const Components::AnimationState& data, const std::string& projectRoot = "") {
         std::string key = canonicalKey(filepath);
         if (writtenThisPass.count(key)) return;
         writtenThisPass.insert(key);
 
+        // Relativize a COPY for the on-disk JSON; the cache (and thus every
+        // entity sharing this resource) keeps the absolute in-memory paths
+        // TextureManager needs to actually load the frames.
+        Components::AnimationState toSave = data;
+        relativizeAnimationFramePaths(toSave, projectRoot);
+
         std::ofstream out(filepath);
         if (!out.is_open())
             throw std::runtime_error("ComponentResourceManager: cannot write animation resource '" + filepath + "'");
-        out << serializeAnimationJson(data).dump(4);
+        out << serializeAnimationJson(toSave).dump(4);
 
         // Refresh the cache so a load() later in the same run sees the
         // freshly saved data instead of a stale copy.
@@ -797,9 +839,9 @@ struct ECSWorld {
     // returns its cached shared_ptr); only a cheap in-memory copy into this
     // entity's pool slot happens here. `filepath` should already be a
     // resolved filesystem path (see resolveComponentResourcePath).
-    void assign_animation_resource(Entity id, const std::string& filepath) {
+    void assign_animation_resource(Entity id, const std::string& filepath, const std::string& projectRoot = "") {
         if (id >= entity_count) return;
-        auto shared = g_componentResources.loadAnimation(filepath);
+        auto shared = g_componentResources.loadAnimation(filepath, projectRoot);
         animation_state_pool[id] = *shared;
         animation_resource_path[id] = filepath;
         has_animation_state[id] = 1;
@@ -2502,6 +2544,11 @@ namespace Gui {
         void setCallback(std::function<void(const std::string&)> cb) { callback = cb; }
         void setFilter(const std::string& f) { filter = f; }
 
+        void setCurrentPath(const std::string& path) {
+            currentPath = path;
+            refreshEntries();
+        }
+
         void goToRoot() {
             currentPath = rootPath;
             refreshEntries();
@@ -2641,6 +2688,48 @@ namespace Gui {
                 }
                 return true; // Consume all other events while confirming
             }
+            // --- Save-mode "overwrite existing file?" confirmation ---
+            // Double-clicking an existing entry while the Save dialog is open
+            // lands here instead of immediately saving over it (see the list
+            // interaction handling below), so the user gets a Yes/No check
+            // just like deleting, and the filename field is already filled
+            // in either way -- no retyping needed if they say No.
+            if (showOverwriteConfirmation) {
+                if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                    float mx = ev.button.x, my = ev.button.y;
+                    SDL_FRect win = animRect();
+                    float boxW = 320.0f, boxH = 120.0f;
+                    float boxX = win.x + (win.w - boxW) * 0.5f;
+                    float boxY = win.y + (win.h - boxH) * 0.5f;
+                    SDL_FRect yesBtn = { boxX + 20.0f, boxY + boxH - 50.0f, 130.0f, 36.0f };
+                    SDL_FRect noBtn  = { boxX + boxW - 150.0f, boxY + boxH - 50.0f, 130.0f, 36.0f };
+
+                    if (mx >= yesBtn.x && mx <= yesBtn.x + yesBtn.w && my >= yesBtn.y && my <= yesBtn.y + yesBtn.h) {
+                        if (overwriteIndex >= 0 && overwriteIndex < (int)entries.size() && callback) {
+                            std::string fullPath = (std::filesystem::path(currentPath) / entries[overwriteIndex]).string();
+                            callback(fullPath);
+                        }
+                        showOverwriteConfirmation = false;
+                        return true;
+                    }
+                    if (mx >= noBtn.x && mx <= noBtn.x + noBtn.w && my >= noBtn.y && my <= noBtn.y + noBtn.h) {
+                        showOverwriteConfirmation = false;
+                        return true;
+                    }
+                }
+                if (ev.type == SDL_EVENT_KEY_DOWN) {
+                    if (ev.key.key == SDLK_ESCAPE) { showOverwriteConfirmation = false; return true; }
+                    if (ev.key.key == SDLK_RETURN) {
+                        if (overwriteIndex >= 0 && overwriteIndex < (int)entries.size() && callback) {
+                            std::string fullPath = (std::filesystem::path(currentPath) / entries[overwriteIndex]).string();
+                            callback(fullPath);
+                        }
+                        showOverwriteConfirmation = false;
+                        return true;
+                    }
+                }
+                return true; // Consume all other events while confirming
+            }
             // --- NEW: Handle Active Rename Mode ---
             if (isRenaming) {
                 bool wasActive = renameEdit.isActive();
@@ -2757,8 +2846,18 @@ namespace Gui {
                         if (isDir[idx]) {
                             goToDirectory(entries[idx]);
                         } else if (ev.button.clicks >= 2) {
-                            selectedFilePath = (std::filesystem::path(currentPath) / entries[idx]).string();
-                            selectFile(entries[idx]);
+                            if (saveMode) {
+                                // Pre-fill the filename regardless of the user's
+                                // eventual choice, so hitting "No" still leaves
+                                // the Save dialog ready to go without retyping.
+                                filenameEdit.clear();
+                                for (char c : entries[idx]) filenameEdit.appendText(std::string(1, c));
+                                showOverwriteConfirmation = true;
+                                overwriteIndex = idx;
+                            } else {
+                                selectedFilePath = (std::filesystem::path(currentPath) / entries[idx]).string();
+                                selectFile(entries[idx]);
+                            }
                         }
                         return true;
                     }
@@ -2985,6 +3084,43 @@ namespace Gui {
                 SDL_RenderFillRect(renderer, &noBtn);
                 drawText("No", noBtn.x + 48.0f, noBtn.y + 8.0f, {255, 255, 255, 255});
             }
+            if (showOverwriteConfirmation) {
+                SDL_FRect win = animRect();
+                float boxW = 320.0f, boxH = 120.0f;
+                float boxX = win.x + (win.w - boxW) * 0.5f;
+                float boxY = win.y + (win.h - boxH) * 0.5f;
+
+                // Darken background
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 150);
+                SDL_RenderFillRect(renderer, &win);
+
+                // Dialog Box
+                SDL_SetRenderDrawColor(renderer, 40, 40, 50, 240);
+                SDL_FRect box = { boxX, boxY, boxW, boxH };
+                SDL_RenderFillRect(renderer, &box);
+                SDL_SetRenderDrawColor(renderer, 100, 100, 130, 255);
+                SDL_RenderRect(renderer, &box);
+
+                // Message Text
+                std::string msg = "Overwrite '" + (overwriteIndex >= 0 && overwriteIndex < (int)entries.size() ? entries[overwriteIndex] : "") + "'?";
+                drawText(msg.c_str(), boxX + 20.0f, boxY + 20.0f, {255, 255, 255, 255});
+
+                // Buttons
+                SDL_FRect yesBtn = { boxX + 20.0f, boxY + boxH - 50.0f, 130.0f, 36.0f };
+                SDL_FRect noBtn  = { boxX + boxW - 150.0f, boxY + boxH - 50.0f, 130.0f, 36.0f };
+
+                float mx, my; SDL_GetMouseState(&mx, &my);
+
+                bool hoverYes = (mx >= yesBtn.x && mx <= yesBtn.x + yesBtn.w && my >= yesBtn.y && my <= yesBtn.y + yesBtn.h);
+                SDL_SetRenderDrawColor(renderer, hoverYes ? 220 : 180, 60, 60, 255);
+                SDL_RenderFillRect(renderer, &yesBtn);
+                drawText("Yes", yesBtn.x + 48.0f, yesBtn.y + 8.0f, {255, 255, 255, 255});
+
+                bool hoverNo2 = (mx >= noBtn.x && mx <= noBtn.x + noBtn.w && my >= noBtn.y && my <= noBtn.y + noBtn.h);
+                SDL_SetRenderDrawColor(renderer, hoverNo2 ? 100 : 80, 100, 120, 255);
+                SDL_RenderFillRect(renderer, &noBtn);
+                drawText("No", noBtn.x + 53.0f, noBtn.y + 8.0f, {255, 255, 255, 255});
+            }
         }
 
         void onReset() override {
@@ -2993,6 +3129,8 @@ namespace Gui {
             pathEdit.clear();
             pathEdit.deactivate(window);
             showContextMenu = false;
+            showDeleteConfirmation = false;
+            showOverwriteConfirmation = false;
         }
 
     public:
@@ -3051,6 +3189,8 @@ namespace Gui {
         int renameIndex = -1;
         bool showDeleteConfirmation = false;
         int deleteIndex = -1;
+        bool showOverwriteConfirmation = false;
+        int overwriteIndex = -1;
 
 
         // --------------------------------------------------------------
@@ -3774,6 +3914,11 @@ namespace Gui {
             syncFromTarget();
         }
 
+        // Must be called (e.g. right alongside setTarget()) before
+        // load/saveResource() so frame image paths can be resolved/
+        // relativized against the right project folder.
+        void setProjectRoot(const std::string& root) { projectRoot = root; }
+
         bool onHandleGamepad(float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame) override {
             // Delegate to interactive widgets; return true if consumed.
             bool consumed = false;
@@ -3936,11 +4081,16 @@ namespace Gui {
         }
 
     public:
-        std::function<void()> onResourceLoaded;
+        // Fires with the full filesystem path of the .animres file that was
+        // just loaded from or saved to disk, so the owner (EntityInspector)
+        // can record it on the entity -- mirrors how the Physics Resource
+        // Load/Save buttons compute and store their own relative path.
+        std::function<void(const std::string&)> onResourceLoaded;
 
     private:
         Components::AnimationState* target = nullptr;
         Gui::FileExplorer& fileExplorer;
+        std::string projectRoot; // set via setProjectRoot(); used to resolve/relativize frame image paths
 
         // Clip management widgets
         Gui::OptionSpinBox clipSelector;
@@ -4103,8 +4253,9 @@ namespace Gui {
                     nlohmann::json j;
                     f >> j;
                     *target = ComponentResourceManager::parseAnimationJson(j);
+                    resolveAnimationFramePaths(*target, projectRoot);
                     syncFromTarget();
-                    if (onResourceLoaded) onResourceLoaded();
+                    if (onResourceLoaded) onResourceLoaded(path);
                 } catch (const std::exception& e) {
                     SDL_Log("Error loading animation resource: %s", e.what());
                 }
@@ -4119,11 +4270,17 @@ namespace Gui {
             fileExplorer.setSaveMode(true, ".animres");
             fileExplorer.setCallback([this](const std::string& path) {
                 try {
-                    nlohmann::json j = ComponentResourceManager::serializeAnimationJson(*target);
+                    // Relativize a copy for the on-disk file; *target keeps
+                    // absolute paths so rendering keeps working immediately
+                    // after this save, with no reload needed.
+                    Components::AnimationState toSave = *target;
+                    relativizeAnimationFramePaths(toSave, projectRoot);
+                    nlohmann::json j = ComponentResourceManager::serializeAnimationJson(toSave);
                     std::ofstream out(path);
                     if (out.is_open()) {
                         out << j.dump(4);
                         SDL_Log("Saved animation resource to %s", path.c_str());
+                        if (onResourceLoaded) onResourceLoaded(path);
                     } else {
                         SDL_Log("Failed to save animation resource to %s", path.c_str());
                     }
@@ -4243,7 +4400,7 @@ namespace Gui {
                 SDL_SetRenderDrawColor(renderer, 60, 60, 75, 255);
                 SDL_RenderRect(renderer, &bg);
                 drawLabel("Inspector", panelX() + 10, 10, {180,180,200,255});
-                drawLabel("Click a GUI element", panelX() + 10, 40, {100,100,120,255});
+                drawLabel("Click gui elements.", panelX() + 10, 40, {100,100,120,255});
                 return;
             }
 
@@ -4944,6 +5101,8 @@ namespace Gui {
         bool pendingRebuild = false; // see handleEvent()/clipSelector onChange
         Gui::Scrollbar inspectorScrollbar;
         float inspectorScrollOffset = 0.0f;
+        std::string projectRoot;
+
         
         std::vector<std::string> componentOptions = {"PhysicsBody", "TextureRef", "AnimationState", "SfxEmitter", "Rotation", "Scale"};
         Gui::OptionBox componentSelector;
@@ -4951,6 +5110,7 @@ namespace Gui {
 
     public:
         std::unique_ptr<Gui::AnimationFrameEditor> animFrameEditor;
+        void setProjectRoot(const std::string& root) { projectRoot = root; }
 
     private:
         void rebuildFields() {
@@ -4998,6 +5158,7 @@ namespace Gui {
                 auto btn = std::make_unique<Gui::Button>(renderer, font, "...", SDL_FPoint{0,0}, 30, 26);
                 btn->onClicked = [this, lePtr = le.get()]() {
                     fileExplorer.setFilter("*.svg;");
+                    fileExplorer.setSaveMode(false, ""); // ensure "Open" mode, not left over from a prior resource save
                     fileExplorer.setCallback([lePtr](const std::string& path) {
                         lePtr->clear();
                         for (char c : path) lePtr->appendText(std::string(1, c));
@@ -5077,7 +5238,16 @@ namespace Gui {
                     if (!world || e >= world->entity_count) return;
                     auto& anim = world->animation_state_pool[e];
                     animFrameEditor->setTarget(&anim);
-                    animFrameEditor->onResourceLoaded = [this]() {
+                    animFrameEditor->onResourceLoaded = [this, e](const std::string& path) {
+                        if (world && e < world->entity_count) {
+                            // Store relative path -- same convention used by
+                            // the Physics Resource Load/Save buttons, so the
+                            // scene JSON keeps a clean, portable path instead
+                            // of whatever absolute path the file dialog gave us.
+                            std::string relPath = std::filesystem::relative(path, projectRoot).string();
+                            if (relPath.empty()) relPath = path; // fallback
+                            world->animation_resource_path[e] = relPath;
+                        }
                         this->commitAllFields();
                         this->rebuildFields();  // refresh after load
                     };
@@ -5148,8 +5318,11 @@ namespace Gui {
                                                             SDL_FPoint{0,0}, 120, 26);
                 loadBtn->onClicked = [this, e]() {
                     if (!world || e >= world->entity_count) return;
-                    // Commit any pending edits first
                     this->commitAllFields();
+
+                    // Set file explorer to project's resources folder
+                    std::string resFolder = (std::filesystem::path(projectRoot) / "resources").string();
+                    fileExplorer.setCurrentPath(resFolder);
                     fileExplorer.setFilter("*.physicsres");
                     fileExplorer.setSaveMode(false, "");
                     fileExplorer.setCallback([this, e](const std::string& path) {
@@ -5165,14 +5338,15 @@ namespace Gui {
                             f >> j;
                             auto& phys = world->physics_body_pool[e];
                             phys = ComponentResourceManager::parsePhysicsJson(j);
-                            phys.bodyId = b2_nullBodyId;  // runtime handle fresh
-                            world->physics_resource_path[e] = path;
+                            phys.bodyId = b2_nullBodyId;
+
+                            // Store relative path
+                            std::string relPath = std::filesystem::relative(path, projectRoot).string();
+                            if (relPath.empty()) relPath = path; // fallback
+                            world->physics_resource_path[e] = relPath;
                             world->has_physics_body[e] = 1;
-                            // Refresh inspector fields
+
                             this->rebuildFields();
-                            if (this->animFrameEditor && this->animFrameEditor->isOpen()) {
-                                // Not needed for physics
-                            }
                         } catch (const std::exception& ex) {
                             SDL_Log("Error loading physics resource: %s", ex.what());
                         }
@@ -5188,7 +5362,9 @@ namespace Gui {
                 saveBtn->onClicked = [this, e]() {
                     if (!world || e >= world->entity_count) return;
                     this->commitAllFields();
-                    fileExplorer.setFilter("*.physicsres");
+
+                    std::string resFolder = (std::filesystem::path(projectRoot) / "resources").string();
+                    fileExplorer.setCurrentPath(resFolder);
                     fileExplorer.setSaveMode(true, ".physicsres");
                     fileExplorer.setCallback([this, e](const std::string& path) {
                         if (!world || e >= world->entity_count) return;
@@ -5197,7 +5373,8 @@ namespace Gui {
                             std::ofstream out(path);
                             if (out.is_open()) {
                                 out << j.dump(4);
-                                world->physics_resource_path[e] = path;
+                                std::string relPath = std::filesystem::relative(path, projectRoot).string();
+                                world->physics_resource_path[e] = relPath;
                                 SDL_Log("Saved physics resource to %s", path.c_str());
                             } else {
                                 SDL_Log("Failed to save physics resource to %s", path.c_str());
@@ -5249,7 +5426,7 @@ namespace Gui {
             SDL_SetRenderDrawColor(renderer, 28, 28, 35, 245); SDL_RenderFillRect(renderer, &bg);
             SDL_SetRenderDrawColor(renderer, 60, 60, 75, 255); SDL_RenderRect(renderer, &bg);
             drawLabel("Entity Inspector", panelX() + 10, 10, {180,180,200,255});
-            drawLabel("Click an entity", panelX() + 10, 40, {100,100,120,255});
+            drawLabel("Click entities.", panelX() + 10, 40, {100,100,120,255});
         }
 
         void drawLabel(const char* s, float x, float y, SDL_Color c) {
@@ -6966,16 +7143,12 @@ public:
 // ============================================================
 struct Scene {
     std::string name = "Untitled Scene";
-
-    // Script attachment: the filename of the C++ script for this scene.
-    // An empty string or missing key means the scene is invalid.
     std::string scriptAttached;
-    bool        scriptValid = false;   // set by SceneParser after load
-
+    bool        scriptValid = false;
+    std::string projectRoot;          // absolute path to the project folder
     ECSWorld world;
     std::vector<std::unique_ptr<Gui::IGuiElement>> guiElements;
 };
-
 
 
 TTF_Font* ProjectScript_TTF_OpenFont(const char* file, float ptsize)
@@ -7035,6 +7208,9 @@ public:
             scene.scriptValid = false;
             return scene;
         }
+
+        std::filesystem::path scenePath(fullPath);
+        scene.projectRoot = scenePath.parent_path().parent_path().string();
 
         nlohmann::json j;
         file >> j;
@@ -7109,7 +7285,7 @@ public:
                 if (comps.contains("TextureRef")) {
                     scene.world.add_texture_ref(id);
                     auto& tex = scene.world.texture_ref_pool[id];
-                    tex.resourceName = comps["TextureRef"].value("resourceName", "");
+                    tex.resourceName = resolveComponentResourcePath(scene.projectRoot, comps["TextureRef"].value("resourceName", ""));
                 }
                 // --- NEW: SfxEmitter ---
                 if (comps.contains("SfxEmitter")) {
@@ -7132,7 +7308,7 @@ public:
                     scene.world.add_physics_body(id);
                     const auto& pb = comps["PhysicsBody"];
                     if (pb.is_string()) {
-                        std::string resPath = resolveComponentResourcePath(projects_root, pb.get<std::string>());
+                        std::string resPath = resolveComponentResourcePath(scene.projectRoot, pb.get<std::string>());
                         try {
                             scene.world.assign_physics_resource(id, resPath);
                         } catch (const std::exception& e) {
@@ -7168,9 +7344,9 @@ public:
                     if (!scene.world.has_animation_state[id]) scene.world.add_animation_state(id);
                     const auto& as = comps["AnimationState"];
                     if (as.is_string()) {
-                        std::string resPath = resolveComponentResourcePath(projects_root, as.get<std::string>());
+                        std::string resPath = resolveComponentResourcePath(scene.projectRoot, as.get<std::string>());
                         try {
-                            scene.world.assign_animation_resource(id, resPath);
+                            scene.world.assign_animation_resource(id, resPath, scene.projectRoot);
                         } catch (const std::exception& e) {
                             std::cerr << "[SceneParser] " << e.what() << "\n";
                         }
@@ -7190,6 +7366,7 @@ public:
                         anim.activeClipIndex = as.value("activeClipIndex", 0);
                         if (anim.activeClipIndex < 0 || anim.activeClipIndex >= (int)anim.clips.size())
                             anim.activeClipIndex = 0;
+                        resolveAnimationFramePaths(anim, scene.projectRoot);
                     }
                 }
             }
@@ -7226,6 +7403,9 @@ public:
             scene.scriptValid = false;
             return scene;
         }
+
+        std::filesystem::path scenePath(fullPath);
+        scene.projectRoot = scenePath.parent_path().parent_path().string();
 
         nlohmann::json j;
         file >> j;
@@ -7300,7 +7480,7 @@ public:
                 if (comps.contains("TextureRef")) {
                     scene.world.add_texture_ref(id);
                     auto& tex = scene.world.texture_ref_pool[id];
-                    tex.resourceName = comps["TextureRef"].value("resourceName", "");
+                    tex.resourceName = resolveComponentResourcePath(scene.projectRoot, comps["TextureRef"].value("resourceName", ""));
                 }
                 // --- NEW: SfxEmitter ---
                 if (comps.contains("SfxEmitter")) {
@@ -7322,7 +7502,7 @@ public:
                     scene.world.add_physics_body(id);
                     const auto& pb = comps["PhysicsBody"];
                     if (pb.is_string()) {
-                        std::string resPath = (getProjectsRootForScripts() / std::filesystem::path(pb.get<std::string>())).string();
+                        std::string resPath = (std::filesystem::path(scene.projectRoot) / pb.get<std::string>()).string();
                         try {
                             scene.world.assign_physics_resource(id, resPath);
                         } catch (const std::exception& e) {
@@ -7358,9 +7538,9 @@ public:
                     if (!scene.world.has_animation_state[id]) scene.world.add_animation_state(id);
                     const auto& as = comps["AnimationState"];
                     if (as.is_string()) {
-                        std::string resPath = (getProjectsRootForScripts() / std::filesystem::path(as.get<std::string>())).string();
+                        std::string resPath = (std::filesystem::path(scene.projectRoot) / as.get<std::string>()).string();
                         try {
-                            scene.world.assign_animation_resource(id, resPath);
+                            scene.world.assign_animation_resource(id, resPath, scene.projectRoot);
                         } catch (const std::exception& e) {
                             std::cerr << "[SceneParser] " << e.what() << "\n";
                         }
@@ -7380,6 +7560,7 @@ public:
                         anim.activeClipIndex = as.value("activeClipIndex", 0);
                         if (anim.activeClipIndex < 0 || anim.activeClipIndex >= (int)anim.clips.size())
                             anim.activeClipIndex = 0;
+                        resolveAnimationFramePaths(anim, scene.projectRoot);
                     }
                 }
             }
@@ -7403,6 +7584,12 @@ public:
         // scene references gets written to disk at most once below, no
         // matter how many entities share it.
         g_componentResources.beginSavePass();
+
+        if (scene.projectRoot.empty())
+        {
+            std::filesystem::path scenePath(filepath);
+            scene.projectRoot = scenePath.parent_path().parent_path().string();
+        }
 
         nlohmann::json j;
         j["scene_name"]      = scene.name;
@@ -7441,7 +7628,9 @@ public:
 
             if (scene.world.has_texture_ref[i]) {
                 auto& tex = scene.world.texture_ref_pool[i];
-                comps["TextureRef"]["resourceName"] = tex.resourceName;
+                std::string relTex = std::filesystem::relative(tex.resourceName, scene.projectRoot).string();
+                if (relTex.empty()) relTex = tex.resourceName; // fallback: keep absolute if relative() fails
+                comps["TextureRef"]["resourceName"] = relTex;
             }
 
             if (scene.world.has_sfx_emitter[i]) {
@@ -7455,6 +7644,7 @@ public:
 
             if (scene.world.has_animation_state[i]) {
                 auto& anim = scene.world.animation_state_pool[i];
+                // relative to project root
                 std::string& resPath = scene.world.animation_resource_path[i];
                 if (resPath.empty()) {
                     // Never been saved to a resource file before (e.g. the
@@ -7466,12 +7656,12 @@ public:
                     if (label.empty()) label = "entity";
                     resPath = "resources/" + label + "_" + std::to_string(i) + ".animres";
                 }
-                std::string fullResPath = resolveComponentResourcePath(projects_root, resPath);
+                std::string fullResPath = (std::filesystem::path(scene.projectRoot) / resPath).string();
                 std::filesystem::create_directories(std::filesystem::path(fullResPath).parent_path());
                 // Writes to disk only once per unique path per save pass —
                 // if another entity already saved this exact file this
                 // pass, this is a no-op.
-                g_componentResources.saveAnimation(fullResPath, anim);
+                g_componentResources.saveAnimation(fullResPath, anim, scene.projectRoot);
                 comps["AnimationState"] = resPath; // store the filename, not inline JSON
             }
 
@@ -7483,7 +7673,7 @@ public:
                     if (label.empty()) label = "entity";
                     resPath = "resources/" + label + "_" + std::to_string(i) + ".physicsres";
                 }
-                std::string fullResPath = resolveComponentResourcePath(projects_root, resPath);
+                std::string fullResPath = (std::filesystem::path(scene.projectRoot) / resPath).string();
                 std::filesystem::create_directories(std::filesystem::path(fullResPath).parent_path());
                 g_componentResources.savePhysics(fullResPath, phys);
                 comps["PhysicsBody"] = resPath; // store the filename, not inline JSON

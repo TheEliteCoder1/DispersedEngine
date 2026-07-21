@@ -300,8 +300,10 @@ int main(int argc, char* argv[]) {
         if (selectedGuiElem) { selectedGuiElem->editorSelected = false; selectedGuiElem = nullptr; }
         inspector.setTarget(nullptr);
         fileExplorer.setNewTitle("File Explorer - [*.json]"); fileExplorer.setFilter("*.json");
+        fileExplorer.setSaveMode(false, ""); // ensure we're in "Open" mode, not left over from a prior resource save
         fileExplorer.setCallback([&](const std::string& path) {
             scene = sceneParser.loadFromFile(path); currentSceneFilePath = path;
+            entityInspector.setProjectRoot(scene.projectRoot);
             for (auto& elem : scene.guiElements) {
                 SDL_FPoint pos = { elem->getX(), elem->getY() };
                 clamp_guiElem_position_to_canvas(pos, elem->getWidth(), elem->getHeight());
@@ -314,6 +316,7 @@ int main(int argc, char* argv[]) {
     
     auto openScriptBtn = makeButton("O-Script", [&]() {
         fileExplorer.setNewTitle("File Explorer - [*.cpp;*.h;*.txt;*.*]"); fileExplorer.setFilter("*.cpp;*.h;*.txt;*.*;*.json");
+        fileExplorer.setSaveMode(false, ""); // ensure we're in "Open" mode, not left over from a prior resource save
         fileExplorer.setCallback([&](const std::string& path) {
             textEditor.loadFile(path); showCanvas = false; textEditor.setVisible(true); SDL_StartTextInput(window); fileExplorer.reset();
         });
@@ -322,7 +325,11 @@ int main(int argc, char* argv[]) {
     
     auto saveBtn = makeButton("Save", [&](){
         inspector.commitAllFields();
-        if (!currentSceneFilePath.empty()) { sceneParser.saveToFile(scene, currentSceneFilePath); SDL_Log("[Editor] Scene saved to %s", currentSceneFilePath.c_str()); }
+        if (!currentSceneFilePath.empty()) {
+            sceneParser.saveToFile(scene, currentSceneFilePath);
+            entityInspector.setProjectRoot(scene.projectRoot);
+            SDL_Log("[Editor] Scene saved to %s", currentSceneFilePath.c_str());
+        }
         textEditor.saveFile();
     });
     
@@ -668,7 +675,7 @@ int main(int argc, char* argv[]) {
                 SDL_SetRenderDrawColor(renderer, 60, 60, 75, 255); SDL_RenderRect(renderer, &bg);
                 TTF_Text* t = TTF_CreateText(textEngine, g_resources.FontManager.Get("regularFont"), "Inspector", 0);
                 if (t) { TTF_SetTextColor(t, 180, 180, 200, 255); TTF_DrawRendererText(t, bg.x + 10, bg.y + 10); TTF_DestroyText(t); }
-                t = TTF_CreateText(textEngine, g_resources.FontManager.Get("regularFont"), "Click an entity or GUI element.", 0);
+                t = TTF_CreateText(textEngine, g_resources.FontManager.Get("regularFont"), "Nothing selected.", 0);
                 if (t) { TTF_SetTextColor(t, 100, 100, 120, 255); TTF_DrawRendererText(t, bg.x + 10, bg.y + 40); TTF_DestroyText(t); }
             }
         }
@@ -701,8 +708,8 @@ int main(int argc, char* argv[]) {
     // gamepad cleanup
     if (gamepad) SDL_CloseGamepad(gamepad);
     // clears all allocations and also calls library quit functions unless that is internal
-    g_resources.FontManager.Clear();
-    g_resources.TextureManager.Clear();
+    g_resources.FontManager.~Manager();
+    g_resources.TextureManager.~Manager();
     g_resources.AudioManager.~Manager();
     // icon cleanup
     if (iconSurface) SDL_DestroySurface(iconSurface);

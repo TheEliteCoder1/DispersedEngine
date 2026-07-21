@@ -232,7 +232,6 @@ namespace Physics {
 
             void Step(float dtSec, int subSteps = 4) {
                 b2World_Step(m_world, dtSec, subSteps);
-                
             }
 
             void OnHit(HitCallback cb) { m_hit = std::move(cb); }

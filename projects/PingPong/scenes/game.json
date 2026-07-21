@@ -1,0 +1,43 @@
+{
+    "entities": [
+        {
+            "components": {
+                "Metadata": {
+                    "name": "Pad1"
+                },
+                "Position": {
+                    "x": 19.0,
+                    "y": 282.0
+                },
+                "RectangleShape": {
+                    "h": 100.0,
+                    "w": 30.0
+                },
+                "ZIndex": {
+                    "z": 1
+                }
+            }
+        },
+        {
+            "components": {
+                "Metadata": {
+                    "name": "Pad2"
+                },
+                "Position": {
+                    "x": 1353.0,
+                    "y": 408.0
+                },
+                "RectangleShape": {
+                    "h": 100.0,
+                    "w": 30.0
+                },
+                "ZIndex": {
+                    "z": 2
+                }
+            }
+        }
+    ],
+    "gui_elements": [],
+    "scene_name": "SceneName",
+    "script_attached": "PingPong/scripts/game.cpp"
+}

@@ -82,11 +82,11 @@ namespace Font {
                     }
                 }
                 m_pathToFont.clear();
+                TTF_Quit();
             }
 
             ~Manager() {
                 Clear();
-                TTF_Quit();
             }
 
         private:
