@@ -1,3 +1,4 @@
+
 #pragma once
 
 #include <string>
@@ -72,7 +73,9 @@ namespace Font {
                 }
             }
 
-            // Clears out all mappings and closes all opened instances
+            // Clears out all mappings and closes all opened instances.
+            // Safe to call more than once (e.g. once explicitly before
+            // shutdown, then again automatically by the destructor).
             void Clear() {
                 m_fonts.clear();
                 
@@ -82,7 +85,11 @@ namespace Font {
                     }
                 }
                 m_pathToFont.clear();
-                TTF_Quit();
+                // NOTE: TTF_Quit() is intentionally NOT called here. This
+                // manager only owns the fonts it opened, not the library
+                // itself - whoever calls TTF_Init() should be the one to
+                // call TTF_Quit(), exactly once, after this manager (and
+                // everything else using TTF) is done.
             }
 
             ~Manager() {
@@ -97,4 +104,3 @@ namespace Font {
             std::unordered_map<std::string, TTF_Font*> m_pathToFont;
     };
 };
-

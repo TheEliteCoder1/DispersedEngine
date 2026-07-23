@@ -5,6 +5,7 @@
                 "Metadata": {
                     "name": "Pad1"
                 },
+                "PhysicsBody": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\PingPong\\resources\\pad.physicsres",
                 "Position": {
                     "x": 19.0,
                     "y": 282.0
@@ -12,6 +13,9 @@
                 "RectangleShape": {
                     "h": 100.0,
                     "w": 30.0
+                },
+                "TextureRef": {
+                    "resourceName": "paddleTex"
                 },
                 "ZIndex": {
                     "z": 1
@@ -23,6 +27,7 @@
                 "Metadata": {
                     "name": "Pad2"
                 },
+                "PhysicsBody": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\PingPong\\resources\\pad.physicsres",
                 "Position": {
                     "x": 1353.0,
                     "y": 408.0
@@ -31,8 +36,33 @@
                     "h": 100.0,
                     "w": 30.0
                 },
+                "TextureRef": {
+                    "resourceName": "paddleTex"
+                },
                 "ZIndex": {
                     "z": 2
+                }
+            }
+        },
+        {
+            "components": {
+                "Metadata": {
+                    "name": "Ball"
+                },
+                "PhysicsBody": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\PingPong\\resources\\ball.physicsres",
+                "Position": {
+                    "x": 685.5999755859375,
+                    "y": 297.1000061035156
+                },
+                "RectangleShape": {
+                    "h": 25.0,
+                    "w": 25.0
+                },
+                "TextureRef": {
+                    "resourceName": "ballTex"
+                },
+                "ZIndex": {
+                    "z": 3
                 }
             }
         }

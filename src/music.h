@@ -15,7 +15,6 @@ namespace MusicAndSfx {
                 m_mixer = MIX_CreateMixerDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
                 if (!m_mixer) {
                     std::printf("MusicAndSfx Manager Init failed: MIX_CreateMixerDevice failed: %s\n", SDL_GetError());
-                    MIX_Quit();
                     return false;
                 }
                 return true;
@@ -91,11 +90,13 @@ namespace MusicAndSfx {
                 SDL_DestroyProperties(props);
             }
 
-            ~Manager() {
+            // Unified destruction: wipes out all allocations and the
+            // mixer device safely. Safe to call more than once.
+            void Clear() {
                 m_samples.clear();
 
                 for (auto& kv : m_pathToAudio) {
-                    MIX_DestroyAudio(kv.second);
+                    if (kv.second) MIX_DestroyAudio(kv.second);
                 }
                 m_pathToAudio.clear();
 
@@ -103,12 +104,18 @@ namespace MusicAndSfx {
                     MIX_DestroyMixer(m_mixer);
                     m_mixer = nullptr;
                 }
-                
-                MIX_Quit();
+
+                // NOTE: MIX_Quit() is intentionally NOT called here, same
+                // reasoning as font.h - whoever calls MIX_Init() owns
+                // calling MIX_Quit() exactly once, not this cache.
+            }
+
+            ~Manager() {
+                Clear();
             }
 
         private:
-            MIX_Mixer* m_mixer;
+            MIX_Mixer* m_mixer = nullptr;
             std::unordered_map<std::string, MIX_Audio*> m_samples;
             std::unordered_map<std::string, MIX_Audio*> m_pathToAudio;
     };

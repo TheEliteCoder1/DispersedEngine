@@ -92,6 +92,7 @@ namespace Texture {
                     }
                 }
                 m_pathToTexture.clear();
+                // image library internally calls quit
             }
 
             ~Manager() {
@@ -99,7 +100,7 @@ namespace Texture {
             }
 
         private:
-            SDL_Renderer* m_renderer;
+            SDL_Renderer* m_renderer = nullptr;
             std::unordered_map<std::string, SDL_Texture*> m_textures;
             std::unordered_map<std::string, SDL_Texture*> m_pathToTexture;
     };

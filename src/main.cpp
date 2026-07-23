@@ -1,7 +1,6 @@
 #include "engine.h"
 
 bool showCanvas = true;
-EngineResources g_resources;
 
 
 void create_entity_with_user_input(ECSWorld& world, const std::string& name, float w, float h) {
@@ -286,11 +285,17 @@ int main(int argc, char* argv[]) {
     horizontalScrollbar.setOrientation(Gui::ScrollOrientation::Horizontal);
     static bool scrollConnected = false;
     if (!scrollConnected) {
-        verticalScrollbar.onChange = [](float v){ editorScrollY = v; };
-        horizontalScrollbar.onChange = [](float v){ editorScrollX = v; };
+        verticalScrollbar.onChange = [](float v){ 
+            editorScrollY = v; 
+            g_editorCamera.targetY = v;  // ← Sync to camera
+        };
+        horizontalScrollbar.onChange = [](float v){ 
+            editorScrollX = v; 
+            g_editorCamera.targetX = v;  // ← Sync to camera
+        };
         scrollConnected = true;
     }
-    
+        
     auto makeButton = [&](const std::string& label, std::function<void()> cb) {
         auto btn = std::make_unique<Gui::Button>(renderer, g_resources.FontManager.Get("regularFont"), label, SDL_FPoint{0,0}, 100, 50);
         btn->onClicked = cb; return btn;
@@ -300,7 +305,7 @@ int main(int argc, char* argv[]) {
         if (selectedGuiElem) { selectedGuiElem->editorSelected = false; selectedGuiElem = nullptr; }
         inspector.setTarget(nullptr);
         fileExplorer.setNewTitle("File Explorer - [*.json]"); fileExplorer.setFilter("*.json");
-        fileExplorer.setSaveMode(false, ""); // ensure we're in "Open" mode, not left over from a prior resource save
+        fileExplorer.setSaveMode(false, ""); 
         fileExplorer.setCallback([&](const std::string& path) {
             scene = sceneParser.loadFromFile(path); currentSceneFilePath = path;
             entityInspector.setProjectRoot(scene.projectRoot);
@@ -316,7 +321,7 @@ int main(int argc, char* argv[]) {
     
     auto openScriptBtn = makeButton("O-Script", [&]() {
         fileExplorer.setNewTitle("File Explorer - [*.cpp;*.h;*.txt;*.*]"); fileExplorer.setFilter("*.cpp;*.h;*.txt;*.*;*.json");
-        fileExplorer.setSaveMode(false, ""); // ensure we're in "Open" mode, not left over from a prior resource save
+        fileExplorer.setSaveMode(false, ""); 
         fileExplorer.setCallback([&](const std::string& path) {
             textEditor.loadFile(path); showCanvas = false; textEditor.setVisible(true); SDL_StartTextInput(window); fileExplorer.reset();
         });
@@ -365,18 +370,10 @@ int main(int argc, char* argv[]) {
     auto polyBtn = std::make_unique<Gui::Button>(renderer, g_resources.FontManager.Get("regularFont"), "Poly", SDL_FPoint{0,0}, 60, 30);
     polyBtn->onClicked = [&world]() {
         editor_isDrawingPolygon = !editor_isDrawingPolygon;
-        
-        // Automatically switch the selected entity to Polygon mode
         if (lastSelectedEntity != (Entity)-1 && world.has_physics_body[lastSelectedEntity]) {
             auto& phys = world.physics_body_pool[lastSelectedEntity];
             if (phys.shapeType != Physics::ShapeType::Polygon) {
                 phys.shapeType = Physics::ShapeType::Polygon;
-                // Default to a basic triangle if no points exist yet. Points must be
-                // TOP-LEFT relative (range [0,w] x [0,h]) to match how the mouse
-                // polygon editor stores clicks and how render_physics_shape_overlay
-                // reads them back (both subtract width*0.5/height*0.5) - the old
-                // centered square here ({-hw,-hh}...) used the wrong convention,
-                // which is why the shape came out offset/mis-sized.
                 if (phys.polygonPoints.empty()) {
                     phys.polygonPoints = MakeDefaultTrianglePoints(phys.width, phys.height);
                 }
@@ -384,8 +381,7 @@ int main(int argc, char* argv[]) {
         }
     };
 
-    auto gridBtn = std::make_unique<Gui::Button>(renderer, g_resources.FontManager.Get("regularFont"),
-                                                 "Grid", SDL_FPoint{0,0}, 60, 30);
+    auto gridBtn = std::make_unique<Gui::Button>(renderer, g_resources.FontManager.Get("regularFont"), "Grid", SDL_FPoint{0,0}, 60, 30);
     gridBtn->onClicked = [](){ editor_showGrid = !editor_showGrid; };
     canvasTools->addChild(std::move(polyBtn));
     canvasTools->addChild(std::move(gridBtn));
@@ -395,6 +391,11 @@ int main(int argc, char* argv[]) {
     bool running = true; SDL_Event e;
     float scrollOffset = 0.0f; const float maxScrollOffset = 1000.0f, scrollSpeed = 60.0f;
     Uint64 last_time = SDL_GetTicks(); float delta_time = 0.0f;
+
+    // ── Camera state variables ──────────────────────────────────────────────
+    static bool cameraPanning = false;
+    static float cameraLastMouseX = 0.0f, cameraLastMouseY = 0.0f;
+    static bool cameraZooming = false;
 
     while (running) {
         Uint64 current_time = SDL_GetTicks();
@@ -410,13 +411,25 @@ int main(int argc, char* argv[]) {
                     if (!currentSceneFilePath.empty()) sceneParser.saveToFile(scene, currentSceneFilePath);
                     textEditor.saveFile();
                 }
+                // Camera: P + LMB = pan
+                if (e.key.key == SDLK_P) {
+                    cameraPanning = true;
+                    SDL_GetMouseState(&cameraLastMouseX, &cameraLastMouseY);
+                }
+                // Camera: Z + scroll wheel = zoom
+                if (e.key.key == SDLK_Z) {
+                    cameraZooming = true;
+                }
+            }
+            if (e.type == SDL_EVENT_KEY_UP) {
+                if (e.key.key == SDLK_P) cameraPanning = false;
+                if (e.key.key == SDLK_Z) cameraZooming = false;
             }
             if (e.type == SDL_EVENT_GAMEPAD_ADDED && !gamepad) { gamepad = SDL_OpenGamepad(e.gdevice.which); }
             if (e.type == SDL_EVENT_GAMEPAD_REMOVED && gamepad && SDL_GetGamepadID(gamepad) == e.gdevice.which) { SDL_CloseGamepad(gamepad); gamepad = nullptr; }
             
             toolbar->handleEvent(e, window, 0.0f, 0.0f);
             
-            // --- NEW: Handle canvas tools buttons (Poly/Grid) ---
             bool consumedByCanvasTools = false;
             if (showCanvas) {
                 consumedByCanvasTools = canvasTools->handleEvent(e, window, 0.0f, 0.0f);
@@ -511,6 +524,28 @@ int main(int argc, char* argv[]) {
                 if (verticalScrollbar.handleEvent(e)) consumedByScrollbar = true;
                 if (horizontalScrollbar.handleEvent(e)) consumedByScrollbar = true;
             }
+
+            // ── Camera: P + LMB = pan ───────────────────────────────────────
+            if (e.type == SDL_EVENT_MOUSE_MOTION && cameraPanning) {
+                float dx = e.motion.x - cameraLastMouseX;
+                float dy = e.motion.y - cameraLastMouseY;
+                g_editorCamera.pan(dx, dy);
+                cameraLastMouseX = e.motion.x;
+                cameraLastMouseY = e.motion.y;
+            }
+
+            // ── Camera: Z + scroll wheel = zoom toward cursor ───────────────
+            if (!consumedByScrollbar && cameraZooming && e.type == SDL_EVENT_MOUSE_WHEEL) {
+                float mx, my; 
+                SDL_GetMouseState(&mx, &my);
+                if (mx >= canvasViewX && mx <= canvasViewX + canvasViewW &&
+                    my >= canvasViewY && my <= canvasViewY + canvasViewH) {
+                    float factor = (e.wheel.y > 0) ? 1.1f : (1.0f / 1.1f);
+                    g_editorCamera.zoomToward(mx, my, factor);
+                    consumedByScrollbar = true;
+                }
+            }
+
             if (!consumedByScrollbar && e.type == SDL_EVENT_MOUSE_WHEEL) {
                 bool consumedByScene = false;
                 float guiOffsetX = editorScrollX - canvasViewX, guiOffsetY = editorScrollY - canvasViewY;
@@ -595,10 +630,6 @@ int main(int argc, char* argv[]) {
             confirmLastFrame = confirmNow;
         }
 
-        // Advance animation clips every frame. This runs unconditionally
-        // (not just in some future "play-test" mode) so that toggling
-        // Play/Stop in the Inspector is visible immediately while editing,
-        // rather than requiring a separate runtime/play mode.
         animation_system(world, delta_time);
 
         if (selectedEntity != (Entity)-1) {
@@ -620,7 +651,6 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        
         static Entity prevSelectedEntity = (Entity)-1;
         if (lastSelectedEntity != prevSelectedEntity) {
             if (lastSelectedEntity != (Entity)-1) selectEntity(lastSelectedEntity); else selectEntity((Entity)-1);
@@ -639,25 +669,58 @@ int main(int argc, char* argv[]) {
         int winW, winH; SDL_GetWindowSize(window, &winW, &winH);
         const float toolbarHeight = 60.0f;
         const float inspectorWidth = inspectorVisible ? Gui::SceneInspector::PANEL_W : 0.0f;
-        canvasViewX = 0.0f; canvasViewY = toolbarHeight;
-        canvasViewW = (float)winW - (inspectorVisible ? inspectorWidth : 0.0f); canvasViewH = (float)winH - toolbarHeight;
-        if (canvasViewW < 200) canvasViewW = 200; if (canvasViewH < 200) canvasViewH = 200;
-        
-        const float logicalCanvasWidth = 1390.0f, logicalCanvasHeight = 690.0f, sbSize = 12.0f;
-        verticalScrollbar.setGeometry(canvasViewX + canvasViewW - sbSize, canvasViewY, sbSize, canvasViewH, logicalCanvasHeight, canvasViewH);
-        horizontalScrollbar.setGeometry(canvasViewX, canvasViewY + canvasViewH - sbSize, canvasViewW - sbSize, sbSize, logicalCanvasWidth, canvasViewW - sbSize);
-        
+        canvasViewX = 0.0f; 
+        canvasViewY = toolbarHeight;
+        canvasViewW = (float)winW - (inspectorVisible ? inspectorWidth : 0.0f); 
+        canvasViewH = (float)winH - toolbarHeight;
+        if (canvasViewW < 200) canvasViewW = 200; 
+        if (canvasViewH < 200) canvasViewH = 200;
+
+        const float minLogicalW = 1390.0f;
+        const float minLogicalH = 690.0f;
+        const float sbSize = 12.0f;
+
+        float contentW = std::max(canvasViewW, minLogicalW);
+        float contentH = std::max(canvasViewH, minLogicalH);
+
+        // 2. Update globals so clamp_entity_position_to_canvas works correctly
+        g_canvasLogicalWidth = contentW;
+        g_canvasLogicalHeight = contentH;
+
+        // 3. Setup scrollbars with DYNAMIC content sizes
+        verticalScrollbar.setGeometry(
+            canvasViewX + canvasViewW - sbSize, canvasViewY, sbSize, canvasViewH,
+            contentH,       // ← Content height (scrollable area)
+            canvasViewH     // ← View height (visible area)
+        );
+        horizontalScrollbar.setGeometry(
+            canvasViewX, canvasViewY + canvasViewH - sbSize, canvasViewW - sbSize, sbSize,
+            contentW,             // ← Content width (scrollable area)
+            canvasViewW - sbSize  // ← View width (visible area)
+        );
+
+        // 4. Sync legacy scroll offsets to the camera
+        editorScrollX = g_editorCamera.targetX;
+        editorScrollY = g_editorCamera.targetY;
+                
         toolbar->render(0.0f, 0.0f);
         if (showCanvas) {
             render_editor_canvas(renderer);
-            // --- Draw the scene and GUI elements (includes the old Poly/Grid buttons) ---
-            render_system_and_scene_gui_in_editor(renderer, textEngine, g_resources.FontManager.Get("regularFont"), world, canvasViewX, canvasViewY, editorScrollX, editorScrollY, guiElements);
-            verticalScrollbar.render(renderer); horizontalScrollbar.render(renderer);
+            // ── Draw the scene and GUI elements (includes the old Poly/Grid buttons) ──
+            render_system_and_scene_gui_in_editor(
+                renderer, textEngine, g_resources.FontManager.Get("regularFont"), 
+                world, canvasViewX, canvasViewY, 
+                editorScrollX, editorScrollY, 
+                guiElements, 
+                g_editorCamera // <-- NEW PARAMETER
+            );
+            verticalScrollbar.render(renderer);
+            horizontalScrollbar.render(renderer);
             
-            // --- NEW: Render canvas tools ON TOP of everything else in the canvas area ---
-            float toolsX = canvasViewX + canvasViewW - 10; // right margin
-            float toolsY = canvasViewY + 10;
-            float containerWidth = 140;                   // enough to hold both buttons (2*60 + spacing)
+            // ── NEW: Render canvas tools ON TOP of everything else in the canvas area ──
+            float toolsX = canvasViewX + canvasViewW - 10; 
+            float toolsY = canvasViewY + 30;
+            float containerWidth = 140;                   
             canvasTools->setRect({ toolsX - containerWidth, toolsY, containerWidth, 40 });
             canvasTools->render(0.0f, 0.0f);
 
@@ -686,7 +749,6 @@ int main(int argc, char* argv[]) {
 
         if (entityInspector.animFrameEditor && entityInspector.animFrameEditor->isOpen()) {
             entityInspector.animFrameEditor->tick(delta_time);
-            // Don't render if file explorer is open on top of it
             if (!fileExplorer.isOpen()) {
                 entityInspector.animFrameEditor->render();
             }
@@ -708,9 +770,11 @@ int main(int argc, char* argv[]) {
     // gamepad cleanup
     if (gamepad) SDL_CloseGamepad(gamepad);
     // clears all allocations and also calls library quit functions unless that is internal
-    g_resources.FontManager.~Manager();
-    g_resources.TextureManager.~Manager();
-    g_resources.AudioManager.~Manager();
+    g_resources.FontManager.Clear();
+    g_resources.TextureManager.Clear();
+    g_resources.AudioManager.Clear();
+    TTF_Quit();
+    MIX_Quit();
     // icon cleanup
     if (iconSurface) SDL_DestroySurface(iconSurface);
     // systems cleanup

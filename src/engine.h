@@ -131,7 +131,7 @@ struct EngineResources {
     std::unordered_map<std::string, std::vector<std::string>> animations; 
 };
 
-extern EngineResources g_resources;
+inline EngineResources g_resources;
 
 inline std::filesystem::path getProjectsPathFS(const std::string& relativePath = "") {
     return std::filesystem::path(getProjectsPath(relativePath));
@@ -374,32 +374,117 @@ inline std::vector<b2Vec2> MakeDefaultTrianglePoints(float w, float h) {
     return { { w * 0.5f, 0.0f }, { w, h }, { 0.0f, h } };
 }
 
-const float LOGICAL_CANVAS_WIDTH  = 1390.0f;
-const float LOGICAL_CANVAS_HEIGHT = 690.0f;
+inline float g_canvasLogicalWidth = 1390.0f;
+inline float g_canvasLogicalHeight = 690.0f;
+
+namespace Tools {
+    struct Camera {
+        float targetX  = 0.0f;
+        float targetY  = 0.0f;
+        float offsetX  = 0.0f;
+        float offsetY  = 0.0f;
+        float zoom     = 1.0f;
+        float rotation = 0.0f;   // degrees, clockwise-positive (raylib convention)
+
+        // ── Coordinate conversion ────────────────────────────────────────
+        SDL_FPoint worldToScreen(float wx, float wy) const {
+            float dx = wx - targetX;
+            float dy = wy - targetY;
+            if (rotation != 0.0f) {
+                float rad = rotation * 3.14159265f / 180.0f;
+                float c = std::cos(rad), s = std::sin(rad);
+                float rx = dx * c - dy * s;
+                float ry = dx * s + dy * c;
+                dx = rx; dy = ry;
+            }
+            return { dx * zoom + offsetX, dy * zoom + offsetY };
+        }
+
+        SDL_FPoint screenToWorld(float sx, float sy) const {
+            float dx = (sx - offsetX) / zoom;
+            float dy = (sy - offsetY) / zoom;
+            if (rotation != 0.0f) {
+                float rad = -rotation * 3.14159265f / 180.0f;
+                float c = std::cos(rad), s = std::sin(rad);
+                float rx = dx * c - dy * s;
+                float ry = dx * s + dy * c;
+                dx = rx; dy = ry;
+            }
+            return { dx + targetX, dy + targetY };
+        }
+
+        // ── Camera operations ────────────────────────────────────────────
+        // Pin the camera's target on the centre of an entity.  Used by game
+        // scripts to follow the player, and by the editor to focus on a pick.
+        void centerOnEntity(const Components::Position& pos,
+                            float entityW = 0.0f, float entityH = 0.0f) {
+            targetX = pos.x + entityW * 0.5f;
+            targetY = pos.y + entityH * 0.5f;
+        }
+
+        // Place the camera so that its `offset` sits at the centre of the
+        // given canvas rect.  Call this every frame after the canvas size is
+        // known so the camera stays glued to the canvas when the window is
+        // resized.
+        void setupForCanvas(float canvasX, float canvasY,
+                            float canvasW, float canvasH) {
+            offsetX = canvasX + canvasW * 0.5f;
+            offsetY = canvasY + canvasH * 0.5f;
+        }
+
+        // Zoom toward a screen point (keeps the world point under the cursor
+        // stable, exactly like raylib's scroll-wheel zoom in CanvasView).
+        void zoomToward(float screenX, float screenY, float factor) {
+            SDL_FPoint wb = screenToWorld(screenX, screenY);
+            zoom = std::clamp(zoom * factor, 0.5f, 10.0f);  // Adjust these values as needed
+            SDL_FPoint wa = screenToWorld(screenX, screenY);
+            targetX += wb.x - wa.x;
+            targetY += wb.y - wa.y;
+        }
+
+        // Pan the camera by a screen-space delta (e.g. mouse movement while
+        // P is held).  Divides by zoom so the pan speed feels the same at
+        // any zoom level.
+        void pan(float deltaX, float deltaY) {
+            targetX -= deltaX / zoom;
+            targetY -= deltaY / zoom;
+        }
+
+        // Compute the world-space AABB currently visible inside the canvas.
+        // Used by the ruler/grid to know which tick marks to draw.
+        void getVisibleWorldBounds(float canvasX, float canvasY,
+                                   float canvasW, float canvasH,
+                                   float& outL, float& outT,
+                                   float& outR, float& outB) const {
+            SDL_FPoint tl = screenToWorld(canvasX,        canvasY);
+            SDL_FPoint br = screenToWorld(canvasX + canvasW, canvasY + canvasH);
+            outL = std::min(tl.x, br.x);
+            outR = std::max(tl.x, br.x);
+            outT = std::min(tl.y, br.y);
+            outB = std::max(tl.y, br.y);
+        }
+    };
+}
+
+inline Tools::Camera g_editorCamera;
 
 inline void clamp_entity_position_to_canvas(Components::Position& pos, float entityWidth = 50.0f, float entityHeight = 50.0f) {
     float minX = 0.0f;
     float minY = 0.0f;
-    float maxX = LOGICAL_CANVAS_WIDTH - entityWidth;
-    float maxY = LOGICAL_CANVAS_HEIGHT - entityHeight;
-    // If the entity is larger than the canvas on an axis, maxX/maxY can end up
-    // below minX/minY. std::clamp requires lo <= hi (UB otherwise), and in
-    // practice that collapses the result to a fixed value every call -
-    // permanently freezing that axis regardless of movement. Skip clamping on
-    // an axis that can't fit rather than pinning it to a bogus position.
+    float maxX = g_canvasLogicalWidth - entityWidth;
+    float maxY = g_canvasLogicalHeight - entityHeight;
+    
     if (maxX >= minX) pos.x = std::clamp(pos.x, minX, maxX);
     if (maxY >= minY) pos.y = std::clamp(pos.y, minY, maxY);
 }
 
+
 inline void clamp_guiElem_position_to_canvas(SDL_FPoint& pos, float guiElemWidth, float guiElemHeight) {
     float minX = 0.0f;
     float minY = 0.0f;
-    float maxX = LOGICAL_CANVAS_WIDTH - guiElemWidth;
-    float maxY = LOGICAL_CANVAS_HEIGHT - guiElemHeight;
-    // Same fix as clamp_entity_position_to_canvas: don't clamp an axis the
-    // element can't possibly fit on (e.g. a Panel taller than the canvas),
-    // or std::clamp's undefined behavior with lo > hi will freeze that axis
-    // at a single fixed value forever.
+    float maxX = g_canvasLogicalWidth - guiElemWidth;
+    float maxY = g_canvasLogicalHeight - guiElemHeight;
+    
     if (maxX >= minX) pos.x = std::clamp(pos.x, minX, maxX);
     if (maxY >= minY) pos.y = std::clamp(pos.y, minY, maxY);
 }
@@ -3431,7 +3516,6 @@ namespace Gui {
                 "static ProgramContext* g_ctx = nullptr;\n"
                 "static bool g_running = true;\n"
                 "static Uint64 g_lastTime = 0;\n"
-                "EngineResources g_resources;\n"
                 "\n"
                 "#ifdef __EMSCRIPTEN__\n"
                 "void main_loop_callback() {\n"
@@ -6126,63 +6210,24 @@ inline void animation_system(ECSWorld& world, float dt)
 }
 
 
-inline bool render_entity_texture(SDL_Renderer* renderer, const ECSWorld& world, Entity i, float screenX, float screenY)
+inline bool render_entity_texture(SDL_Renderer* renderer, const ECSWorld& world, Entity i, float screenX, float screenY, float cameraZoom = 1.0f)
 {
-    SDL_Texture* tex = nullptr;
     SDL_FRect srcRect = {0,0,0,0};
-    std::string texName;
+    SDL_Texture* tex = g_resources.TextureManager.Get(world.texture_ref_pool[i].resourceName);
 
-    // Only entities with a TextureRef have a static fallback texture; an
-    // animation-only entity (AnimationState with no TextureRef) has none,
-    // and relies entirely on the clip's current frame image below.
-    if (world.has_texture_ref[i]) {
-        texName = world.texture_ref_pool[i].resourceName;
-    }
-
-    // --- Prefer the animation clip's current frame image, if one exists ---
-    // Previously this block only pulled frameWidth/frameHeight from the clip
-    // and left texName/tex pointing at the static TextureRef, so Play/Stop
-    // (and the frame advancing done by animation_system) never changed what
-    // was actually drawn here -- only the Dialog's own preview did that.
-    // Selecting the current frame's image is what makes playback visible on
-    // the entity itself (e.g. from the Inspector).
-    if (world.has_animation_state[i]) {
-        const auto& anim = world.animation_state_pool[i];
-        const auto& clip = anim.active();
-        if (!clip.imageFrameResources.empty()) {
-            size_t frameIdx = (size_t)clip.currentFrame % clip.imageFrameResources.size();
-            const std::string& framePath = clip.imageFrameResources[frameIdx];
-            if (!framePath.empty()) {
-                tex = g_resources.TextureManager.Get(framePath);
-                if (!tex) {
-                    g_resources.TextureManager.Load(framePath, framePath);
-                    tex = g_resources.TextureManager.Get(framePath);
-                }
-                if (tex) texName = framePath;
-            }
-        }
-    }
 
     if (!tex) {
-        if (texName.empty()) return false;
-        tex = g_resources.TextureManager.Get(texName);
+        std::cerr << "Tex failed: " << SDL_GetError() << "\n";
+        return false;
     }
-    if (!tex) return false;
-
 
     float tw, th;
     SDL_GetTextureSize(tex, &tw, &th);
-    float scaleX = world.has_scale[i] ? world.scale_pool[i].x : 1.0f;
-    float scaleY = world.has_scale[i] ? world.scale_pool[i].y : 1.0f;
+    
+    // UPDATED: Multiply by cameraZoom so textures scale with the camera
+    float scaleX = (world.has_scale[i] ? world.scale_pool[i].x : 1.0f) * cameraZoom;
+    float scaleY = (world.has_scale[i] ? world.scale_pool[i].y : 1.0f) * cameraZoom;
     float rot = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
-
-    // --- Override frame size from animation clip if available ---
-    if (world.has_animation_state[i]) {
-        const auto& anim = world.animation_state_pool[i];
-        const auto& clip = anim.active();
-        if (clip.frameWidth > 0.0f) tw = clip.frameWidth;
-        if (clip.frameHeight > 0.0f) th = clip.frameHeight;
-    }
 
     SDL_FRect dst = { screenX, screenY, tw * scaleX, th * scaleY };
     SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
@@ -6430,38 +6475,200 @@ void drawText(TTF_TextEngine* textEngine, TTF_Font* font, const char* s, float x
     TTF_DestroyText(t);
 }
 
-void render_system_and_scene_gui_in_editor(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
-const ECSWorld & world, float viewX, float viewY,
-float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& guiElements) {
+// ── Helper: draw the world-space X and Y axes ───────────────────────────────
+inline void render_world_axes(SDL_Renderer* renderer,
+                              const Tools::Camera& camera,
+                              float canvasX, float canvasY,
+                              float canvasW, float canvasH)
+{
+    float wL, wT, wR, wB;
+    camera.getVisibleWorldBounds(canvasX, canvasY, canvasW, canvasH, wL, wT, wR, wB);
+
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    // X axis (red) – world y = 0
+    SDL_FPoint a = camera.worldToScreen(wL, 0.0f);
+    SDL_FPoint b = camera.worldToScreen(wR, 0.0f);
+    SDL_SetRenderDrawColor(renderer, 200, 60, 60, 210);
+    SDL_RenderLine(renderer, a.x, a.y, b.x, b.y);
+
+    // Y axis (green) – world x = 0
+    a = camera.worldToScreen(0.0f, wT);
+    b = camera.worldToScreen(0.0f, wB);
+    SDL_SetRenderDrawColor(renderer, 60, 200, 60, 210);
+    SDL_RenderLine(renderer, a.x, a.y, b.x, b.y);
+
+    // Origin dot
+    SDL_FPoint o = camera.worldToScreen(0.0f, 0.0f);
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+    SDL_FRect dot = { o.x - 3.0f, o.y - 3.0f, 6.0f, 6.0f };
+    SDL_RenderFillRect(renderer, &dot);
+}
+
+
+
+// In engine.h, REPLACE your render_canvas_ruler with this:
+
+inline void render_canvas_ruler(SDL_Renderer* renderer,
+                                TTF_TextEngine* textEngine, TTF_Font* font,
+                                const Tools::Camera& camera,
+                                float canvasX, float canvasY,
+                                float canvasW, float canvasH)
+{
+    constexpr float RULER_THICK = 20.0f;
+    constexpr int   MAJOR_STEP  = 100;
+    constexpr int   MINOR_STEP  = 50;
+
+    const SDL_Color bgCol    = { 45,  45,  45, 240 };
+    const SDL_Color majorCol = { 220, 220, 220, 255 };
+    const SDL_Color minorCol = { 120, 120, 120, 255 };
+    const SDL_Color labelCol = { 230, 230, 200, 255 };
+
+    // ── Horizontal ruler (top strip) ─────────────────────────────────────
+    SDL_SetRenderDrawColor(renderer, bgCol.r, bgCol.g, bgCol.b, bgCol.a);
+    SDL_FRect h_ruler = { canvasX, canvasY, canvasW, RULER_THICK };
+    SDL_RenderFillRect(renderer, &h_ruler);
+
+    {
+        // Get the exact world coordinates of the canvas top edge
+        SDL_FPoint wLeft  = camera.screenToWorld(canvasX,          canvasY);
+        SDL_FPoint wRight = camera.screenToWorld(canvasX + canvasW, canvasY);
+        int startX = (int)std::floor(wLeft.x  / (float)MINOR_STEP) * MINOR_STEP;
+        int endX   = (int)std::ceil (wRight.x / (float)MINOR_STEP) * MINOR_STEP;
+
+        for (int wx = startX; wx <= endX; wx += MINOR_STEP) {
+            bool major = ((wx % MAJOR_STEP) == 0);
+            
+            // FIX: Use wLeft.y instead of 0.0f. This ensures that if the camera 
+            // is rotated or panned, the X projection remains perfectly aligned 
+            // with the actual top edge of the canvas.
+            SDL_FPoint sp = camera.worldToScreen((float)wx, wLeft.y);
+            
+            if (sp.x < canvasX || sp.x > canvasX + canvasW) continue;
+            float tickH = major ? RULER_THICK : RULER_THICK * 0.45f;
+            SDL_SetRenderDrawColor(renderer,
+                major ? majorCol.r : minorCol.r,
+                major ? majorCol.g : minorCol.g,
+                major ? majorCol.b : minorCol.b, 255);
+            SDL_RenderLine(renderer,
+                sp.x, canvasY + RULER_THICK - tickH,
+                sp.x, canvasY + RULER_THICK);
+                
+            if (major && font && textEngine) {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%d", wx);
+                TTF_Text* t = TTF_CreateText(textEngine, font, buf, 0);
+                if (t) {
+                    TTF_SetTextColor(t, labelCol.r, labelCol.g, labelCol.b, labelCol.a);
+                    TTF_DrawRendererText(t, sp.x + 2.0f, canvasY + 2.0f);
+                    TTF_DestroyText(t);
+                }
+            }
+        }
+    }
+
+    // ── Vertical ruler (left strip) ──────────────────────────────────────
+    SDL_SetRenderDrawColor(renderer, bgCol.r, bgCol.g, bgCol.b, bgCol.a);
+    SDL_FRect v_ruler = { canvasX, canvasY + RULER_THICK, RULER_THICK, canvasH - RULER_THICK };
+    SDL_RenderFillRect(renderer, &v_ruler);
+
+    {
+        // Get the exact world coordinates of the canvas left edge
+        SDL_FPoint wTop = camera.screenToWorld(canvasX, canvasY);
+        SDL_FPoint wBot = camera.screenToWorld(canvasX, canvasY + canvasH);
+        int startY = (int)std::floor(wTop.y / (float)MINOR_STEP) * MINOR_STEP;
+        int endY   = (int)std::ceil (wBot.y / (float)MINOR_STEP) * MINOR_STEP;
+
+        for (int wy = startY; wy <= endY; wy += MINOR_STEP) {
+            bool major = ((wy % MAJOR_STEP) == 0);
+            
+            // FIX: Use wTop.x instead of 0.0f for the same alignment reasons.
+            SDL_FPoint sp = camera.worldToScreen(wTop.x, (float)wy);
+            
+            if (sp.y < canvasY + RULER_THICK || sp.y > canvasY + canvasH) continue;
+            float tickW = major ? RULER_THICK : RULER_THICK * 0.45f;
+            SDL_SetRenderDrawColor(renderer,
+                major ? majorCol.r : minorCol.r,
+                major ? majorCol.g : minorCol.g,
+                major ? majorCol.b : minorCol.b, 255);
+            SDL_RenderLine(renderer,
+                canvasX + RULER_THICK - tickW, sp.y,
+                canvasX + RULER_THICK,         sp.y);
+                
+            if (major && font && textEngine) {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%d", wy);
+                TTF_Text* t = TTF_CreateText(textEngine, font, buf, 0);
+                if (t) {
+                    TTF_SetTextColor(t, labelCol.r, labelCol.g, labelCol.b, labelCol.a);
+                    TTF_DrawRendererText(t, canvasX + 2.0f, sp.y + 2.0f);
+                    TTF_DestroyText(t);
+                }
+            }
+        }
+    }
+
+    // Corner square covers the overlap of both strips.
+    SDL_SetRenderDrawColor(renderer, 35, 35, 35, 240);
+    SDL_FRect square = { canvasX, canvasY, RULER_THICK, RULER_THICK };
+    SDL_RenderFillRect(renderer, &square);
+}
+
+
+
+void render_system_and_scene_gui_in_editor(
+    SDL_Renderer* renderer,
+    TTF_TextEngine* textEngine,
+    TTF_Font* font,
+    const ECSWorld & world,
+    float viewX, float viewY,
+    float scrollX, float scrollY,
+    std::vector<std::unique_ptr<Gui::IGuiElement>>& guiElements,
+    Tools::Camera& camera)
+{
+    // NOTE: camera.targetX/targetY are already kept in sync with
+    // editorScrollX/editorScrollY (scrollbars and zoom write directly into
+    // the camera target, and main.cpp mirrors camera.targetX/Y back into
+    // editorScrollX/Y every frame). Adding scrollX/scrollY to camera.targetX
+    // here would double-count the pan/scroll offset for entity rendering,
+    // desyncing what's drawn from what edit_object_with_editor_mouse picks
+    // via camera.screenToWorld() as soon as the camera is panned or zoomed.
+    // So entities are rendered using the camera target as-is.
+    float savedTargetX = camera.targetX;
+    float savedTargetY = camera.targetY;
+
+    // ── Pass 1: Entities, transformed through the camera ─────────────────
     for (Entity i = 0; i < world.entity_count; ++i) {
         if (!world.has_position[i]) continue;
 
-        float logicalX = world.position_pool[i].x;
-        float logicalY = world.position_pool[i].y;
-        float screenX = viewX + logicalX - scrollX;
-        float screenY = viewY + logicalY - scrollY;
+        // Use camera to get screen coordinates
+        SDL_FPoint screen = camera.worldToScreen(
+            world.position_pool[i].x, world.position_pool[i].y);
+        float screenX = screen.x;
+        float screenY = screen.y;
 
         float w = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f;
         float h = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f;
-        float centerX = screenX + w * 0.5f;
-        float centerY = screenY + h * 0.5f;
+        
+        // Scale dimensions by camera zoom
+        float scaledW = w * camera.zoom;
+        float scaledH = h * camera.zoom;
+        float centerX = screenX + scaledW * 0.5f;
+        float centerY = screenY + scaledH * 0.5f;
 
         // Render texture (static TextureRef, or an AnimationState's current
         // frame image even when there's no TextureRef component at all).
-        // hasTexture reflects whether something was actually drawn, not just
-        // whether the component exists -- an AnimationState with no frames
-        // loaded yet should still fall back to the outline below.
         bool hasTexture = false;
         if (world.has_texture_ref[i] || world.has_animation_state[i]) {
-            hasTexture = render_entity_texture(renderer, world, i, screenX, screenY);
+            hasTexture = render_entity_texture(renderer, world, i, screenX, screenY, camera.zoom);
         }
 
         // Draw transformed outline (if no texture or selected)
         bool isSelected = world.has_selection[i] && world.selection_pool[i].isSelected;
         if (!hasTexture || isSelected) {
             float rot = world.has_rotation[i] ? world.rotation_pool[i].degrees * (M_PI / 180.0f) : 0.0f;
-            float sx = world.has_scale[i] ? world.scale_pool[i].x : 1.0f;
-            float sy = world.has_scale[i] ? world.scale_pool[i].y : 1.0f;
+            float sx = (world.has_scale[i] ? world.scale_pool[i].x : 1.0f) * camera.zoom;
+            float sy = (world.has_scale[i] ? world.scale_pool[i].y : 1.0f) * camera.zoom;
 
             SDL_FPoint corners[4] = {
                 {-w/2.0f, -h/2.0f},
@@ -6499,16 +6706,17 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
             render_transform_gizmo(renderer, centerX, centerY, true);
         }
 
-        // rot/sx/sy hoisted here (out of the physics-overlay `if` below) so the
-        // vertex-handle block further down can reuse the exact same values/transform
-        // instead of drawing handles that ignore rotation and scale.
+        // rot/sx/sy hoisted here so the vertex-handle block further down can reuse them
         float rot = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
         float sx = world.has_scale[i] ? world.scale_pool[i].x : 1.0f;
         float sy = world.has_scale[i] ? world.scale_pool[i].y : 1.0f;
 
         // Render physics overlay LAST (aside from metadata label and vertex handles)
         if (world.has_physics_body[i]) {
-            render_physics_shape_overlay(renderer, world.physics_body_pool[i], centerX, centerY, rot, sx, sy);
+            render_physics_shape_overlay(renderer, world.physics_body_pool[i], 
+                            centerX, centerY, rot, 
+                            world.has_scale[i] ? world.scale_pool[i].x * camera.zoom : camera.zoom,
+                            world.has_scale[i] ? world.scale_pool[i].y * camera.zoom : camera.zoom);
         }
 
         // --- Vertex handles (only for selected polygon entities) ---
@@ -6516,25 +6724,13 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
             world.physics_body_pool[i].shapeType == Physics::ShapeType::Polygon) {
             auto& phys = world.physics_body_pool[i];
             if (!phys.polygonPoints.empty()) {
-                // IMPORTANT: polygonPoints are stored relative to the physics
-                // body's OWN width/height (phys.width/phys.height, edited via
-                // "phys_w"/"phys_h"), NOT the entity's rectangle-shape w/h
-                // (edited via "rect_w"/"rect_h", the `w`/`h` variables above).
-                // Those two sizes are independent fields and can differ, so
-                // using `w`/`h` here made the handles drift away from the
-                // actual polygon fill whenever the rectangle shape was resized
-                // without also resizing the physics body.
                 float hw = phys.width * 0.5f;
                 float hh = phys.height * 0.5f;
                 float rotRad = rot * 3.14159265f / 180.0f;
                 float cosR = cos(rotRad);
                 float sinR = sin(rotRad);
 
-                // Draw a small square (or circle) at each vertex
                 for (const auto& pt : phys.polygonPoints) {
-                    // Re-center like render_physics_shape_overlay does, then
-                    // apply the SAME scale-then-rotate transform, so handles
-                    // track the shape exactly instead of only the fill/outline doing so.
                     float lx = pt.x - hw;
                     float ly = pt.y - hh;
                     float sxp = lx * sx;
@@ -6566,15 +6762,18 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
         }
     }
 
-    // --- Render GUI elements ---
+    // ── Pass 2: World-space axes (drawn through the camera transform) ────
+    render_world_axes(renderer, camera, viewX, viewY, canvasViewW, canvasViewH);
+
+    // ── Pass 3: GUI elements (screen-space, with legacy scroll offsets) ──
     float guiOffsetX = scrollX - viewX;
     float guiOffsetY = scrollY - viewY;
-    for (auto & elem : guiElements) {
+    for (auto& elem : guiElements) {
         elem->render(guiOffsetX, guiOffsetY);
         elem->renderSelectionOutline(renderer, guiOffsetX, guiOffsetY);
     }
 
-    // --- Draw Grid (if enabled) ---
+    // ── Pass 4: Optional grid ────────────────────────────────────────────
     if (editor_showGrid) {
         SDL_SetRenderDrawColor(renderer, 100, 100, 100, 100);
         float startX = viewX - fmod(scrollX, editor_cellW);
@@ -6586,25 +6785,35 @@ float scrollX, float scrollY, std::vector<std::unique_ptr<Gui::IGuiElement>>& gu
             SDL_RenderLine(renderer, viewX, y, viewX + canvasViewW, y);
         }
     }
+
+    // ── Pass 5: Screen-space ruler (drawn last so it sits on top) ────────
+    render_canvas_ruler(renderer, textEngine, font, camera, viewX, viewY, canvasViewW, canvasViewH);
+
+    // Restore the camera target (main.cpp owns it).
+    camera.targetX = savedTargetX;
+    camera.targetY = savedTargetY;
 }
 
 // 2. Pure Game Render System (NO editor canvas offset)
 // This replaces render_system_in_editor by removing the "+ 105" offset
-void render_system_game(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font, const ECSWorld& world) {
+void render_system_game_debug(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font, const ECSWorld& world) {
     for (Entity i = 0; i < world.entity_count; ++i) {
         if (world.has_position[i]) {
+            
             // Pure position, NO + 105 offset!
             SDL_FRect outlineRect = { 
                 world.position_pool[i].x, 
                 world.position_pool[i].y, 
                 50.0f, 50.0f 
             };
+
             if (world.has_rectangle_shape[i]) {
                 outlineRect.w = world.rectangle_shape_pool[i].w;
                 outlineRect.h = world.rectangle_shape_pool[i].h;
             }
-            
+        
             SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+            
             
             if (world.has_metadata[i]) {
                 TTF_Text* textObj = TTF_CreateText(textEngine, font, world.metadata_pool[i].name.c_str(), 0);
@@ -6614,6 +6823,30 @@ void render_system_game(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_
                     TTF_DestroyText(textObj);
                 }
             }
+
+            SDL_RenderRect(renderer, &outlineRect);
+        }
+    }
+}
+
+void render_system_game_debug_no_text(SDL_Renderer* renderer, TTF_TextEngine* textEngine, const ECSWorld& world) {
+    for (Entity i = 0; i < world.entity_count; ++i) {
+        if (world.has_position[i]) {
+            
+            // Pure position, NO + 105 offset!
+            SDL_FRect outlineRect = { 
+                world.position_pool[i].x, 
+                world.position_pool[i].y, 
+                50.0f, 50.0f 
+            };
+
+            if (world.has_rectangle_shape[i]) {
+                outlineRect.w = world.rectangle_shape_pool[i].w;
+                outlineRect.h = world.rectangle_shape_pool[i].h;
+            }
+        
+            SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+
             SDL_RenderRect(renderer, &outlineRect);
         }
     }
@@ -6678,8 +6911,9 @@ const SDL_Event& e)
         float mx = e.button.x, my = e.button.y;
 
         if (isInsideCanvas(mx, my)) {
-            float logicalX = mx - canvasViewX + editorScrollX;
-            float logicalY = my - canvasViewY + editorScrollY;
+            SDL_FPoint worldPt = g_editorCamera.screenToWorld(mx, my);
+            float logicalX = worldPt.x;
+            float logicalY = worldPt.y;
 
             Entity ent = lastSelectedEntity;
             if (ent != (Entity)-1 && world.has_physics_body[ent]) {
@@ -6732,8 +6966,9 @@ const SDL_Event& e)
                 world.physics_body_pool[ent].shapeType == Physics::ShapeType::Polygon) {
 
                 auto& phys = world.physics_body_pool[ent];
-                float logicalX = mx - canvasViewX + editorScrollX;
-                float logicalY = my - canvasViewY + editorScrollY;
+                SDL_FPoint worldPt = g_editorCamera.screenToWorld(mx, my);
+                float logicalX = worldPt.x;
+                float logicalY = worldPt.y;
                 b2Vec2 localPt = worldToLocalPolygon(ent, logicalX, logicalY);
 
                 int nearestIdx = -1;
@@ -6798,8 +7033,9 @@ const SDL_Event& e)
     // --- Select mode (with gizmo) ---
     if (currentEditMode == EditMode::Select) {
         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
-            float logicalX = e.button.x - canvasViewX + editorScrollX;
-            float logicalY = e.button.y - canvasViewY + editorScrollY;
+            SDL_FPoint worldPt = g_editorCamera.screenToWorld(e.button.x, e.button.y);
+            float logicalX = worldPt.x;
+            float logicalY = worldPt.y;
 
             Entity selectedEnt = lastSelectedEntity;
             if (selectedEnt != (Entity)-1 && world.has_position[selectedEnt]) {
@@ -6957,7 +7193,9 @@ const SDL_Event& e)
     // --- Delete mode ---
     else if (currentEditMode == EditMode::Delete) {
         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
-            float logicalX = e.button.x - canvasViewX + editorScrollX; float logicalY = e.button.y - canvasViewY + editorScrollY;
+            SDL_FPoint worldPt = g_editorCamera.screenToWorld(e.button.x, e.button.y);
+            float logicalX = worldPt.x;
+            float logicalY = worldPt.y;
             Gui::IGuiElement* guiToDelete = nullptr;
             for (auto& elem : guiElements) {
                 if (logicalX >= elem->getX() && logicalX <= elem->getX() + elem->getWidth() &&
@@ -6994,8 +7232,9 @@ float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame)
     if (currentEditMode == EditMode::Dialog) return;
     if (!confirmDown) isGamepadDragging = false;
 
-    float logicalX = cursorX - canvasViewX + editorScrollX;
-    float logicalY = cursorY - canvasViewY + editorScrollY;
+    SDL_FPoint worldPt = g_editorCamera.screenToWorld(cursorX, cursorY);
+    float logicalX = worldPt.x;
+    float logicalY = worldPt.y;
 
     Gui::IGuiElement* topmostGui = nullptr;
     for (auto& elem : guiElements) {
@@ -7151,9 +7390,68 @@ struct Scene {
 };
 
 
-TTF_Font* ProjectScript_TTF_OpenFont(const char* file, float ptsize)
+
+inline bool ProjectScript_TTF_LoadFont(const char* name, const char* file, float pt_size)
 {
-    return TTF_OpenFont((getProjectsRootForScripts() / std::filesystem::path(file)).string().c_str(), (int)ptsize);
+    return g_resources.FontManager.Load(name, (getProjectsRootForScripts() / std::filesystem::path(file)).string(), pt_size);
+}
+
+inline TTF_Font* ProjectScript_TTF_GetFont(const char* name)
+{
+    return g_resources.FontManager.Get(name);
+}
+
+inline void ProjectScript_TTF_Clear()
+{
+    g_resources.FontManager.Clear();
+}
+
+inline bool ProjectScript_IMG_LoadTexture(const char* name, const char* file)
+{
+    return g_resources.TextureManager.Load(name, (getProjectsRootForScripts() / std::filesystem::path(file)).string());
+}
+
+inline SDL_Texture* ProjectScript_IMG_GetTexture(const char* name)
+{
+    return g_resources.TextureManager.Get(name);
+}
+
+inline void ProjectScript_IMG_Clear()
+{
+    g_resources.TextureManager.Clear();
+}
+
+
+inline void ProjectScript_MIXER_LoadSound(const char* name, const char* file, bool stream)
+{
+    // use steam = true, if it is long/background music
+    return g_resources.AudioManager.Load(name, (getProjectsRootForScripts() / std::filesystem::path(file)).string(), stream);
+}
+
+inline void ProjectScript_MIXER_PlaySound(const std::string &name, float volume = (1.0F), float pitch = (1.0F))
+{
+    return g_resources.AudioManager.PlaySfx(name, volume, pitch);
+}
+
+inline void ProjectScript_MIXER_PlayHit(const std::string& name, float impulse, float pitch = 1.0f)
+{
+    return g_resources.AudioManager.PlayHit(name, impulse, pitch);
+}
+
+
+inline void ProjectScript_MIXER_Clear()
+{
+    g_resources.AudioManager.Clear();
+}
+
+
+Entity findEntityByName(Scene* scene, const std::string& name) {
+    if (!scene) return (Entity)-1;
+    ECSWorld& world = scene->world;
+    for (Entity i = 0; i < world.entity_count; ++i) {
+        if (world.has_metadata[i] && world.metadata_pool[i].name == name) return i;
+    }
+    return (Entity)-1;
 }
 
 class SceneParser {

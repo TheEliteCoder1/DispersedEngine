@@ -14,7 +14,6 @@ static MainMenuScript* g_script = nullptr;
 static MainMenuContext* g_ctx = nullptr;
 static bool g_running = true;
 static Uint64 g_lastTime = 0;
-EngineResources g_resources;
 
 
 #ifdef __EMSCRIPTEN__
@@ -66,7 +65,7 @@ void main_loop_callback() {
         SDL_RenderFillRect(g_renderer, &band);
     }
 
-    render_system_game(g_renderer, g_textEngine, g_bodyFont, g_scene->world);
+    render_system_game_debug(g_renderer, g_textEngine, g_bodyFont, g_scene->world);
 
     for (auto& elem : g_scene->guiElements)
         elem->render(0.0f);
@@ -96,8 +95,11 @@ int main(int argc, char* argv[]) {
         TTF_Quit(); SDL_Quit(); return -1;
     }
 
-    TTF_Font* bodyFont = ProjectScript_TTF_OpenFont("SampleProject/assets/fonts/fredoka.ttf", 22);
-    TTF_Font* titleFont = ProjectScript_TTF_OpenFont("SampleProject/assets/fonts/fredoka.ttf", 52);
+    ProjectScript_TTF_LoadFont("bodyFont", "SampleProject/assets/fonts/fredoka.ttf", 22);
+    ProjectScript_TTF_LoadFont("titleFont", "SampleProject/assets/fonts/fredoka.ttf", 52);
+
+    TTF_Font* bodyFont = ProjectScript_TTF_GetFont("bodyFont");
+    TTF_Font* titleFont = ProjectScript_TTF_GetFont("titleFont");
     if (!bodyFont) std::cerr << "[Warning] Could not load body font.\n";
     if (!titleFont) std::cerr << "[Warning] Could not load title font.\n";
 
@@ -176,8 +178,6 @@ int main(int argc, char* argv[]) {
             SDL_RenderFillRect(renderer, &band);
         }
 
-        render_system_game(renderer, textEngine, bodyFont, scene.world);
-
         for (auto& elem : scene.guiElements)
             elem->render(0.0f);
 
@@ -187,13 +187,11 @@ int main(int argc, char* argv[]) {
 #endif
 
     script.onEnd();
-
-    if (titleFont) TTF_CloseFont(titleFont);
-    if (bodyFont) TTF_CloseFont(bodyFont);
+    ProjectScript_TTF_Clear();
+    TTF_Quit();
     if (textEngine) TTF_DestroyRendererTextEngine(textEngine);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
-    TTF_Quit();
     SDL_Quit();
     return 0;
 }

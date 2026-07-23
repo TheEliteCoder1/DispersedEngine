@@ -1,0 +1,25 @@
+{
+    "bodyType": 2,
+    "category": 1,
+    "density": 1.0,
+    "height": 50.0,
+    "isSensor": false,
+    "mask": 65535,
+    "polygonPoints": [
+        {
+            "x": 25.0,
+            "y": 0.0
+        },
+        {
+            "x": 50.0,
+            "y": 50.0
+        },
+        {
+            "x": 0.0,
+            "y": 50.0
+        }
+    ],
+    "radius": 15.0,
+    "shapeType": 0,
+    "width": 50.0
+}
