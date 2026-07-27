@@ -17,6 +17,7 @@
 #include <array>
 #include <tuple>
 #include <stdio.h>
+#include <sstream>
 #include <SDL3/SDL.h>
 #include "physics.h"
 #include "music.h"
@@ -144,14 +145,29 @@ inline std::filesystem::path getProjectsPathFS(const std::string& relativePath =
 // is resolved elsewhere in the engine.
 inline std::string resolveComponentResourcePath(const std::string& projectsRoot, const std::string& storedPath) {
     if (storedPath.empty()) return storedPath;
-    std::filesystem::path p(storedPath);
-    if (p.is_absolute()) return storedPath;
-    // Use filesystem path joining (not raw string concatenation) so a
-    // missing separator between projectsRoot and storedPath can't glue the
-    // two together (e.g. ".../ChefSim" + "resources/x.animres" becoming
-    // ".../ChefSimresources/x.animres"), and normalize away any stray ".."
-    // segments so repeated resolve/store round-trips can't pile up into
-    // paths like "ChefSim../../../projects/../../../projects/...".
+
+    std::string path = storedPath;
+
+#ifdef __EMSCRIPTEN__
+    // Normalise backslashes to forward slashes
+    std::replace(path.begin(), path.end(), '\\', '/');
+
+    // If path starts with the project name (last component of projectsRoot), strip it
+    std::string projectName = std::filesystem::path(projectsRoot).filename().string();
+    if (!projectName.empty() && path.find(projectName + "/") == 0) {
+        path = path.substr(projectName.size() + 1);
+    }
+
+    // If path is now absolute (starts with '/'), keep it; otherwise prepend projectsRoot
+    if (!path.empty() && path[0] == '/') {
+        return path;
+    }
+#endif
+
+    std::filesystem::path p(path);
+    if (p.is_absolute()) {
+        return path;
+    }
     return (std::filesystem::path(projectsRoot) / p).lexically_normal().string();
 }
 
@@ -752,6 +768,8 @@ public:
         return j;
     }
 };
+
+
 
 // Single shared instance, engine-wide. Declared `inline` (a C++17 feature)
 // so this header can be included from multiple translation units without
@@ -1532,13 +1550,23 @@ namespace Gui {
     class LineEdit : public ITextInput, public IGuiElement {
     public:
         LineEdit(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
-                 SDL_FRect rect, const std::string& placeholder = "Type here...")
+                SDL_FRect rect, const std::string& placeholder = "Type here...")
             : renderer(renderer), textEngine(textEngine), font(font),
-              rect(rect), placeholder(placeholder) {}
+            rect(rect), placeholder(placeholder), cursorPos(0), scrollOffset(0) {}
 
-        void appendText(const std::string& str) override { text += str; }
-        void removeLastChar() override { if (!text.empty()) text.pop_back(); }
-        void setActive(bool a) override { active = a; }
+        void appendText(const std::string& str) override {
+            if (!active) return;
+            text.insert(cursorPos, str);
+            cursorPos += (int)str.size();
+            ensureCursorVisible();
+        }
+        void removeLastChar() override {
+            if (!active || text.empty() || cursorPos == 0) return;
+            text.erase(cursorPos - 1, 1);
+            --cursorPos;
+            ensureCursorVisible();
+        }
+        void setActive(bool a) override { active = a; if (!active) cursorPos = (int)text.size(); }
         const SDL_FRect& getRect() const override { return rect; }
 
         std::string getType() const override { return "LineEdit"; }
@@ -1547,9 +1575,20 @@ namespace Gui {
         float getWidth() const override { return rect.w; }
         float getHeight() const override { return rect.h; }
         void setRect(SDL_FRect r) override { rect = r; }
-        void setPos(SDL_Point p) override {rect.x = p.x; rect.y = p.y;};
+        void setPos(SDL_Point p) override { rect.x = p.x; rect.y = p.y; }
         const std::string& getPlaceholder() const { return placeholder; }
         void setPlaceholder(const std::string& p) { placeholder = p; }
+        const std::string& getText() const { return text; }
+        void clear() { text.clear(); cursorPos = 0; scrollOffset = 0; }
+        bool isActive() const override { return active; }
+
+        // New: set text and reset cursor to end
+        void setText(const std::string& t) {
+            text = t;
+            cursorPos = (int)text.size();
+            scrollOffset = 0;
+            ensureCursorVisible();
+        }
 
         bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetX, float offsetY) override {
             SDL_FRect originalRect = rect;
@@ -1560,136 +1599,179 @@ namespace Gui {
             if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                 float mx = ev.button.x, my = ev.button.y;
                 bool hit = mx >= rect.x && mx <= rect.x + rect.w && my >= rect.y && my <= rect.y + rect.h;
-                if (hit) { if (!active) { active = true; SDL_StartTextInput(window); } restore(); return true; } 
-                else { if (active) { active = false; SDL_StopTextInput(window); } restore(); return false; }
+                if (hit) {
+                    if (!active) {
+                        active = true;
+                        SDL_StartTextInput(window);
+                        cursorPos = (int)text.size();
+                        ensureCursorVisible();
+                    }
+                    restore();
+                    return true;
+                } else {
+                    if (active) {
+                        active = false;
+                        SDL_StopTextInput(window);
+                    }
+                    restore();
+                    return false;
+                }
             }
             if (!active) { restore(); return false; }
-            if (ev.type == SDL_EVENT_TEXT_INPUT) { text += ev.text.text; restore(); return true; }
-            if (ev.type == SDL_EVENT_KEY_DOWN) {
-                if (ev.key.key == SDLK_BACKSPACE && !text.empty()) { text.pop_back(); }
-                bool ret = (ev.key.key != SDLK_RETURN && ev.key.key != SDLK_ESCAPE);
-                restore(); return ret;
+
+            if (ev.type == SDL_EVENT_TEXT_INPUT) {
+                text.insert(cursorPos, ev.text.text);
+                cursorPos += (int)strlen(ev.text.text);
+                ensureCursorVisible();
+                restore();
+                return true;
             }
-            restore(); return false;
+            if (ev.type == SDL_EVENT_KEY_DOWN) {
+                switch (ev.key.key) {
+                    case SDLK_BACKSPACE:
+                        if (cursorPos > 0) {
+                            text.erase(cursorPos - 1, 1);
+                            --cursorPos;
+                            ensureCursorVisible();
+                        }
+                        restore(); return true;
+                    case SDLK_DELETE:
+                        if (cursorPos < (int)text.size()) {
+                            text.erase(cursorPos, 1);
+                            ensureCursorVisible();
+                        }
+                        restore(); return true;
+                    case SDLK_LEFT:
+                        if (cursorPos > 0) { --cursorPos; ensureCursorVisible(); }
+                        restore(); return true;
+                    case SDLK_RIGHT:
+                        if (cursorPos < (int)text.size()) { ++cursorPos; ensureCursorVisible(); }
+                        restore(); return true;
+                    case SDLK_HOME:
+                        cursorPos = 0; ensureCursorVisible(); restore(); return true;
+                    case SDLK_END:
+                        cursorPos = (int)text.size(); ensureCursorVisible(); restore(); return true;
+                    case SDLK_RETURN:
+                    case SDLK_ESCAPE:
+                        active = false; SDL_StopTextInput(window); restore(); return true;
+                    default:
+                        break;
+                }
+            }
+            restore();
+            return false;
         }
 
-        void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
-            SDL_FRect r = rect; r.x -= offsetX; r.y -= offsetY; 
+        void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY,
+                        SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
+            SDL_FRect r = rect; r.x -= offsetX; r.y -= offsetY;
             bool hit = cursorX >= r.x && cursorX <= r.x + r.w && cursorY >= r.y && cursorY <= r.y + r.h;
             if (confirmDown && !confirmDownLastFrame) {
                 if (hit) {
-                    if (!active) { active = true; }
+                    if (!active) { active = true; SDL_StartTextInput(window); cursorPos = (int)text.size(); ensureCursorVisible(); }
                 } else {
-                    if (active) active = false;
+                    if (active) { active = false; SDL_StopTextInput(window); }
                 }
             }
+            // Gamepad doesn't provide text input; keyboard is assumed.
         }
 
         void render(float offsetX, float offsetY) override {
             SDL_FRect originalRect = rect;
             rect.x -= offsetX;
             rect.y -= offsetY;
-            
+
             SDL_Color bg = active ? SDL_Color{255,255,255,255} : SDL_Color{245,245,255,255};
             SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, bg.a);
             SDL_RenderFillRect(renderer, &rect);
             SDL_Color border = active ? SDL_Color{52,110,235,255} : SDL_Color{130,130,130,255};
             SDL_SetRenderDrawColor(renderer, border.r, border.g, border.b, border.a);
             SDL_RenderRect(renderer, &rect);
-            
-            if (!font || !textEngine) {
-                rect = originalRect;
-                return;
-            }
-            
+
+            if (!font || !textEngine) { rect = originalRect; return; }
+
             bool showPlaceholder = text.empty() && !active;
             const std::string& display = showPlaceholder ? placeholder : text;
             SDL_Color col = showPlaceholder ? SDL_Color{150,150,150,255} : SDL_Color{20,20,20,255};
-            
-            std::string rendered = display;
-            if (active) {
-                Uint64 ticks = SDL_GetTicks();
-                if ((ticks / 500) % 2 == 0) rendered += "|";
-            }
-            
-            // Calculate text width
-            int textWidth = 0, textHeight = 0;
-            TTF_GetStringSize(font, rendered.c_str(), rendered.size(), &textWidth, &textHeight);
-            
-            float availableWidth = rect.w - 16.0f; // padding on both sides
-            float textStartX = rect.x + 8.0f;
-            float renderX = textStartX;
-            
-            // Horizontal scrolling logic
-            if (textWidth > availableWidth && !rendered.empty()) {
-                // Need to scroll - find the right starting position
-                int visibleStart = 0;
-                int accumulatedWidth = 0;
-                
-                // Measure characters to find where to start displaying
-                for (size_t i = 0; i < rendered.size(); ++i) {
-                    int charW = 0, charH = 0;
-                    std::string ch = rendered.substr(i, 1);
-                    TTF_GetStringSize(font, ch.c_str(), 1, &charW, &charH);
-                    
-                    if (i < rendered.size() - 1) { // Don't count cursor for scroll calculation
-                        accumulatedWidth += charW;
-                    }
-                    
-                    // If we've exceeded available width, start from here
-                    if (accumulatedWidth > availableWidth) {
-                        visibleStart = (int)i;
-                        break;
-                    }
-                }
-                
-                // If text still doesn't fit, show the end of the text
-                if (visibleStart == 0 && accumulatedWidth > availableWidth) {
-                    // Work backwards to find what fits
-                    visibleStart = 0;
-                    accumulatedWidth = 0;
-                    for (int i = (int)rendered.size() - 1; i >= 0; --i) {
-                        int charW = 0, charH = 0;
-                        std::string ch = rendered.substr(i, 1);
-                        TTF_GetStringSize(font, ch.c_str(), 1, &charW, &charH);
-                        accumulatedWidth += charW;
-                        if (accumulatedWidth > availableWidth) {
-                            visibleStart = i + 1;
+
+            // Build visible substring based on scrollOffset
+            std::string visibleText;
+            int visibleStart = 0;
+            if (!display.empty()) {
+                // Measure total width and find start index
+                int totalW = 0, totalH = 0;
+                TTF_GetStringSize(font, display.c_str(), display.size(), &totalW, &totalH);
+                float availableWidth = rect.w - 16.0f;
+                if (totalW > availableWidth) {
+                    // We have scrolling. Find the first character that fits given scrollOffset.
+                    // scrollOffset is in pixels from the left.
+                    int curW = 0;
+                    for (size_t i = 0; i < display.size(); ++i) {
+                        int cw = 0, ch = 0;
+                        std::string chStr = display.substr(i, 1);
+                        TTF_GetStringSize(font, chStr.c_str(), 1, &cw, &ch);
+                        if (curW + cw > scrollOffset) {
+                            visibleStart = (int)i;
                             break;
                         }
+                        curW += cw;
+                    }
+                    // Now find how many characters fit from visibleStart
+                    int w = 0;
+                    for (size_t i = visibleStart; i < display.size(); ++i) {
+                        int cw = 0, ch = 0;
+                        std::string chStr = display.substr(i, 1);
+                        TTF_GetStringSize(font, chStr.c_str(), 1, &cw, &ch);
+                        if (w + cw > availableWidth) break;
+                        w += cw;
+                        visibleText += chStr;
+                    }
+                } else {
+                    visibleText = display;
+                }
+            }
+
+            // Draw visible text
+            if (!visibleText.empty() || active) {
+                // For cursor, we need to draw the text plus possibly a caret.
+                std::string toDraw = visibleText;
+                if (active) {
+                    Uint64 ticks = SDL_GetTicks();
+                    if ((ticks / 500) % 2 == 0) {
+                        // Determine where to draw the cursor relative to visibleText
+                        // If cursor is before visibleStart, draw at start; if after visibleStart+visibleText size, draw at end.
+                        int cursorLocal = cursorPos - visibleStart;
+                        if (cursorLocal < 0) cursorLocal = 0;
+                        if (cursorLocal > (int)visibleText.size()) cursorLocal = (int)visibleText.size();
+                        // Insert a '|' at cursorLocal
+                        toDraw.insert(cursorLocal, "|");
                     }
                 }
-                
-                // Render visible portion
-                if (visibleStart < (int)rendered.size()) {
-                    std::string visibleText = rendered.substr(visibleStart);
-                    TTF_Text* t = TTF_CreateText(textEngine, font, visibleText.c_str(), 0);
-                    if (t) {
-                        TTF_SetTextColor(t, col.r, col.g, col.b, col.a);
-                        TTF_DrawRendererText(t, textStartX, rect.y + (rect.h - 20.0f) * 0.5f);
-                        TTF_DestroyText(t);
-                    }
-                }
-            } else {
-                // Text fits - render normally
-                TTF_Text* t = TTF_CreateText(textEngine, font, rendered.c_str(), 0);
+                TTF_Text* t = TTF_CreateText(textEngine, font, toDraw.c_str(), 0);
                 if (t) {
                     TTF_SetTextColor(t, col.r, col.g, col.b, col.a);
-                    TTF_DrawRendererText(t, textStartX, rect.y + (rect.h - 20.0f) * 0.5f);
+                    // Compute draw x: we want to draw from the left but shifted by -scrollOffset relative to the full text.
+                    // Since visibleText starts at visibleStart, we need to offset the drawing by the width of the prefix.
+                    float drawX = rect.x + 8.0f;
+                    // If we scrolled, we need to subtract the width of the hidden prefix.
+                    if (visibleStart > 0) {
+                        std::string prefix = display.substr(0, visibleStart);
+                        int pw = 0, ph = 0;
+                        TTF_GetStringSize(font, prefix.c_str(), prefix.size(), &pw, &ph);
+                        drawX -= pw;
+                    }
+                    TTF_DrawRendererText(t, drawX, rect.y + (rect.h - 20.0f) * 0.5f);
                     TTF_DestroyText(t);
                 }
             }
-            
+
             rect = originalRect;
         }
 
-        void clear() { text.clear(); }
         void deactivate(SDL_Window* window) {
             active = false;
             SDL_StopTextInput(window);
         }
-        const std::string& getText() const { return text; }
-        bool isActive() const override { return active; }
 
     private:
         SDL_Renderer* renderer;
@@ -1698,6 +1780,492 @@ namespace Gui {
         SDL_FRect rect;
         std::string placeholder, text;
         bool active = false;
+        int cursorPos = 0;
+        int scrollOffset = 0; // pixel offset from the left
+
+        void ensureCursorVisible() {
+            if (text.empty()) { scrollOffset = 0; return; }
+            // Measure text up to cursor
+            std::string prefix = text.substr(0, cursorPos);
+            int pw = 0, ph = 0;
+            TTF_GetStringSize(font, prefix.c_str(), prefix.size(), &pw, &ph);
+            float availableWidth = rect.w - 16.0f;
+            // If cursor is beyond visible area, adjust scrollOffset
+            if (pw > scrollOffset + availableWidth) {
+                // Move scroll so cursor is at the right edge
+                scrollOffset = pw - availableWidth;
+            } else if (pw < scrollOffset) {
+                // Move scroll so cursor is at left edge
+                scrollOffset = pw;
+            }
+            // Clamp to 0..max
+            int totalW = 0, totalH = 0;
+            TTF_GetStringSize(font, text.c_str(), text.size(), &totalW, &totalH);
+            int maxScroll = std::max(0, totalW - (int)availableWidth);
+            scrollOffset = std::clamp(scrollOffset, 0, maxScroll);
+        }
+    };
+
+    class TextArea : public IGuiElement {
+    public:
+        TextArea(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
+                SDL_FRect rect)
+            : renderer(renderer), textEngine(textEngine), font(font),
+            rect(rect), lines(1, ""), cursorRow(0), cursorCol(0),
+            scrollX(0), scrollY(0) {
+            vScrollbar.setOrientation(Gui::ScrollOrientation::Vertical);
+            hScrollbar.setOrientation(Gui::ScrollOrientation::Horizontal);
+            vScrollbar.onChange = [this](float v) { scrollY = v / m_zoom; };
+            hScrollbar.onChange = [this](float v) { scrollX = v / m_zoom; };
+            refreshScrollbars();
+        }
+
+        // IGuiElement overrides
+        std::string getType() const override { return "TextArea"; }
+        float getX() const override { return rect.x; }
+        float getY() const override { return rect.y; }
+        float getWidth() const override { return rect.w; }
+        float getHeight() const override { return rect.h; }
+        void setRect(SDL_FRect r) override { rect = r; refreshScrollbars(); }
+        void setPos(SDL_Point p) override { rect.x = p.x; rect.y = p.y; refreshScrollbars(); }
+
+    private:
+    
+        struct TextToken { size_t start, len; bool isKeyword; };
+
+        // Lightweight tokenizer for C++17 keywords typically found inside
+        // function bodies. Deliberately excludes preprocessor directives
+        // (#include, #define, etc.) and namespace/class/struct declarations
+        // since those live outside method bodies.
+        static std::vector<TextToken> tokenizeCppBody(const std::string& line) {
+            static const std::unordered_set<std::string> keywords = {
+                "if", "else", "for", "while", "do", "return", "break", "continue",
+                "switch", "case", "default", "goto", "throw", "try", "catch",
+                "new", "delete", "this", "sizeof", "alignof", "decltype", "noexcept",
+                "static_cast", "dynamic_cast", "const_cast", "reinterpret_cast",
+                "true", "false", "nullptr",
+                "auto", "void", "int", "float", "double", "bool", "char",
+                "const", "static", "virtual", "override", "final",
+                "long", "short", "unsigned", "signed",
+                "co_await", "co_return", "co_yield"
+            };
+
+            std::vector<TextToken> tokens;
+            size_t i = 0;
+            while (i < line.size()) {
+                if (std::isalpha((unsigned char)line[i]) || line[i] == '_') {
+                    size_t j = i;
+                    while (j < line.size() && (std::isalnum((unsigned char)line[j]) || line[j] == '_')) j++;
+                    std::string word = line.substr(i, j - i);
+                    bool isKw = keywords.count(word) > 0;
+                    tokens.push_back({i, j - i, isKw});
+                    i = j;
+                } else if (std::isdigit((unsigned char)line[i])) {
+                    size_t j = i;
+                    while (j < line.size() && (std::isalnum((unsigned char)line[j]) || line[j] == '.')) j++;
+                    tokens.push_back({i, j - i, false});
+                    i = j;
+                } else if (line[i] == '/' && i + 1 < line.size() && line[i+1] == '/') {
+                    tokens.push_back({i, line.size() - i, false});
+                    break;
+                } else if (line[i] == '"' || line[i] == '\'') {
+                    char quote = line[i];
+                    size_t j = i + 1;
+                    while (j < line.size() && line[j] != quote) {
+                        if (line[j] == '\\' && j + 1 < line.size()) j++;
+                        j++;
+                    }
+                    if (j < line.size()) j++;
+                    tokens.push_back({i, j - i, false});
+                    i = j;
+                } else {
+                    tokens.push_back({i, 1, false});
+                    i++;
+                }
+            }
+            return tokens;
+        }
+
+    private:
+        float m_zoom = 1.0f;
+
+    public:
+        void setZoom(float z) { m_zoom = z; refreshScrollbars(); }
+
+    
+
+        void setText(const std::string& text) {
+            lines.clear();
+            std::stringstream ss(text);
+            std::string line;
+            while (std::getline(ss, line)) lines.push_back(line);
+            if (lines.empty()) lines.push_back("");
+            cursorRow = 0; cursorCol = 0;  // <-- start at top
+            scrollX = scrollY = 0;
+            refreshScrollbars();
+            ensureCursorVisible();
+        }
+
+        std::string getText() const {
+            std::string result;
+            for (size_t i = 0; i < lines.size(); ++i) {
+                result += lines[i];
+                if (i + 1 < lines.size()) result += '\n';
+            }
+            return result;
+        }
+
+        bool isActive() const { return active; }
+        void setActive(bool a) { active = a; }
+
+        bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetX, float offsetY) override {
+            // Scrollbars first
+            if (vScrollbar.handleEvent(ev)) return true;
+            if (hScrollbar.handleEvent(ev)) return true;
+
+            if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
+                float mx = ev.button.x, my = ev.button.y;
+                SDL_FRect shifted = { rect.x - offsetX, rect.y - offsetY, rect.w, rect.h };
+                if (inRect(mx, my, shifted)) {
+                    // Activate if not already
+                    if (!active) {
+                        active = true;
+                        SDL_StartTextInput(window);
+                    }
+                    // Always reposition cursor
+                    float localX = (mx - shifted.x) + scrollX * m_zoom;
+                    float localY = (my - shifted.y) + scrollY * m_zoom;
+                    int row = (int)(localY / (LINE_HEIGHT * m_zoom));
+                    if (row < 0) row = 0;
+                    if (row >= (int)lines.size()) row = (int)lines.size() - 1;
+                    int col = xToCol(lines[row], localX / m_zoom);
+                    cursorRow = row;
+                    cursorCol = col;
+                    ensureCursorVisible();
+                    return true;
+                } else {
+                    // Clicked outside -> deactivate
+                    if (active) {
+                        active = false;
+                        SDL_StopTextInput(window);
+                    }
+                    return false;
+                }
+            }
+
+            // ---- If not active, ignore everything else ----
+            if (!active) return false;
+
+            // Keyboard input while active
+            if (ev.type == SDL_EVENT_KEY_DOWN) {
+                bool shift = (ev.key.mod & SDL_KMOD_SHIFT) != 0;
+                switch (ev.key.key) {
+                    case SDLK_LEFT:  moveCursor(cursorRow, cursorCol - 1, shift); return true;
+                    case SDLK_RIGHT: moveCursor(cursorRow, cursorCol + 1, shift); return true;
+                    case SDLK_UP:    moveCursor(cursorRow - 1, cursorCol, shift); return true;
+                    case SDLK_DOWN:  moveCursor(cursorRow + 1, cursorCol, shift); return true;
+                    case SDLK_HOME:  moveCursor(cursorRow, 0, shift); return true;
+                    case SDLK_END:   moveCursor(cursorRow, getLineLength(cursorRow), shift); return true;
+                    case SDLK_PAGEUP: {
+                        int rows = (int)(rect.h / LINE_HEIGHT) - 1;
+                        moveCursor(cursorRow - rows, cursorCol, shift);
+                        return true;
+                    }
+                    case SDLK_PAGEDOWN: {
+                        int rows = (int)(rect.h / LINE_HEIGHT) - 1;
+                        moveCursor(cursorRow + rows, cursorCol, shift);
+                        return true;
+                    }
+                    case SDLK_BACKSPACE: backspace(); return true;
+                    case SDLK_DELETE:    deleteChar(); return true;
+                    case SDLK_RETURN:    newline(); return true;
+                    case SDLK_TAB:       insertChar('\t'); return true;
+                    case SDLK_ESCAPE:
+                        active = false;
+                        SDL_StopTextInput(window);
+                        return true;
+                    default:
+                        break;
+                }
+            }
+            if (ev.type == SDL_EVENT_TEXT_INPUT) {
+                for (const char* c = ev.text.text; *c; ++c) {
+                    if (*c >= 32 && *c < 127) insertChar(*c);
+                }
+                return true;
+            }
+            return false;
+        }
+
+        void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY,
+                        SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
+            // Not implemented for simplicity – gamepad can focus but text input is keyboard-driven.
+            if (confirmDown && !confirmDownLastFrame) {
+                SDL_FRect shifted = { rect.x - offsetX, rect.y - offsetY, rect.w, rect.h };
+                if (inRect(cursorX, cursorY, shifted)) {
+                    active = true;
+                    SDL_StartTextInput(window);
+                } else {
+                    active = false;
+                    SDL_StopTextInput(window);
+                }
+            }
+        }
+
+        void render(float offsetX, float offsetY) override {
+            SDL_FRect shifted = { rect.x - offsetX, rect.y - offsetY, rect.w, rect.h };
+            // Background
+            SDL_SetRenderDrawColor(renderer, 40, 40, 48, 255);
+            SDL_RenderFillRect(renderer, &shifted);
+            SDL_SetRenderDrawColor(renderer, 70, 70, 90, 255);
+            SDL_RenderRect(renderer, &shifted);
+            // Clip
+            SDL_Rect clip = { (int)shifted.x, (int)shifted.y, (int)shifted.w, (int)shifted.h };
+            SDL_SetRenderClipRect(renderer, &clip);
+
+            // Use actual font height to prevent vertical drift after newlines
+            float lineHeight = (float)TTF_GetFontHeight(font);
+            if (lineHeight <= 0.0f) lineHeight = 22.0f;
+
+            const SDL_Color defaultColor = {220, 220, 240, 255};
+            const SDL_Color keywordColor = {110, 160, 230, 255};
+            const SDL_Color commentColor = {90, 140, 90, 255};
+            const SDL_Color stringColor  = {210, 150, 90, 255};
+
+            // Draw text lines with scrolling
+            float y = shifted.y + 6.0f - scrollY;
+            for (int row = 0; row < (int)lines.size(); ++row) {
+                float yy = y + row * lineHeight;
+                if (yy + lineHeight < shifted.y || yy > shifted.y + shifted.h) continue;
+                const std::string& line = lines[row];
+
+                // Horizontal scroll: find start index
+                int startIdx = 0;
+                if (scrollX > 0 && !line.empty()) {
+                    int accumulated = 0;
+                    for (size_t i = 0; i < line.size(); ++i) {
+                        int cw = 0, ch = 0;
+                        std::string chStr = line.substr(i, 1);
+                        TTF_GetStringSize(font, chStr.c_str(), 1, &cw, &ch);
+                        if (accumulated + cw > scrollX) {
+                            startIdx = (int)i;
+                            break;
+                        }
+                        accumulated += cw;
+                    }
+                }
+
+                // Draw cursor for active line — uses TTF_GetStringSize which now
+                // matches the rendered glyph positions exactly, so the caret stays
+                // glued to the real glyph boundary even after indent or newline.
+                if (row == cursorRow && active) {
+                    std::string prefix = line.substr(0, cursorCol);
+                    int pw = 0, ph = 0;
+                    TTF_GetStringSize(font, prefix.c_str(), prefix.size(), &pw, &ph);
+                    float cursorX = shifted.x + 6.0f + (pw - scrollX) * m_zoom;
+                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+                    SDL_FRect cursorRect = { cursorX, yy, 2.0f, lineHeight };
+                    SDL_RenderFillRect(renderer, &cursorRect);
+                }
+
+                // Tokenize and render with syntax highlighting
+                auto tokens = tokenizeCppBody(line);
+                float drawX = shifted.x + 6.0f - scrollX * m_zoom;
+
+                for (const auto& tok : tokens) {
+                    if ((int)(tok.start + tok.len) <= startIdx) continue;
+                    std::string sub = line.substr(tok.start, tok.len);
+
+                    // Calculate token position using the same TTF_GetStringSize
+                    // call that the cursor uses — this is what fixes the drift.
+                    int prefixW = 0;
+                    if (tok.start > 0) {
+                        std::string prefix = line.substr(0, tok.start);
+                        TTF_GetStringSize(font, prefix.c_str(), prefix.size(), &prefixW, nullptr);
+                    }
+                    float tokenX = drawX + prefixW * m_zoom;
+
+                    // Determine color
+                    SDL_Color color = defaultColor;
+                    if (tok.isKeyword) {
+                        color = keywordColor;
+                    } else if (tok.start < line.size() && line[tok.start] == '/' &&
+                            tok.start + 1 < line.size() && line[tok.start+1] == '/') {
+                        color = commentColor;
+                    } else if (tok.start < line.size() &&
+                            (line[tok.start] == '"' || line[tok.start] == '\'')) {
+                        color = stringColor;
+                    }
+
+                    // Render text with zoom scaling via texture (since TTF_SetTextScale isn't available)
+                    SDL_Surface* surf = TTF_RenderText_Blended(font, sub.c_str(), (int)sub.size(), color);
+                    if (surf) {
+                        SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
+                        if (tex) {
+                            float scaledW = surf->w * m_zoom;
+                            float scaledH = surf->h * m_zoom;
+                            SDL_FRect dst = { tokenX, yy, scaledW, scaledH };
+                            SDL_RenderTexture(renderer, tex, nullptr, &dst);
+                            SDL_DestroyTexture(tex);
+                        }
+                        SDL_DestroySurface(surf);
+                    }
+                }
+            }
+            SDL_SetRenderClipRect(renderer, nullptr);
+            // Scrollbars
+            vScrollbar.render(renderer, offsetX, offsetY);
+            hScrollbar.render(renderer, offsetX, offsetY);
+        }
+
+    private:
+        SDL_Renderer* renderer;
+        TTF_TextEngine* textEngine;
+        TTF_Font* font;
+        SDL_FRect rect;
+        std::vector<std::string> lines;
+        int cursorRow = 0, cursorCol = 0;
+        float scrollX = 0, scrollY = 0;
+        bool active = false;
+
+        Gui::Scrollbar vScrollbar, hScrollbar;
+
+        static constexpr float LINE_HEIGHT = 22.0f;
+        static constexpr float PADDING = 6.0f;
+
+        void refreshScrollbars() {
+            float maxLineWidth = 0;
+            for (const auto& line : lines) {
+                int w=0,h=0;
+                TTF_GetStringSize(font, line.c_str(), line.size(), &w, &h);
+                maxLineWidth = std::max(maxLineWidth, (float)w);
+            }
+            float contentW = (maxLineWidth + 2*PADDING) * m_zoom;
+            float contentH = (lines.size() * LINE_HEIGHT + 2*PADDING) * m_zoom;
+            float viewW = rect.w - 12.0f - 2*PADDING;
+            float viewH = rect.h - 12.0f - 2*PADDING;
+            vScrollbar.setGeometry(rect.x + rect.w - 12, rect.y, 12, rect.h, contentH, viewH);
+            hScrollbar.setGeometry(rect.x, rect.y + rect.h - 12, rect.w - 12, 12, contentW, viewW);
+            vScrollbar.setOffsetNoCallback(scrollY * m_zoom);
+            hScrollbar.setOffsetNoCallback(scrollX * m_zoom);
+        }
+
+        void ensureCursorVisible() {
+            float viewH = (rect.h - 12.0f) / m_zoom;
+            float viewW = (rect.w - 12.0f) / m_zoom;
+
+            // Vertical
+            float cursorY = cursorRow * LINE_HEIGHT;
+            if (cursorY < scrollY) {
+                scrollY = cursorY;
+            } else if (cursorY + LINE_HEIGHT > scrollY + viewH) {
+                scrollY = cursorY + LINE_HEIGHT - viewH;
+            }
+
+            // Horizontal
+            std::string prefix = lines[cursorRow].substr(0, cursorCol);
+            int pw = 0, ph = 0;
+            TTF_GetStringSize(font, prefix.c_str(), prefix.size(), &pw, &ph);
+            float fw = (float)pw;
+            if (fw < scrollX) {
+                scrollX = fw;
+            } else if (fw > scrollX + viewW) {
+                scrollX = fw - viewW;
+            }
+
+            refreshScrollbars();
+        }
+
+        int getLineLength(int row) const {
+            if (row < 0 || row >= (int)lines.size()) return 0;
+            return (int)lines[row].size();
+        }
+
+        int xToCol(const std::string& line, float localX) const {
+            if (localX <= 0 || line.empty()) return 0;
+            // Binary search or linear scan using exact prefix widths
+            for (size_t i = 1; i <= line.size(); ++i) {
+                std::string prefix = line.substr(0, i);
+                int w = 0, h = 0;
+                TTF_GetStringSize(font, prefix.c_str(), prefix.size(), &w, &h);
+                if (localX < w) return (int)i - 1;
+            }
+            return (int)line.size();
+        }
+
+        void moveCursor(int row, int col, bool extend) {
+            // For simplicity, we don't support selection, just move.
+            (void)extend;
+            if (row < 0) row = 0;
+            if (row >= (int)lines.size()) row = (int)lines.size() - 1;
+            int maxCol = getLineLength(row);
+            if (col < 0) col = 0;
+            if (col > maxCol) col = maxCol;
+            cursorRow = row;
+            cursorCol = col;
+            ensureCursorVisible();
+        }
+
+        void insertChar(char ch) {
+            if (cursorRow < 0 || cursorRow >= (int)lines.size()) return;
+            std::string& line = lines[cursorRow];
+            if (ch == '\t') {
+                line.insert(cursorCol, 4, ' ');
+                cursorCol += 4;
+            } else {
+                line.insert(cursorCol, 1, ch);
+                cursorCol++;
+            }
+            ensureCursorVisible();
+        }
+
+        void deleteChar() {
+            if (cursorRow < 0 || cursorRow >= (int)lines.size()) return;
+            std::string& line = lines[cursorRow];
+            if (cursorCol < (int)line.size()) {
+                line.erase(cursorCol, 1);
+            } else if (cursorRow + 1 < (int)lines.size()) {
+                // Merge with next line
+                std::string& next = lines[cursorRow + 1];
+                line += next;
+                lines.erase(lines.begin() + cursorRow + 1);
+            }
+            ensureCursorVisible();
+        }
+
+        void backspace() {
+            if (cursorRow < 0 || cursorRow >= (int)lines.size()) return;
+            if (cursorCol == 0 && cursorRow > 0) {
+                // Merge with previous line
+                std::string& prev = lines[cursorRow - 1];
+                std::string& curr = lines[cursorRow];
+                int oldLen = (int)prev.size();
+                prev += curr;
+                lines.erase(lines.begin() + cursorRow);
+                cursorRow--;
+                cursorCol = oldLen;
+            } else if (cursorCol > 0) {
+                std::string& line = lines[cursorRow];
+                line.erase(cursorCol - 1, 1);
+                cursorCol--;
+            }
+            ensureCursorVisible();
+        }
+
+        void newline() {
+            if (cursorRow < 0 || cursorRow >= (int)lines.size()) return;
+            std::string& line = lines[cursorRow];
+            std::string rest = line.substr(cursorCol);
+            line.erase(cursorCol);
+            lines.insert(lines.begin() + cursorRow + 1, rest);
+            cursorRow++;
+            cursorCol = 0;
+            ensureCursorVisible();
+        }
+
+        static bool inRect(float x, float y, SDL_FRect r) {
+            return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+        }
     };
 
     class VirtualKeyboard {
@@ -2225,6 +2793,9 @@ namespace Gui {
         void setPadding(float p) { padding = p; layoutChildren(); }
         void setSpacing(float s) { spacing = s; layoutChildren(); }
 
+        float getPadding() const { return padding; }
+        float getSpacing() const { return spacing; }
+
         std::string getType() const override { return "Container"; }
         float getX() const override { return rect.x; }
         float getY() const override { return rect.y; }
@@ -2265,6 +2836,107 @@ namespace Gui {
         float spacing = 5.0f;
 
         virtual void layoutChildren() = 0;
+    };
+
+    class ScrollableContainer : public IGuiElement {
+    public:
+        ScrollableContainer(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
+                            ScrollOrientation orientation = ScrollOrientation::Vertical)
+            : renderer(renderer), textEngine(textEngine), font(font), orientation(orientation)
+        {
+            scrollbar.setOrientation(orientation);
+            scrollbar.onChange = [this](float v) { scrollOffset = v; };
+        }
+
+        // Set the single child that will be scrolled.
+        void setChild(std::unique_ptr<IGuiElement> child) {
+            this->child = std::move(child);
+            recalcContentSize();
+        }
+
+        // IGuiElement overrides
+        std::string getType() const override { return "ScrollableContainer"; }
+        float getX() const override { return rect.x; }
+        float getY() const override { return rect.y; }
+        float getWidth() const override { return rect.w; }
+        float getHeight() const override { return rect.h; }
+
+        void setRect(SDL_FRect r) override {
+            rect = r;
+            recalcContentSize();
+        }
+        void setPos(SDL_Point p) override {
+            rect.x = (float)p.x;
+            rect.y = (float)p.y;
+            recalcContentSize();
+        }
+
+        void render(float offsetX, float offsetY) override {
+            if (child) {
+                float childOffX = offsetX + (orientation == ScrollOrientation::Horizontal ? scrollOffset : 0.0f);
+                float childOffY = offsetY + (orientation == ScrollOrientation::Vertical   ? scrollOffset : 0.0f);
+                child->render(childOffX, childOffY);
+            }
+            scrollbar.render(renderer, offsetX, offsetY);
+        }
+
+        bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetX, float offsetY) override {
+            if (scrollbar.handleEvent(ev)) return true;
+            if (child) {
+                float childOffX = offsetX + (orientation == ScrollOrientation::Horizontal ? scrollOffset : 0.0f);
+                float childOffY = offsetY + (orientation == ScrollOrientation::Vertical   ? scrollOffset : 0.0f);
+                return child->handleEvent(ev, window, childOffX, childOffY);
+            }
+            return false;
+        }
+
+        void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY,
+                        SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
+            if (child) {
+                float childOffX = offsetX + (orientation == ScrollOrientation::Horizontal ? scrollOffset : 0.0f);
+                float childOffY = offsetY + (orientation == ScrollOrientation::Vertical   ? scrollOffset : 0.0f);
+                child->handleGamepad(cursorX, cursorY, childOffX, childOffY,
+                                    window, confirmDown, confirmDownLastFrame);
+            }
+        }
+
+        // Expose the scrollbar if needed (e.g. for custom styling).
+        Scrollbar& getScrollbar() { return scrollbar; }
+
+    private:
+        SDL_Renderer* renderer;
+        TTF_TextEngine* textEngine;
+        TTF_Font* font;
+        SDL_FRect rect;
+        ScrollOrientation orientation;
+        Scrollbar scrollbar;
+        float scrollOffset = 0.0f;
+        std::unique_ptr<IGuiElement> child;
+
+        void recalcContentSize() {
+            if (!child) return;
+
+            float contentSize = 0.0f;
+            float viewSize = 0.0f;
+            const float sbThickness = 12.0f;
+
+            if (orientation == ScrollOrientation::Vertical) {
+                contentSize = child->getHeight();
+                viewSize = rect.h;
+                scrollbar.setGeometry(rect.x + rect.w - sbThickness, rect.y,
+                                    sbThickness, rect.h,
+                                    contentSize, viewSize);
+            } else { // Horizontal
+                contentSize = child->getWidth();
+                viewSize = rect.w;
+                scrollbar.setGeometry(rect.x, rect.y + rect.h - sbThickness,
+                                    rect.w, sbThickness,
+                                    contentSize, viewSize);
+            }
+
+            // Clamp the scroll offset to the new range.
+            scrollOffset = std::clamp(scrollOffset, 0.0f, scrollbar.maxOffset());
+        }
     };
 
     // ----------------------------------------------------------------
@@ -3490,8 +4162,6 @@ namespace Gui {
                 "struct ProgramContext {\n"
                 "    SDL_Renderer*   renderer    = nullptr;\n"
                 "    TTF_TextEngine* textEngine  = nullptr;\n"
-                "    TTF_Font*       titleFont   = nullptr;\n"
-                "    TTF_Font*       bodyFont    = nullptr;\n"
                 "    SDL_Window*     window      = nullptr;\n"
                 "};\n"
                 "\n"
@@ -3510,8 +4180,6 @@ namespace Gui {
                 "static SDL_Renderer* g_renderer = nullptr;\n"
                 "static SDL_Window* g_window = nullptr;\n"
                 "static TTF_TextEngine* g_textEngine = nullptr;\n"
-                "static TTF_Font* g_bodyFont = nullptr;\n"
-                "static TTF_Font* g_titleFont = nullptr;\n"
                 "static ProgramScript* g_script = nullptr;\n"
                 "static ProgramContext* g_ctx = nullptr;\n"
                 "static bool g_running = true;\n"
@@ -3549,15 +4217,6 @@ namespace Gui {
                 "    SDL_FRect titleBg = { 0, 0, w, 110 };\n"
                 "    SDL_SetRenderDrawColor(ctx->renderer, 12, 12, 22, 220);\n"
                 "    SDL_RenderFillRect(ctx->renderer, &titleBg);\n"
-                "    TTF_Font* tf = ctx->titleFont ? ctx->titleFont : ctx->bodyFont;\n"
-                "    if (tf && ctx->textEngine) {\n"
-                "        TTF_Text* title = TTF_CreateText(ctx->textEngine, tf, \"program\", 0);\n"
-                "        if (title) {\n"
-                "            TTF_SetTextColor(title, 200, 210, 255, 255);\n"
-                "            int tw = 0, th = 0; TTF_GetTextSize(title, &tw, &th);\n"
-                "            TTF_DrawRendererText(title, (w - tw) * 0.5f, 18.0f);\n"
-                "            TTF_DestroyText(title);\n"
-                "        }\n"
                 "    }\n"
                 "}\n"
                 "void ProgramScript::onEnd() { SDL_Log(\"[ProgramScript] onEnd\"); }\n"
@@ -3570,11 +4229,10 @@ namespace Gui {
                 "    SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);\n"
                 "    if (!window || !renderer) { std::cerr << \"Window/Renderer creation failed\\n\"; TTF_Quit(); SDL_Quit(); return -1; }\n"
                 "    TTF_Font* bodyFont = ProjectScript_TTF_OpenFont(\"SampleProject/assets/fonts/fredoka.ttf\", 22);\n"
-                "    TTF_Font* titleFont = ProjectScript_TTF_OpenFont(\"SampleProject/assets/fonts/fredoka.ttf\", 52);\n"
                 "    TTF_TextEngine* textEngine = TTF_CreateRendererTextEngine(renderer);\n"
-                "    ProgramContext ctx; ctx.renderer = renderer; ctx.textEngine = textEngine; ctx.titleFont = titleFont; ctx.bodyFont = bodyFont; ctx.window = window;\n"
+                "    ProgramContext ctx; ctx.renderer = renderer; ctx.textEngine = textEngine; ctx.window = window;\n"
                 "    ProgramScript script; script.ctx = &ctx; script.onStart();\n"
-                "    g_renderer = renderer; g_window = window; g_textEngine = textEngine; g_bodyFont = bodyFont; g_titleFont = titleFont; g_script = &script; g_ctx = &ctx; g_lastTime = SDL_GetTicks();\n"
+                "    g_renderer = renderer; g_window = window; g_textEngine = textEngine;  g_script = &script; g_ctx = &ctx; g_lastTime = SDL_GetTicks();\n"
                 "#ifdef __EMSCRIPTEN__\n"
                 "    emscripten_set_main_loop(main_loop_callback, 0, 1);\n"
                 "#else\n"
@@ -3593,7 +4251,7 @@ namespace Gui {
                 "    }\n"
                 "#endif\n"
                 "    script.onEnd();\n"
-                "    if (titleFont) TTF_CloseFont(titleFont); if (bodyFont) TTF_CloseFont(bodyFont);\n"
+                "    \n"
                 "    if (textEngine) TTF_DestroyRendererTextEngine(textEngine);\n"
                 "    SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit();\n"
                 "    return 0;\n"
@@ -3630,8 +4288,6 @@ namespace Gui {
                 "struct ProgramContext {\n"
                 "    SDL_Renderer*   renderer    = nullptr;\n"
                 "    TTF_TextEngine* textEngine  = nullptr;\n"
-                "    TTF_Font*       titleFont   = nullptr;\n"
-                "    TTF_Font*       bodyFont    = nullptr;\n"
                 "    SDL_Window*     window      = nullptr;\n"
                 "};\n"
                 "\n"

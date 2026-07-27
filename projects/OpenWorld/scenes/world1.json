@@ -1,0 +1,25 @@
+{
+    "entities": [
+        {
+            "components": {
+                "Metadata": {
+                    "name": "Player"
+                },
+                "Position": {
+                    "x": 798.0,
+                    "y": 358.5
+                },
+                "RectangleShape": {
+                    "h": 100.0,
+                    "w": 30.0
+                },
+                "ZIndex": {
+                    "z": 1
+                }
+            }
+        }
+    ],
+    "gui_elements": [],
+    "scene_name": "SceneName",
+    "script_attached": "ProjectName/scripts/SceneName.cpp"
+}

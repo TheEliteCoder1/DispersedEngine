@@ -1,7 +1,4 @@
 #include "engine.h"
-#include <iostream>
-#include <cmath>
-#include <cstdlib>
 
 struct PingPongContext {
     SDL_Renderer*   renderer    = nullptr;

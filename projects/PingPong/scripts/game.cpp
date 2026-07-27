@@ -1,9 +1,11 @@
 #include "game.h"
+#include <cmath>
+#include <ctime>          // for seeding rand()
+#include <cstdlib>        // for rand(), srand()
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
 #endif
-
 
 static SDL_Renderer* g_renderer = nullptr;
 static SDL_Window* g_window = nullptr;
@@ -16,18 +18,25 @@ static Uint64 g_lastTime = 0;
 #ifdef __EMSCRIPTEN__
 void main_loop_callback() {
     if (!g_running) { emscripten_cancel_main_loop(); return; }
-    Uint64 now = SDL_GetTicks(); float dt = (float)(now - g_lastTime) / 1000.0f; g_lastTime = now;
+
+    double now = emscripten_get_now();
+    float dt = (float)(now - g_lastTime) / 1000.0f;
+    g_lastTime = now;
+
+    if (dt > 0.1f) dt = 0.1f;  // clamp to avoid spiral of death
+
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_QUIT) g_running = false;
         if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) g_running = false;
     }
+
     g_script->onUpdate(dt);
+
     SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(g_renderer, 10, 10, 20, 255);
     SDL_RenderClear(g_renderer);
 
-    // ---- ADD THIS ENTITY RENDERING LOOP ----
     for (Entity i = 0; i < g_ctx->scene->world.entity_count; ++i) {
         if (!g_ctx->scene->world.has_position[i]) continue;
         render_entity_texture(g_renderer, g_ctx->scene->world, i,
@@ -35,9 +44,8 @@ void main_loop_callback() {
                               g_ctx->scene->world.position_pool[i].y,
                               1.0f);
     }
-    // ---------------------------------------
 
-    g_script->onDraw();   // draws center line and score
+    g_script->onDraw();
     SDL_RenderPresent(g_renderer);
 }
 #endif
@@ -54,9 +62,10 @@ void PingPongScript::resetBall(int servingDirection) {
     b2Vec2 centerM = Physics::PxToM({ (float)winW * 0.5f, (float)winH * 0.5f });
     b2Body_SetTransform(phys.bodyId, centerM, b2Body_GetRotation(phys.bodyId));
 
-    float angle = (((float)rand() / (float)RAND_MAX) * 0.6f - 0.3f);
-    b2Vec2 vel = { std::cos(angle) * ballSpeed * (float)servingDirection,
-                   std::sin(angle) * ballSpeed };
+    b2Vec2 vel = {
+        ballSpeed * (float)servingDirection,
+        ballSpeed
+    };
     b2Body_SetLinearVelocity(phys.bodyId, vel);
 }
 
@@ -144,8 +153,23 @@ void PingPongScript::onUpdate(float dt) {
     setPaddleVelocity(pad1, keys[SDL_SCANCODE_W], keys[SDL_SCANCODE_S]);
     setPaddleVelocity(pad2, keys[SDL_SCANCODE_UP], keys[SDL_SCANCODE_DOWN]);
 
-    // --- Step physics ---
-    b2World_Step(physWorld.GetHandle(), dt, 4);
+    // --- Step physics on a fixed timestep ----
+    // Native (Windows) frame timing is fairly stable, so stepping physics
+    // directly with the render dt looked fine there. Browser rAF timing is
+    // noisier (JS/GC/compositor overhead), so feeding Box2D a jittery dt
+    // produces visibly choppy motion even at a similar average FPS.
+    // Decoupling physics from render dt fixes that on both platforms.
+    static float physicsAccumulator = 0.0f;
+    const float FIXED_DT = 1.0f / 60.0f;
+    physicsAccumulator += dt;
+    // Clamp so a hitch (tab backgrounded, asset load, etc.) doesn't cause
+    // a spiral of death trying to catch up.
+    const float MAX_ACCUMULATED = FIXED_DT * 5.0f;
+    if (physicsAccumulator > MAX_ACCUMULATED) physicsAccumulator = MAX_ACCUMULATED;
+    while (physicsAccumulator >= FIXED_DT) {
+        b2World_Step(physWorld.GetHandle(), FIXED_DT, 4);
+        physicsAccumulator -= FIXED_DT;
+    }
     movement_system(world, dt);
 
     // --- Clamp paddles inside screen ---
@@ -182,9 +206,10 @@ void PingPongScript::onUpdate(float dt) {
             float padCenterX = px + pw * 0.5f;
             float padCenterY = py + ph * 0.5f;
 
-            // AABB overlap test
-            if (!(bx < px + pw && bx + ballRadius > px &&
-                by < py + ph && by + ballRadius > py)) continue;
+            // AABB overlap test using diameter (ballRadius is radius, so diameter = 2*radius)
+            float ballDiameter = ballRadius * 2.0f;
+            if (!(bx < px + pw && bx + ballDiameter > px &&
+                by < py + ph && by + ballDiameter > py)) continue;
 
             // Get current velocity
             b2Vec2 vel = b2Body_GetLinearVelocity(ballPhys.bodyId);
@@ -195,7 +220,6 @@ void PingPongScript::onUpdate(float dt) {
 
             // ---- Play impact sound ----
             float speed = b2Length(vel);
-            ProjectScript_MIXER_PlaySound("hit");   // volume scales with speed
 
             // ---- Pure diagonal reflection ----
             float newX = -vel.x;          // reverse horizontal direction
@@ -266,26 +290,26 @@ void PingPongScript::onDraw() {
     }
 }
 
-
 void PingPongScript::onEnd() { SDL_Log("[PingPongScript] onEnd"); }
 
 int main(int argc, char* argv[]) {
+    // Seed the random number generator once at startup
+    srand((unsigned)time(nullptr));
+
     const float windowWidth = 1600.0f, windowHeight = 900.0f;
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) { std::cerr << "SDL_Init failed: " << SDL_GetError() << "\n"; return -1; }
     if (!TTF_Init()) { std::cerr << "TTF_Init failed: " << SDL_GetError() << "\n"; SDL_Quit(); return -1; }
-    if (!MIX_Init()) { std::cerr << "MIX_Init failed: " << SDL_GetError() << "\n"; SDL_Quit(); return -1; }
-
-    if (!g_resources.AudioManager.CreateMixerDevice()) {
-        std::cerr << "Failed to create mixer device!\n";
-        SDL_Quit();
-        return -1;
-    }
-
-    ProjectScript_MIXER_LoadSound("hit", "PingPong/assets/sounds/hit.wav", false);
 
     SDL_Window* window = SDL_CreateWindow("PingPong", windowWidth, windowHeight, SDL_WINDOW_RESIZABLE);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
     if (!window || !renderer) { std::cerr << "Window/Renderer creation failed\n"; TTF_Quit(); SDL_Quit(); return -1; }
+    // Cap the native loop to the display's refresh rate. Without this the
+    // loop runs uncapped (hundreds/thousands of fps), which causes visible
+    // tearing and can itself look "laggy" from the CPU/GPU contention of
+    // presenting far faster than the monitor can show anything.
+    if (!SDL_SetRenderVSync(renderer, 1)) {
+        std::cerr << "[Warning] SDL_SetRenderVSync failed: " << SDL_GetError() << "\n";
+    }
     g_resources.TextureManager.SetRenderer(renderer);
     TTF_TextEngine* textEngine = TTF_CreateRendererTextEngine(renderer);
 
@@ -321,6 +345,7 @@ int main(int argc, char* argv[]) {
 
 #ifdef __EMSCRIPTEN__
     emscripten_set_main_loop(main_loop_callback, 0, 1);
+    emscripten_set_main_loop_timing(EM_TIMING_RAF, 1);
 #else
     bool running = true; 
     Uint64 lastTime = SDL_GetTicks();
@@ -350,10 +375,7 @@ int main(int argc, char* argv[]) {
     if (textEngine) TTF_DestroyRendererTextEngine(textEngine);
     ProjectScript_TTF_Clear();
     ProjectScript_IMG_Clear();
-    ProjectScript_MIXER_Clear();
     TTF_Quit();
-    // img quit is internal
-    MIX_Quit();
     SDL_DestroyRenderer(renderer); 
     SDL_DestroyWindow(window); 
     SDL_Quit();
