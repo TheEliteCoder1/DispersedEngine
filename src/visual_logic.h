@@ -434,8 +434,11 @@ public:
                         out += emitChainFrom(f, indent + "    ");
                         out += indent + "}\n";
                     }
-                    autoAdvance = false; // branches don't rejoin the main chain in this model
-                    break;
+                    // Both branches rejoin here via the "after" pin, same
+                    // pattern as ForRangeEntities/WhileLoop's "after" pin.
+                    cur = graph.followExec(cur, "after");
+                    autoAdvance = false;
+                    continue;
                 }
                 case NodeKind::ForRangeEntities: {
                     std::string var = n->props.count("varName") ? n->props["varName"] : "i";
@@ -829,8 +832,9 @@ inline std::unique_ptr<VisualNode> makeNode(Graph& g, NodeKind kind, float x, fl
         case NodeKind::IfBranch:
             n->props["condExpr"] = "true";
             exec("in", PinDir::Input); exec("true", PinDir::Output); exec("false", PinDir::Output);
+            exec("after", PinDir::Output);
             data("cond", PinDir::Input, "bool");
-            n->w = 230; n->h = 120;
+            n->w = 230; n->h = 140;
             break;
 
         case NodeKind::ForRangeEntities:
@@ -917,7 +921,30 @@ inline std::unique_ptr<VisualNode> makeNode(Graph& g, NodeKind kind, float x, fl
             n->props["usePins"] = "0";
             n->w = 340; n->h = 380;
             break;
+
+        case NodeKind::EndFunction:
+            // Pure terminator: one exec input, nothing else. Wire the last
+            // "next" pin of a chain (Method Def / Web Loop / Main Loop body,
+            // or an If's "after") into this to explicitly close it off.
+            // emitChainFrom already stops here (autoAdvance=false); this was
+            // just missing the actual pin to connect to.
+            exec("in", PinDir::Input);
+            n->w = 160; n->h = 60;
+            break;
     }
+
+    // Every node gets a "desc" pin (short for "description") so it can be
+    // annotated by a Comment node. Comment nodes are the *source* of a
+    // description (an output pin), every other node is a possible
+    // *destination* (an input pin) — wiring a Comment's "desc" output into
+    // another node's "desc" input renders that comment's text one line
+    // above that node (see drawNode).
+    if (kind == NodeKind::Comment) {
+        data("desc", PinDir::Output, "string");
+    } else {
+        data("desc", PinDir::Input, "string");
+    }
+
     n->widgetOrder = widgetOrderForKind(kind);
     return n;
 }
@@ -1489,6 +1516,21 @@ private:
         SDL_FRect sr = screenRect(n);
         if (sr.x + sr.w < canvasRect.x || sr.x > canvasRect.x + canvasRect.w ||
             sr.y + sr.h < canvasRect.y || sr.y > canvasRect.y + canvasRect.h) return;
+
+        // If this node's "desc" pin is wired to a Comment node, show that
+        // comment's text as one line sitting right above this node — the
+        // comment node itself can live anywhere on the canvas; only its
+        // text is projected here.
+        if (n.kind != NodeKind::Comment) {
+            const Connection* descFeed = graph.findDataFeed(n.id, "desc");
+            if (descFeed) {
+                VisualNode* commentNode = graph.findNode(descFeed->fromNode);
+                if (commentNode && commentNode->kind == NodeKind::Comment) {
+                    std::string commentText = commentNode->props.count("text") ? commentNode->props["text"] : "";
+                    drawScaledText(commentText, sr.x, sr.y - 18.0f * zoom, {255, 225, 140, 255}, zoom);
+                }
+            }
+        }
         
         // --- Dynamically ensure pins match usePins mode ---
         bool usePins = n.props.count("usePins") && n.props["usePins"] == "1";
