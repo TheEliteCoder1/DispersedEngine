@@ -1,0 +1,15 @@
+{
+    "activeClipIndex": 0,
+    "clips": [
+        {
+            "frameHeight": 128.0,
+            "frameWidth": 128.0,
+            "imageFrames": [
+                "assets\\textures\\emptyTree.svg"
+            ],
+            "isPlaying": false,
+            "name": "default",
+            "speed": 1.0
+        }
+    ]
+}

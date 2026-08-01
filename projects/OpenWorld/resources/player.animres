@@ -1,0 +1,43 @@
+{
+    "activeClipIndex": 0,
+    "clips": [
+        {
+            "frameHeight": 128.0,
+            "frameWidth": 64.0,
+            "imageFrames": [
+                "assets\\textures\\player-idle-1.svg",
+                "assets\\textures\\player-idle-2.svg",
+                "assets\\textures\\player-idle-3.svg",
+                "assets\\textures\\player-idle-4.svg"
+            ],
+            "isPlaying": true,
+            "name": "idle",
+            "speed": 6.0
+        },
+        {
+            "frameHeight": 128.0,
+            "frameWidth": 64.0,
+            "imageFrames": [
+                "assets\\textures\\player-walk-down-1.svg",
+                "assets\\textures\\player-walk-down-2.svg",
+                "assets\\textures\\player-walk-down-3.svg"
+            ],
+            "isPlaying": false,
+            "name": "walk",
+            "speed": 6.0
+        },
+        {
+            "frameHeight": 128.0,
+            "frameWidth": 64.0,
+            "imageFrames": [
+                "assets\\textures\\player-dying-1.svg",
+                "assets\\textures\\player-dying-2.svg",
+                "assets\\textures\\player-dying-3.svg",
+                "assets\\textures\\player-dying-4.svg"
+            ],
+            "isPlaying": false,
+            "name": "death",
+            "speed": 6.0
+        }
+    ]
+}

@@ -212,11 +212,11 @@ struct Pin {
 
 enum class NodeKind {
     EventOnStart, EventOnUpdate, EventOnDraw, EventOnEnd,
-    FieldDecl, ScriptVarDecl, VarGet, VarSet, EntityByName,
+    ClassFieldDecl, ScriptVarDecl, VarGet, VarSet, EntityByName,
     GuardReturn, IfBranch, ForRangeEntities, WhileLoop,
     FunctionCall, BinaryOp, Literal, Comment, CustomCode,
     MethodDecl, MethodDef, IncludeDecl, WebLoop, MainLoop,
-    EndFunction
+    StructFieldDecl
 };
 
 
@@ -226,9 +226,10 @@ inline std::string nodeKindLabel(NodeKind k) {
         case NodeKind::EventOnUpdate:     return "On Update";
         case NodeKind::EventOnDraw:       return "On Draw";
         case NodeKind::EventOnEnd:        return "On End";
-        case NodeKind::FieldDecl:         return "Field";
+        case NodeKind::ClassFieldDecl:         return "Class Field";
+        case NodeKind::StructFieldDecl:       return "Struct Field";
         case NodeKind::ScriptVarDecl:     return "Script Var";
-        case NodeKind::VarGet:            return "Get Var";
+        case NodeKind::VarGet:            return "Get Var/Lit";
         case NodeKind::VarSet:            return "Set Var";
         case NodeKind::EntityByName:      return "Entity By Name";
         case NodeKind::GuardReturn:       return "Guard (return if)";
@@ -245,7 +246,6 @@ inline std::string nodeKindLabel(NodeKind k) {
         case NodeKind::IncludeDecl:       return "Include";
         case NodeKind::WebLoop:           return "Web Loop";
         case NodeKind::MainLoop:          return "Main Loop";
-        case NodeKind::EndFunction: return "End Function";
     }
     return "?";
 }
@@ -256,7 +256,7 @@ inline SDL_Color nodeKindColor(NodeKind k) {
         case NodeKind::EventOnStart: case NodeKind::EventOnUpdate:
         case NodeKind::EventOnDraw:  case NodeKind::EventOnEnd:
             return SDL_Color{170, 60, 60, 255};
-        case NodeKind::FieldDecl: case NodeKind::ScriptVarDecl: case NodeKind::IncludeDecl:
+        case NodeKind::ClassFieldDecl: case NodeKind::StructFieldDecl: case NodeKind::ScriptVarDecl: case NodeKind::IncludeDecl:
             return SDL_Color{60, 120, 150, 255};
         case NodeKind::MethodDecl:
             return SDL_Color{60, 150, 130, 255};
@@ -274,8 +274,7 @@ inline SDL_Color nodeKindColor(NodeKind k) {
             return SDL_Color{80, 80, 90, 255};
         case NodeKind::Comment:
             return SDL_Color{60, 60, 60, 255};
-        case NodeKind::EndFunction:
-            return SDL_Color{130, 90, 160, 255};
+        
     }
     return SDL_Color{80,80,80,255};
 }
@@ -339,6 +338,14 @@ struct Graph {
 class CodeGenerator {
 public:
     explicit CodeGenerator(Graph& g) : graph(g) {}
+
+    std::string getDescComment(int nodeId) {
+        const Connection* feed = graph.findDataFeed(nodeId, "desc");
+        if (!feed) return "";
+        VisualNode* src = graph.findNode(feed->fromNode);
+        if (!src || src->kind != NodeKind::Comment) return "";
+        return src->props.count("text") ? src->props["text"] : "";
+    }
 
 private:
     Graph& graph;
@@ -410,6 +417,8 @@ public:
             visited.insert(cur);
             VisualNode* n = graph.findNode(cur);
             if (!n) break;
+            std::string comment = getDescComment(cur);
+            if (!comment.empty()) out += indent + "// " + comment + "\n";
             bool autoAdvance = true;
             switch (n->kind) {
                 case NodeKind::VarSet: {
@@ -468,11 +477,6 @@ public:
                     out += indent + "    // " + n->props["text"] + "\n";
                     break;
                 }
-                case NodeKind::EndFunction:
-                    // Terminator: stop the chain, don't advance
-                    autoAdvance = false;
-                    break;
-
                 default: break;
             }
             if (autoAdvance) cur = graph.followExec(cur, "next");
@@ -494,6 +498,15 @@ public:
         h << "    TTF_TextEngine* textEngine  = nullptr;\n";
         h << "    SDL_Window*     window      = nullptr;\n";
         h << "    Scene*          scene       = nullptr;\n";
+        for (auto& n : graph.nodes) {
+            if (n->kind != NodeKind::StructFieldDecl) continue;
+            std::string type = n->props.count("type") ? n->props["type"] : "float";
+            std::string name = n->props.count("name") ? n->props["name"] : "field";
+            std::string init = n->props.count("init") ? n->props["init"] : "";
+            std::string comment = getDescComment(n->id);
+            if (!comment.empty()) h << "    // " << comment << "\n";
+            h << "    " << type << " " << name << (init.empty() ? "" : (" = " + init)) << ";\n";
+        }
         h << "};\n\n";
         h << "class " << graph.className << " : public ScriptBase {\n";
         h << "public:\n";
@@ -512,10 +525,12 @@ public:
         }
         h << "private:\n";
         for (auto& n : graph.nodes) {
-            if (n->kind != NodeKind::FieldDecl) continue;
+            if (n->kind != NodeKind::ClassFieldDecl) continue;
             std::string type = n->props.count("type") ? n->props["type"] : "float";
             std::string name = n->props.count("name") ? n->props["name"] : "field";
             std::string init = n->props.count("init") ? n->props["init"] : "";
+            std::string comment = getDescComment(n->id);
+            if (!comment.empty()) h << "    // " << comment << "\n";
             h << "    " << type << " " << name << (init.empty() ? "" : (" = " + init)) << ";\n";
         }
         h << "};\n";
@@ -551,6 +566,8 @@ public:
             if (bare == "emscripten/emscripten.h" || seenHeaders.count(bare)) continue;
             seenHeaders.insert(bare);
             std::string t = trimStr(typed);
+            std::string comment = getDescComment(n->id);
+            if (!comment.empty()) s << "// " << comment << "\n";
             if (!t.empty() && (t.front() == '<' || t.front() == '"')) s << "#include " << t << "\n";
             else s << "#include <" << t << ">\n";
         }
@@ -571,6 +588,8 @@ public:
             std::string type = n->props.count("type") ? n->props["type"] : "float";
             std::string name = n->props.count("name") ? n->props["name"] : "myVar";
             std::string init = n->props.count("init") ? n->props["init"] : "";
+            std::string comment = getDescComment(n->id);
+            if (!comment.empty()) s << "// " << comment << "\n";
             s << type << " " << name << (init.empty() ? "" : (" = " + init)) << ";\n";
             anyScriptVar = true;
         }
@@ -585,6 +604,8 @@ public:
             if (n->kind != NodeKind::WebLoop) continue;
             std::string code = emitBody(n.get(), "", true); // <-- CHANGED (true = verbatim fallback)
             s << "#ifdef __EMSCRIPTEN__\n";
+            std::string comment = getDescComment(n->id);
+            if (!comment.empty()) s << "// " << comment << "\n";
             s << "void main_loop_callback() {\n";
             s << code;
             if (!code.empty() && code.back() != '\n') s << "\n";
@@ -596,7 +617,11 @@ public:
         auto emitMethod = [&](const char* sig, NodeKind evt) {
             s << "void " << graph.className << "::" << sig << " {\n";
             int evNode = findEventNode(evt);
-            if (evNode != -1) s << emitChainFrom(graph.followExec(evNode, "next"), "    ");
+            if (evNode != -1) {
+                std::string comment = getDescComment(evNode);
+                if (!comment.empty()) s << "    // " << comment << "\n";
+                s << emitChainFrom(graph.followExec(evNode, "next"), "    ");
+            }
             s << "}\n\n";
         };
         emitMethod("onStart()",        NodeKind::EventOnStart);
@@ -628,6 +653,8 @@ public:
                 s << "// warning: no matching Method Decl node found for \"" << name << "\"; defaulting to void " << name << "()\n";
             }
             s << retType << " " << graph.className << "::" << name << "(" << params << ") {\n";
+            std::string comment = getDescComment(n->id);
+            if (!comment.empty()) s << "// " << comment << "\n";
             s << emitBody(n.get(), "    "); // <-- CHANGED
             s << "}\n\n";
         }
@@ -697,7 +724,8 @@ inline std::string graphToJsonString(Graph& g) {
 
 inline std::vector<std::string> widgetOrderForKind(NodeKind kind) {
     switch (kind) {
-        case NodeKind::FieldDecl:         return {"type", "name", "init"};
+        case NodeKind::ClassFieldDecl:         return {"type", "name", "init"};
+        case NodeKind::StructFieldDecl:   return {"type", "name", "init"};
         case NodeKind::ScriptVarDecl:     return {"type", "name", "init"};
         case NodeKind::IncludeDecl:       return {"header"};
         case NodeKind::WebLoop:           return {"code"};
@@ -716,7 +744,6 @@ inline std::vector<std::string> widgetOrderForKind(NodeKind kind) {
         case NodeKind::CustomCode:        return {"code"};
         case NodeKind::MethodDecl:        return {"returnType", "name", "params"};
         case NodeKind::MethodDef:         return {"name", "code"};
-        case NodeKind::EndFunction:       return {}; 
         default:                          return {};
     }
 }
@@ -781,7 +808,12 @@ inline std::unique_ptr<VisualNode> makeNode(Graph& g, NodeKind kind, float x, fl
         case NodeKind::EventOnDraw:   n->w=180; n->h=60; exec("next", PinDir::Output); break;
         case NodeKind::EventOnEnd:    n->w=180; n->h=60; exec("next", PinDir::Output); break;
 
-        case NodeKind::FieldDecl:
+        case NodeKind::ClassFieldDecl:
+            n->props["type"] = "float"; n->props["name"] = "myField"; n->props["init"] = "0.0f";
+            n->w = 230; n->h = 150;
+            break;
+
+        case NodeKind::StructFieldDecl:
             n->props["type"] = "float"; n->props["name"] = "myField"; n->props["init"] = "0.0f";
             n->w = 230; n->h = 150;
             break;
@@ -920,17 +952,7 @@ inline std::unique_ptr<VisualNode> makeNode(Graph& g, NodeKind kind, float x, fl
             n->props["code"] = "// int main(argc, argv) body - write statements exactly as you want them to appear; remember to write your own return statement";
             n->props["usePins"] = "0";
             n->w = 340; n->h = 380;
-            break;
-
-        case NodeKind::EndFunction:
-            // Pure terminator: one exec input, nothing else. Wire the last
-            // "next" pin of a chain (Method Def / Web Loop / Main Loop body,
-            // or an If's "after") into this to explicitly close it off.
-            // emitChainFrom already stops here (autoAdvance=false); this was
-            // just missing the actual pin to connect to.
-            exec("in", PinDir::Input);
-            n->w = 160; n->h = 60;
-            break;
+            break;;
     }
 
     // Every node gets a "desc" pin (short for "description") so it can be
@@ -1381,7 +1403,7 @@ private:
     std::string cppFilePath, headerFilePath;
 
     float zoom = 1.0f;
-    static constexpr float ZOOM_MIN = 0.5f, ZOOM_MAX = 2.0f;
+    static constexpr float ZOOM_MIN = 0.25f, ZOOM_MAX = 2.0f;
 
     float panX = 0, panY = 0;
     bool panning = false; float panStartX=0, panStartY=0, panOrigX=0, panOrigY=0;
@@ -1713,14 +1735,15 @@ private:
         addBtn("+ On Update",   NodeKind::EventOnUpdate);
         addBtn("+ On Draw",     NodeKind::EventOnDraw);
         addBtn("+ On End",      NodeKind::EventOnEnd);
-        addBtn("+ Field",       NodeKind::FieldDecl);
+        addBtn("+ Cls Field",   NodeKind::ClassFieldDecl);
+        addBtn("+ Struc Field", NodeKind::StructFieldDecl);
         addBtn("+ Script Var",  NodeKind::ScriptVarDecl);
         addBtn("+ Include",     NodeKind::IncludeDecl);
         addBtn("+ Method Decl", NodeKind::MethodDecl);
         addBtn("+ Method Def",  NodeKind::MethodDef);
         addBtn("+ Web Loop",    NodeKind::WebLoop);
         addBtn("+ Main Loop",   NodeKind::MainLoop);
-        addBtn("+ Get Var",     NodeKind::VarGet);
+        addBtn("+ Get Var/Lit",     NodeKind::VarGet);
         addBtn("+ Set Var",     NodeKind::VarSet);
         addBtn("+ Entity Ref",  NodeKind::EntityByName);
         addBtn("+ Guard",       NodeKind::GuardReturn);
@@ -1729,10 +1752,9 @@ private:
         addBtn("+ While",       NodeKind::WhileLoop);
         addBtn("+ Call",        NodeKind::FunctionCall);
         addBtn("+ Binary Op",   NodeKind::BinaryOp);
-        addBtn("+ Literal",     NodeKind::Literal);
+        addBtn("+ Number",     NodeKind::Literal);
         addBtn("+ Comment",     NodeKind::Comment);
         addBtn("+ Custom Code", NodeKind::CustomCode);
-        addBtn("+ End Func", NodeKind::EndFunction);
 
         auto delBtn = std::make_unique<Gui::Button>(renderer, font, "Delete Sel",
                                                     SDL_FPoint{0,0}, 150, 26);

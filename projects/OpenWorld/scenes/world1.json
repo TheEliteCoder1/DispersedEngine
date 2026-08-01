@@ -1,25 +1,166 @@
 {
+    "are_biomes_and_entities_generated": false,
     "entities": [
         {
             "components": {
+                "AnimationState": "resources/player.animres",
                 "Metadata": {
                     "name": "Player"
                 },
+                "PhysicsBody": "resources/Player_0.physicsres",
                 "Position": {
-                    "x": 798.0,
-                    "y": 358.5
+                    "x": 420.0,
+                    "y": 246.5
                 },
                 "RectangleShape": {
-                    "h": 100.0,
-                    "w": 30.0
+                    "h": 128.0,
+                    "w": 64.0
+                },
+                "ZIndex": {
+                    "z": 2
+                }
+            }
+        },
+        {
+            "components": {
+                "Metadata": {
+                    "name": "Background"
+                },
+                "Position": {
+                    "x": 2.0,
+                    "y": -0.5
+                },
+                "RectangleShape": {
+                    "h": 600.0,
+                    "w": 1000.0
+                },
+                "TextureRef": {
+                    "resourceName": ""
                 },
                 "ZIndex": {
                     "z": 1
                 }
             }
+        },
+        {
+            "components": {
+                "AnimationState": "resources/flower_2.animres",
+                "Metadata": {
+                    "name": "flower"
+                },
+                "Position": {
+                    "x": 600.0,
+                    "y": 144.5
+                },
+                "RectangleShape": {
+                    "h": 45.0,
+                    "w": 39.0
+                },
+                "ZIndex": {
+                    "z": 2
+                }
+            }
+        },
+        {
+            "components": {
+                "AnimationState": "resources/grass_3.animres",
+                "Metadata": {
+                    "name": "grass"
+                },
+                "Position": {
+                    "x": 599.5999755859375,
+                    "y": 302.6000061035156
+                },
+                "RectangleShape": {
+                    "h": 60.0,
+                    "w": 102.0
+                },
+                "ZIndex": {
+                    "z": 2
+                }
+            }
+        },
+        {
+            "components": {
+                "AnimationState": "resources/catcus_4.animres",
+                "Metadata": {
+                    "name": "catcus"
+                },
+                "PhysicsBody": "resources/Catcus.physicsres",
+                "Position": {
+                    "x": 526.0,
+                    "y": 262.0
+                },
+                "RectangleShape": {
+                    "h": 128.0,
+                    "w": 50.0
+                },
+                "ZIndex": {
+                    "z": 3
+                }
+            }
+        },
+        {
+            "components": {
+                "AnimationState": "resources/emptyTree_5.animres",
+                "Metadata": {
+                    "name": "emptyTree"
+                },
+                "PhysicsBody": "resources/Tree.physicsres",
+                "Position": {
+                    "x": 780.0,
+                    "y": 238.5
+                },
+                "RectangleShape": {
+                    "h": 128.0,
+                    "w": 128.0
+                },
+                "ZIndex": {
+                    "z": 2
+                }
+            }
+        },
+        {
+            "components": {
+                "AnimationState": "resources/iceCrystal_6.animres",
+                "Metadata": {
+                    "name": "iceCrystal"
+                },
+                "Position": {
+                    "x": 650.0,
+                    "y": 206.5
+                },
+                "RectangleShape": {
+                    "h": 90.0,
+                    "w": 95.0
+                },
+                "ZIndex": {
+                    "z": 3
+                }
+            }
+        },
+        {
+            "components": {
+                "AnimationState": "resources/snowyEmptyTree_7.animres",
+                "Metadata": {
+                    "name": "snowyEmptyTree"
+                },
+                "PhysicsBody": "resources/Tree.physicsres",
+                "Position": {
+                    "x": 665.0,
+                    "y": 397.5
+                },
+                "RectangleShape": {
+                    "h": 128.0,
+                    "w": 128.0
+                },
+                "ZIndex": {
+                    "z": 4
+                }
+            }
         }
     ],
     "gui_elements": [],
-    "scene_name": "SceneName",
-    "script_attached": "ProjectName/scripts/SceneName.cpp"
+    "scene_name": "World1",
+    "script_attached": "OpenWorld/scripts/game.cpp"
 }

@@ -23,16 +23,16 @@ namespace Physics {
 
     // Collision Layers (bitmasks)
     enum CollisionLayer {
-        LAYER_1 = 0x0000,
-        LAYER_2 = 0x0001,
-        LAYER_3 = 0x0002,
-        LAYER_4 = 0x0004,
-        LAYER_5 = 0x0008,
-        LAYER_6 = 0x0010,
-        LAYER_7 = 0x0020,
+        LAYER_1 = 0x0001,
+        LAYER_2 = 0x0002,
+        LAYER_3 = 0x0004,
+        LAYER_4 = 0x0008,
+        LAYER_5 = 0x0010,
+        LAYER_6 = 0x0020,
+        LAYER_7 = 0x0040,
         LAYER_ALL = 0xFFFF
     };
-
+    
     enum class ShapeType {Circle, Triangle, Rectangle, Polygon, Chain};
 
     class PhysicsBody;
@@ -101,6 +101,11 @@ namespace Physics {
                 sd.isSensor = sensor;
                 sd.filter.categoryBits = category;
                 sd.filter.maskBits = mask;
+                
+                // --- FIX: Actually create the shape! ---
+                b2ShapeId id = b2CreatePolygonShape(m_body, &sd, &poly);
+                m_shapes.push_back(id);
+                return id;
             }
 
             b2ChainId AddChainOutline(const std::vector<b2Vec2>& pointsPx,

@@ -18,7 +18,9 @@
 #include <tuple>
 #include <stdio.h>
 #include <sstream>
+#include <string_view>
 #include <SDL3/SDL.h>
+#include <random>
 #include "physics.h"
 #include "music.h"
 #include "texture.h"
@@ -82,6 +84,11 @@
 #else
 #error "Unsupported platform"
 #endif
+
+// IMPORTANT NOTES:
+// -Remove the trailing commas to avoid json scene/resource issues.
+// -Make paths relative and remove double slashes for exports if you notice issues.
+// -Always check engine components if they exist before acessing them to avoid bugs.
 
 // Update the helper functions to handle Emscripten's virtual FS better:
 inline std::string getProjectsPath(const std::string& relativePath = "") {
@@ -287,6 +294,7 @@ namespace Components {
         float timer = 0.0f;
         int currentFrame = 0;
         bool isPlaying = true;
+        bool loop = true; // when false, the clip halts on its last frame instead of wrapping
 
         // Only image frames are supported now
         std::vector<std::string> imageFrameResources;
@@ -335,12 +343,16 @@ namespace Components {
 
         // Switches playback to the named clip. Returns false if not found.
         // Resets the clip's frame/timer by default so it starts clean.
-        bool play(const std::string& name, bool resetFrame = true) {
+        // `loop` controls whether animation_system() wraps back to frame 0
+        // after the last frame (true, the default) or halts on the last
+        // frame and stops playing (false).
+        bool play(const std::string& name, bool resetFrame = true, bool loop = true) {
             for (size_t i = 0; i < clips.size(); ++i) {
                 if (clips[i].name == name) {
                     activeClipIndex = (int)i;
                     if (resetFrame) { clips[i].currentFrame = 0; clips[i].timer = 0.0f; }
                     clips[i].isPlaying = true;
+                    clips[i].loop = loop;
                     return true;
                 }
             }
@@ -393,105 +405,23 @@ inline std::vector<b2Vec2> MakeDefaultTrianglePoints(float w, float h) {
 inline float g_canvasLogicalWidth = 1390.0f;
 inline float g_canvasLogicalHeight = 690.0f;
 
-namespace Tools {
-    struct Camera {
-        float targetX  = 0.0f;
-        float targetY  = 0.0f;
-        float offsetX  = 0.0f;
-        float offsetY  = 0.0f;
-        float zoom     = 1.0f;
-        float rotation = 0.0f;   // degrees, clockwise-positive (raylib convention)
 
-        // ── Coordinate conversion ────────────────────────────────────────
-        SDL_FPoint worldToScreen(float wx, float wy) const {
-            float dx = wx - targetX;
-            float dy = wy - targetY;
-            if (rotation != 0.0f) {
-                float rad = rotation * 3.14159265f / 180.0f;
-                float c = std::cos(rad), s = std::sin(rad);
-                float rx = dx * c - dy * s;
-                float ry = dx * s + dy * c;
-                dx = rx; dy = ry;
-            }
-            return { dx * zoom + offsetX, dy * zoom + offsetY };
-        }
 
-        SDL_FPoint screenToWorld(float sx, float sy) const {
-            float dx = (sx - offsetX) / zoom;
-            float dy = (sy - offsetY) / zoom;
-            if (rotation != 0.0f) {
-                float rad = -rotation * 3.14159265f / 180.0f;
-                float c = std::cos(rad), s = std::sin(rad);
-                float rx = dx * c - dy * s;
-                float ry = dx * s + dy * c;
-                dx = rx; dy = ry;
-            }
-            return { dx + targetX, dy + targetY };
-        }
-
-        // ── Camera operations ────────────────────────────────────────────
-        // Pin the camera's target on the centre of an entity.  Used by game
-        // scripts to follow the player, and by the editor to focus on a pick.
-        void centerOnEntity(const Components::Position& pos,
-                            float entityW = 0.0f, float entityH = 0.0f) {
-            targetX = pos.x + entityW * 0.5f;
-            targetY = pos.y + entityH * 0.5f;
-        }
-
-        // Place the camera so that its `offset` sits at the centre of the
-        // given canvas rect.  Call this every frame after the canvas size is
-        // known so the camera stays glued to the canvas when the window is
-        // resized.
-        void setupForCanvas(float canvasX, float canvasY,
-                            float canvasW, float canvasH) {
-            offsetX = canvasX + canvasW * 0.5f;
-            offsetY = canvasY + canvasH * 0.5f;
-        }
-
-        // Zoom toward a screen point (keeps the world point under the cursor
-        // stable, exactly like raylib's scroll-wheel zoom in CanvasView).
-        void zoomToward(float screenX, float screenY, float factor) {
-            SDL_FPoint wb = screenToWorld(screenX, screenY);
-            zoom = std::clamp(zoom * factor, 0.5f, 10.0f);  // Adjust these values as needed
-            SDL_FPoint wa = screenToWorld(screenX, screenY);
-            targetX += wb.x - wa.x;
-            targetY += wb.y - wa.y;
-        }
-
-        // Pan the camera by a screen-space delta (e.g. mouse movement while
-        // P is held).  Divides by zoom so the pan speed feels the same at
-        // any zoom level.
-        void pan(float deltaX, float deltaY) {
-            targetX -= deltaX / zoom;
-            targetY -= deltaY / zoom;
-        }
-
-        // Compute the world-space AABB currently visible inside the canvas.
-        // Used by the ruler/grid to know which tick marks to draw.
-        void getVisibleWorldBounds(float canvasX, float canvasY,
-                                   float canvasW, float canvasH,
-                                   float& outL, float& outT,
-                                   float& outR, float& outB) const {
-            SDL_FPoint tl = screenToWorld(canvasX,        canvasY);
-            SDL_FPoint br = screenToWorld(canvasX + canvasW, canvasY + canvasH);
-            outL = std::min(tl.x, br.x);
-            outR = std::max(tl.x, br.x);
-            outT = std::min(tl.y, br.y);
-            outB = std::max(tl.y, br.y);
-        }
-    };
-}
-
-inline Tools::Camera g_editorCamera;
-
+// NOTE: Entities live in an "infinite" world-space canvas driven entirely by
+// g_editorCamera (pan/zoom/rotation) and the ruler/axis system built on top
+// of it. There is no reason a world position should ever be capped to the
+// size of the default canvas viewport (previously 0..g_canvasLogicalWidth /
+// 0..g_canvasLogicalHeight) -- that rectangle only happened to match the
+// on-screen canvas size at zoom=1 with no panning, and broke down completely
+// as soon as you panned or zoomed, making it impossible to move an entity to
+// any position the camera could actually see. This is intentionally a no-op
+// now; entities are free to be placed anywhere in world-space. Kept as a
+// function (rather than removed) so existing call sites don't need to
+// change, and so a future, genuinely camera-aware bound (e.g. clamping to
+// the *currently visible* world-space rect via camera.getVisibleWorldBounds)
+// can be reintroduced here later if ever desired.
 inline void clamp_entity_position_to_canvas(Components::Position& pos, float entityWidth = 50.0f, float entityHeight = 50.0f) {
-    float minX = 0.0f;
-    float minY = 0.0f;
-    float maxX = g_canvasLogicalWidth - entityWidth;
-    float maxY = g_canvasLogicalHeight - entityHeight;
-    
-    if (maxX >= minX) pos.x = std::clamp(pos.x, minX, maxX);
-    if (maxY >= minY) pos.y = std::clamp(pos.y, minY, maxY);
+    (void)pos; (void)entityWidth; (void)entityHeight;
 }
 
 
@@ -690,6 +620,7 @@ public:
                 clip.name = clipJson.value("name", "default");
                 clip.speed = clipJson.value("speed", 10.0f);
                 clip.isPlaying = clipJson.value("isPlaying", true);
+                clip.loop = clipJson.value("loop", true);
                 clip.imageFrameResources = clipJson.value("imageFrames", std::vector<std::string>());
                 clip.frameWidth = clipJson.value("frameWidth", 0.0f);
                 clip.frameHeight = clipJson.value("frameHeight", 0.0f);
@@ -711,6 +642,7 @@ public:
             clipJson["name"] = clip.name;
             clipJson["speed"] = clip.speed;
             clipJson["isPlaying"] = clip.isPlaying;
+            clipJson["loop"] = clip.loop;
             clipJson["imageFrames"] = clip.imageFrameResources;
             // Per-clip frame size override. parseAnimationJson() already reads
             // these back (defaulting to 0.0f i.e. "use the texture's native
@@ -969,12 +901,20 @@ void physics_sync_system(ECSWorld& world, Physics::PhysicsWorld& physWorld) {
             if (!b2Body_IsValid(def.bodyId)) {
                 float cx = world.position_pool[i].x + (world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f) * 0.5f;
                 float cy = world.position_pool[i].y + (world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f) * 0.5f;
-                
                 auto body = std::make_unique<Physics::PhysicsBody>(physWorld.GetHandle(), def.bodyType, cx, cy);
                 if (def.shapeType == Physics::ShapeType::Rectangle) {
                     body->AddRectangle(def.width, def.height, def.density, def.category, def.mask, def.isSensor);
                 } else if (def.shapeType == Physics::ShapeType::Circle) {
                     body->AddCircle(def.radius, def.density, def.category, def.mask, def.isSensor);
+                } else if (def.shapeType == Physics::ShapeType::Polygon && !def.polygonPoints.empty()) {
+                    // Convert top-left relative points to center-relative for Box2D
+                    float hw = def.width * 0.5f;
+                    float hh = def.height * 0.5f;
+                    std::vector<b2Vec2> centerRelativePoints;
+                    for (const auto& pt : def.polygonPoints) {
+                        centerRelativePoints.push_back({pt.x - hw, pt.y - hh});
+                    }
+                    body->AddConvexPolygon(centerRelativePoints, def.density, def.category, def.mask, def.isSensor);
                 }
                 def.bodyId = body->GetHandle();
                 physWorld.AddOwned(std::move(body));
@@ -982,6 +922,490 @@ void physics_sync_system(ECSWorld& world, Physics::PhysicsWorld& physWorld) {
         }
     }
 }
+
+
+
+namespace Tools {
+
+    bool contains(std::string_view haystack, std::string_view needle) {
+        return haystack.find(needle) != std::string_view::npos;
+    }
+
+    struct Camera {
+        float targetX  = 0.0f;
+        float targetY  = 0.0f;
+        float offsetX  = 0.0f;
+        float offsetY  = 0.0f;
+        float zoom     = 1.0f;
+        float rotation = 0.0f;   // degrees, clockwise-positive (raylib convention)
+
+        // ── Coordinate conversion ────────────────────────────────────────
+        SDL_FPoint worldToScreen(float wx, float wy) const {
+            float dx = wx - targetX;
+            float dy = wy - targetY;
+            if (rotation != 0.0f) {
+                float rad = rotation * 3.14159265f / 180.0f;
+                float c = std::cos(rad), s = std::sin(rad);
+                float rx = dx * c - dy * s;
+                float ry = dx * s + dy * c;
+                dx = rx; dy = ry;
+            }
+            return { dx * zoom + offsetX, dy * zoom + offsetY };
+        }
+
+        SDL_FPoint screenToWorld(float sx, float sy) const {
+            float dx = (sx - offsetX) / zoom;
+            float dy = (sy - offsetY) / zoom;
+            if (rotation != 0.0f) {
+                float rad = -rotation * 3.14159265f / 180.0f;
+                float c = std::cos(rad), s = std::sin(rad);
+                float rx = dx * c - dy * s;
+                float ry = dx * s + dy * c;
+                dx = rx; dy = ry;
+            }
+            return { dx + targetX, dy + targetY };
+        }
+
+        // ── Camera operations ────────────────────────────────────────────
+        // Pin the camera's target on the centre of an entity.  Used by game
+        // scripts to follow the player, and by the editor to focus on a pick.
+        void centerOnEntity(const Components::Position& pos,
+                            float entityW = 0.0f, float entityH = 0.0f) {
+            targetX = pos.x + entityW * 0.5f;
+            targetY = pos.y + entityH * 0.5f;
+        }
+
+        // Place the camera so that its `offset` sits at the centre of the
+        // given canvas rect.  Call this every frame after the canvas size is
+        // known so the camera stays glued to the canvas when the window is
+        // resized.
+        void setupForCanvas(float canvasX, float canvasY,
+                            float canvasW, float canvasH) {
+            offsetX = canvasX + canvasW * 0.5f;
+            offsetY = canvasY + canvasH * 0.5f;
+        }
+
+        // Zoom toward a screen point (keeps the world point under the cursor
+        // stable, exactly like raylib's scroll-wheel zoom in CanvasView).
+        void zoomToward(float screenX, float screenY, float factor) {
+            SDL_FPoint wb = screenToWorld(screenX, screenY);
+            zoom = std::clamp(zoom * factor, 0.25f, 10.0f);  // Adjust these values as needed
+            SDL_FPoint wa = screenToWorld(screenX, screenY);
+            targetX += wb.x - wa.x;
+            targetY += wb.y - wa.y;
+        }
+
+        // Pan the camera by a screen-space delta (e.g. mouse movement while
+        // P is held).  Divides by zoom so the pan speed feels the same at
+        // any zoom level.
+        void pan(float deltaX, float deltaY) {
+            targetX -= deltaX / zoom;
+            targetY -= deltaY / zoom;
+        }
+
+        // Compute the world-space AABB currently visible inside the canvas.
+        // Used by the ruler/grid to know which tick marks to draw.
+        void getVisibleWorldBounds(float canvasX, float canvasY,
+                                   float canvasW, float canvasH,
+                                   float& outL, float& outT,
+                                   float& outR, float& outB) const {
+            SDL_FPoint tl = screenToWorld(canvasX,        canvasY);
+            SDL_FPoint br = screenToWorld(canvasX + canvasW, canvasY + canvasH);
+            outL = std::min(tl.x, br.x);
+            outR = std::max(tl.x, br.x);
+            outT = std::min(tl.y, br.y);
+            outB = std::max(tl.y, br.y);
+        }
+
+        bool boundsEnabled = false;
+        float boundsMinX = 0.0f, boundsMaxX = 0.0f;
+        float boundsMinY = 0.0f, boundsMaxY = 0.0f;
+
+        void setBounds(float minX, float maxX, float minY, float maxY, bool enabled = true) {
+            boundsMinX = minX; boundsMaxX = maxX;
+            boundsMinY = minY; boundsMaxY = maxY;
+            boundsEnabled = enabled;
+        }
+
+        void clampToBounds(int windowW, int windowH) {
+            if (!boundsEnabled || zoom <= 0.0f) return;
+            float halfViewW = (windowW * 0.5f) / zoom;
+            float halfViewH = (windowH * 0.5f) / zoom;
+            float minCenterX = boundsMinX + halfViewW;
+            float maxCenterX = boundsMaxX - halfViewW;
+            float minCenterY = boundsMinY + halfViewH;
+            float maxCenterY = boundsMaxY - halfViewH;
+            if (minCenterX > maxCenterX) targetX = (boundsMinX + boundsMaxX) * 0.5f;
+            else targetX = std::clamp(targetX, minCenterX, maxCenterX);
+            if (minCenterY > maxCenterY) targetY = (boundsMinY + boundsMaxY) * 0.5f;
+            else targetY = std::clamp(targetY, minCenterY, maxCenterY);
+        }
+    };
+
+    // --- Minimap ---
+    struct MinimapBiome {
+        std::string textureName;
+        int gridX = 0;
+        int gridY = 0;
+        int id = 0;
+        // Fallback color if texture not loaded
+        Uint8 colorR = 60, colorG = 60, colorB = 60;
+    };
+
+    class Minimap {
+    public:
+        bool show = true;
+        float radius = 110.0f;
+        float margin = 25.0f;
+        float borderWidth = 3.0f;
+        
+        float worldMinX = 0, worldMaxX = 0, worldMinY = 0, worldMaxY = 0;
+        
+        // Biome grid support
+        std::vector<MinimapBiome> biomes;
+        float tileWidth = 0.0f;
+        float tileHeight = 0.0f;
+        int biomeTileCountX = 1;
+        int biomeTileCountY = 1;
+        
+        void setWorldBounds(float minX, float maxX, float minY, float maxY) {
+            worldMinX = minX; worldMaxX = maxX;
+            worldMinY = minY; worldMaxY = maxY;
+        }
+        
+        void setBiomeGrid(const std::vector<MinimapBiome>& biomeList,
+                        float tW, float tH, int btX, int btY) {
+            biomes = biomeList;
+            tileWidth = tW;
+            tileHeight = tH;
+            biomeTileCountX = btX;
+            biomeTileCountY = btY;
+        }
+        
+        SDL_FRect getMapRect(int windowW, int windowH) const {
+            float mapSize = radius * 2.0f;
+            return { (float)windowW - mapSize - margin, (float)windowH - mapSize - margin, mapSize, mapSize };
+        }
+        
+        void render(SDL_Renderer* renderer, const ECSWorld& world, Entity playerEntity, int windowW, int windowH) {
+            if (!show) return;
+            SDL_FRect map = getMapRect(windowW, windowH);
+            float worldW = worldMaxX - worldMinX;
+            float worldH = worldMaxY - worldMinY;
+            if (worldW <= 0.0f || worldH <= 0.0f) return;
+            
+            float scaleX = map.w / worldW;
+            float scaleY = map.h / worldH;
+            float scale = std::min(scaleX, scaleY);
+            
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(renderer, 20, 20, 30, 200);
+            SDL_RenderFillRect(renderer, &map);
+            
+            // --- Draw biome grid ---
+            for (const MinimapBiome& biome : biomes) {
+                float bx = worldMinX + biome.gridX * biomeTileCountX * tileWidth;
+                float by = worldMinY + biome.gridY * biomeTileCountY * tileHeight;
+                float bw = biomeTileCountX * tileWidth;
+                float bh = biomeTileCountY * tileHeight;
+                
+                float mx = map.x + (bx - worldMinX) * scale;
+                float my = map.y + (by - worldMinY) * scale;
+                float mw = bw * scale;
+                float mh = bh * scale;
+                
+                SDL_Texture* tex = g_resources.TextureManager.Get(biome.textureName);
+                if (tex) {
+                    SDL_FRect dst = { mx, my, mw, mh };
+                    SDL_RenderTexture(renderer, tex, nullptr, &dst);
+                } else {
+                    SDL_SetRenderDrawColor(renderer, biome.colorR, biome.colorG, biome.colorB, 255);
+                    SDL_FRect dst = { mx, my, mw, mh };
+                    SDL_RenderFillRect(renderer, &dst);
+                }
+                
+                // Thin border around each biome region
+                SDL_SetRenderDrawColor(renderer, 80, 80, 90, 180);
+                SDL_FRect border = { mx, my, mw, mh };
+                SDL_RenderRect(renderer, &border);
+            }
+            
+            // --- Draw player as red dot ---
+            if (playerEntity != (Entity)-1 && world.has_position[playerEntity]) {
+                float px = world.position_pool[playerEntity].x;
+                float py = world.position_pool[playerEntity].y;
+                float pw = world.has_rectangle_shape[playerEntity] ? world.rectangle_shape_pool[playerEntity].w : 0.0f;
+                float ph = world.has_rectangle_shape[playerEntity] ? world.rectangle_shape_pool[playerEntity].h : 0.0f;
+                float pcx = px + pw * 0.5f;
+                float pcy = py + ph * 0.5f;
+                float mpx = map.x + (pcx - worldMinX) * scale;
+                float mpy = map.y + (pcy - worldMinY) * scale;
+                SDL_SetRenderDrawColor(renderer, 255, 50, 50, 255);
+                SDL_FRect dot = { mpx - 4.0f, mpy - 4.0f, 8.0f, 8.0f };
+                SDL_RenderFillRect(renderer, &dot);
+            }
+            
+            // --- Outer border ---
+            SDL_SetRenderDrawColor(renderer, 200, 200, 220, 255);
+            SDL_RenderRect(renderer, &map);
+        }
+    };
+
+    // --- TileMap / Background ---
+    struct BackgroundTile {
+        SDL_FRect rect;
+        std::string textureName;
+    };
+
+    // --- Culling & Render Order ---
+    bool aabbOverlap(const SDL_FRect& a, const SDL_FRect& b) {
+        return a.x < b.x + b.w && a.x + a.w > b.x &&
+            a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    class TileMap {
+    public:
+        std::vector<BackgroundTile> tiles;
+        float tileWidth = 0.0f;
+        float tileHeight = 0.0f;
+        float overlap = 6.0f;
+        
+        void clear() { tiles.clear(); }
+        
+        void addRegion(float originX, float originY, float regionW, float regionH, const std::string& textureName) {
+            if (tileWidth <= 0 || tileHeight <= 0) return;
+            int tilesX = (int)std::ceil(regionW / tileWidth);
+            int tilesY = (int)std::ceil(regionH / tileHeight);
+            for (int ty = 0; ty < tilesY; ++ty) {
+                for (int tx = 0; tx < tilesX; ++tx) {
+                    BackgroundTile tile;
+                    tile.rect = {
+                        originX + tx * tileWidth - overlap * 0.5f,
+                        originY + ty * tileHeight - overlap * 0.5f,
+                        tileWidth + overlap,
+                        tileHeight + overlap
+                    };
+                    tile.textureName = textureName;
+                    tiles.push_back(tile);
+                }
+            }
+        }
+        
+        void render(SDL_Renderer* renderer, const Camera& camera, const SDL_FRect& visibleWorld) {
+            for (const BackgroundTile& tile : tiles) {
+                if (!aabbOverlap(tile.rect, visibleWorld)) continue;
+                SDL_Texture* tex = g_resources.TextureManager.Get(tile.textureName);
+                if (!tex) continue;
+                SDL_FPoint screenPos = camera.worldToScreen(tile.rect.x, tile.rect.y);
+                SDL_FRect dst = {
+                    SDL_floorf(screenPos.x),
+                    SDL_floorf(screenPos.y),
+                    SDL_ceilf(tile.rect.w * camera.zoom),
+                    SDL_ceilf(tile.rect.h * camera.zoom)
+                };
+                SDL_RenderTexture(renderer, tex, nullptr, &dst);
+            }
+        }
+    };
+
+    inline SDL_FRect computeVisibleWorldRect(const Camera& camera, int windowW, int windowH, float cullMargin = 100.0f) {
+        float vl, vt, vr, vb;
+        camera.getVisibleWorldBounds(0.0f, 0.0f, (float)windowW, (float)windowH, vl, vt, vr, vb);
+        return SDL_FRect{
+            vl - cullMargin, vt - cullMargin,
+            (vr - vl) + cullMargin * 2.0f, (vb - vt) + cullMargin * 2.0f
+        };
+    }
+
+    enum class YSortAnchor {
+        Top,    // position.y (default, top of sprite)
+        Center, // position.y + h*0.5 (middle of sprite)
+        Bottom  // position.y + h (feet / bottom of sprite)
+    };
+
+    inline std::vector<Entity> buildVisibleRenderOrder(
+    const ECSWorld& world,
+    const SDL_FRect& visibleWorld,
+    const std::vector<Entity>& excludeEntities = {},
+    bool ySortEnabled = false,
+    YSortAnchor ySortAnchor = YSortAnchor::Top)
+    {
+        std::vector<Entity> renderOrder;
+        renderOrder.reserve(world.entity_count);
+        for (Entity i = 0; i < world.entity_count; ++i) {
+            if (!world.has_position[i]) continue;
+            bool excluded = false;
+            for (Entity ex : excludeEntities) {
+                if (i == ex) { excluded = true; break; }
+            }
+            if (excluded) continue;
+
+            float w = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 0.0f;
+            float h = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 0.0f;
+            SDL_FRect box{ world.position_pool[i].x, world.position_pool[i].y, w, h };
+            if (!aabbOverlap(box, visibleWorld)) continue;
+            renderOrder.push_back(i);
+        }
+
+        if (ySortEnabled) {
+            std::sort(renderOrder.begin(), renderOrder.end(), [&](Entity a, Entity b) {
+                int za = world.has_z_index[a] ? world.z_index_pool[a].z : 0;
+                int zb = world.has_z_index[b] ? world.z_index_pool[b].z : 0;
+                if (za != zb) return za < zb;
+
+                // Pick the Y anchor point based on the requested mode
+                auto getY = [&](Entity e) -> float {
+                    float y = world.position_pool[e].y;
+                    float h = world.has_rectangle_shape[e] ? world.rectangle_shape_pool[e].h : 0.0f;
+                    switch (ySortAnchor) {
+                        case YSortAnchor::Top:    return y;
+                        case YSortAnchor::Center: return y + h * 0.5f;
+                        case YSortAnchor::Bottom: return y + h;
+                    }
+                    return y;
+                };
+
+                float ya = getY(a);
+                float yb = getY(b);
+                return ya < yb;
+            });
+        } else {
+            std::sort(renderOrder.begin(), renderOrder.end(), [&](Entity a, Entity b) {
+                int za = world.has_z_index[a] ? world.z_index_pool[a].z : 0;
+                int zb = world.has_z_index[b] ? world.z_index_pool[b].z : 0;
+                return za < zb;
+            });
+        }
+        return renderOrder;
+    }
+
+    // --- Decoration Spawner ---
+        inline void scatterDecorations(ECSWorld& world, Entity sourceEntity, int count, 
+                                   float minX, float maxX, float minY, float maxY, 
+                                   std::mt19937& rng, std::vector<Entity>& outEntities) {
+        if (sourceEntity == (Entity)-1) return;
+        if (!world.has_position[sourceEntity] || !world.has_rectangle_shape[sourceEntity]) return;
+        float w = world.rectangle_shape_pool[sourceEntity].w;
+        float h = world.rectangle_shape_pool[sourceEntity].h;
+        float effMaxX = maxX - w;
+        float effMaxY = maxY - h;
+        if (minX > effMaxX) effMaxX = minX;
+        if (minY > effMaxY) effMaxY = minY;
+        std::uniform_real_distribution<float> distX(minX, effMaxX);
+        std::uniform_real_distribution<float> distY(minY, effMaxY);
+
+        // Track positions of entities spawned in this batch to enforce minimum distance
+        std::vector<SDL_FPoint> spawnedPositions;
+        const float minDistance = w*3;
+        const int maxAttempts = 100; // Prevent infinite loops in crowded areas
+
+        for (int n = 0; n < count; ++n) {
+            float px = 0.0f, py = 0.0f;
+            bool placed = false;
+            
+            // Try to find a valid spot
+            for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+                px = distX(rng);
+                py = distY(rng);
+                
+                bool tooClose = false;
+                for (const auto& pos : spawnedPositions) {
+                    float dx = px - pos.x;
+                    float dy = py - pos.y;
+                    // Squared distance check is faster and avoids sqrt
+                    if (dx * dx + dy * dy < minDistance * minDistance) {
+                        tooClose = true;
+                        break;
+                    }
+                }
+                
+                if (!tooClose) {
+                    placed = true;
+                    break;
+                }
+            }
+            
+            // If the area is too crowded, skip spawning this entity
+            if (!placed) continue; 
+            
+            spawnedPositions.push_back({px, py});
+
+            Entity copy = world.create_entity();
+            world.add_position(copy);
+            world.position_pool[copy].x = px;
+            world.position_pool[copy].y = py;
+            world.add_rectangle_shape(copy);
+            world.rectangle_shape_pool[copy] = world.rectangle_shape_pool[sourceEntity];
+            if (world.has_z_index[sourceEntity]) {
+                world.add_metadata(copy);
+                world.metadata_pool[copy] = world.metadata_pool[sourceEntity];
+                world.metadata_pool[copy].name = world.metadata_pool[sourceEntity].name;
+            }
+            if (world.has_z_index[sourceEntity]) {
+                world.add_z_index(copy);
+                world.z_index_pool[copy] = world.z_index_pool[sourceEntity];
+            }
+            if (world.has_animation_state[sourceEntity]) {
+                world.add_animation_state(copy);
+                world.animation_state_pool[copy] = world.animation_state_pool[sourceEntity];
+                // must do this so all copies only use the same file
+                world.animation_resource_path[copy] = world.animation_resource_path[sourceEntity];
+            }
+            if (world.has_texture_ref[sourceEntity]) {
+                world.add_texture_ref(copy);
+                world.texture_ref_pool[copy] = world.texture_ref_pool[sourceEntity];
+            }
+            if (world.has_physics_body[sourceEntity]) {
+                world.add_physics_body(copy);
+                world.physics_body_pool[copy] = world.physics_body_pool[sourceEntity];
+                world.physics_body_pool[copy].bodyId = b2_nullBodyId; // Will be recreated by sync system
+                world.physics_resource_path[copy] = world.physics_resource_path[sourceEntity];
+            }
+            outEntities.push_back(copy);
+        }
+    }
+
+    inline void cleanupOutOfBoundsDecorations(ECSWorld& world, std::vector<Entity>& entities,
+                                          float minX, float maxX, float minY, float maxY) {
+        std::vector<Entity> toDestroy;
+        for (Entity e : entities) {
+            if (e == (Entity)-1 || !world.has_position[e]) continue;
+            float px = world.position_pool[e].x;
+            float py = world.position_pool[e].y;
+            float w = world.has_rectangle_shape[e] ? world.rectangle_shape_pool[e].w : 0.0f;
+            float h = world.has_rectangle_shape[e] ? world.rectangle_shape_pool[e].h : 0.0f;
+            if (px + w < minX || px > maxX || py + h < minY || py > maxY) {
+                toDestroy.push_back(e);
+            }
+        }
+
+        // world.delete_entity() swaps the last entity into the deleted slot and
+        // shrinks the array. That silently reassigns whatever handle equaled
+        // `last` to now mean the entity at `id` — any handle still holding the
+        // old `last` value is now stale. Rewrite every remaining handle (both
+        // in the caller's list and our own destroy queue) immediately after
+        // each delete so nothing downstream ever operates on a stale index.
+        for (Entity e : toDestroy) {
+            Entity last = world.entity_count - 1;
+            world.delete_entity(e);
+            if (e != last) {
+                for (Entity& other : entities)   if (other == last) other = e;
+                for (Entity& other : toDestroy)  if (other == last) other = e;
+            }
+        }
+
+        std::vector<Entity> remaining;
+        remaining.reserve(entities.size());
+        for (Entity e : entities) {
+            bool destroyed = false;
+            for (Entity d : toDestroy) { if (e == d) { destroyed = true; break; } }
+            if (!destroyed) remaining.push_back(e);
+        }
+        entities = std::move(remaining);
+    }
+}
+
+inline Tools::Camera g_editorCamera;
 
 enum DialogState { Closed = 0, Opening, Opened, Closing };
 
@@ -1547,230 +1971,444 @@ namespace Gui {
             }
     };
 
+    // Replace the LineEdit class with this improved version
     class LineEdit : public ITextInput, public IGuiElement {
     public:
         LineEdit(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
                 SDL_FRect rect, const std::string& placeholder = "Type here...")
             : renderer(renderer), textEngine(textEngine), font(font),
-            rect(rect), placeholder(placeholder), cursorPos(0), scrollOffset(0) {}
-
+            rect(rect), placeholder(placeholder), cursorPos(0), scrollOffset(0.0f) {}
+        
+        // --- ITextInput ---
         void appendText(const std::string& str) override {
             if (!active) return;
+            if (hasSelection) deleteSelection();
             text.insert(cursorPos, str);
             cursorPos += (int)str.size();
+            pushUndoState();
             ensureCursorVisible();
         }
+        
         void removeLastChar() override {
             if (!active || text.empty() || cursorPos == 0) return;
+            if (hasSelection) {
+                deleteSelection();
+                return;
+            }
             text.erase(cursorPos - 1, 1);
             --cursorPos;
+            pushUndoState();
             ensureCursorVisible();
         }
-        void setActive(bool a) override { active = a; if (!active) cursorPos = (int)text.size(); }
+        
+        bool isActive() const override { return active; }
+        
+        void setActive(bool a) override {
+            active = a;
+            if (!active) {
+                cursorPos = (int)text.size();
+                hasSelection = false;
+            }
+        }
+        
         const SDL_FRect& getRect() const override { return rect; }
-
+        
+        // --- IGuiElement ---
         std::string getType() const override { return "LineEdit"; }
         float getX() const override { return rect.x; }
         float getY() const override { return rect.y; }
         float getWidth() const override { return rect.w; }
         float getHeight() const override { return rect.h; }
-        void setRect(SDL_FRect r) override { rect = r; }
-        void setPos(SDL_Point p) override { rect.x = p.x; rect.y = p.y; }
+        
+        void setRect(SDL_FRect r) override {
+            rect = r;
+            ensureCursorVisible();
+        }
+        
+        void setPos(SDL_Point p) override {
+            rect.x = (float)p.x;
+            rect.y = (float)p.y;
+        }
+        
         const std::string& getPlaceholder() const { return placeholder; }
         void setPlaceholder(const std::string& p) { placeholder = p; }
+        
         const std::string& getText() const { return text; }
-        void clear() { text.clear(); cursorPos = 0; scrollOffset = 0; }
-        bool isActive() const override { return active; }
-
-        // New: set text and reset cursor to end
+        
+        void clear() {
+            text.clear();
+            cursorPos = 0;
+            scrollOffset = 0.0f;
+            hasSelection = false;
+            undoStack.clear();
+            redoStack.clear();
+        }
+        
         void setText(const std::string& t) {
             text = t;
             cursorPos = (int)text.size();
-            scrollOffset = 0;
+            scrollOffset = 0.0f;
+            hasSelection = false;
+            pushUndoState();
             ensureCursorVisible();
         }
-
+        
+        // --- Event handling ---
         bool handleEvent(const SDL_Event& ev, SDL_Window* window, float offsetX, float offsetY) override {
             SDL_FRect originalRect = rect;
             rect.x -= offsetX;
             rect.y -= offsetY;
             auto restore = [&]() { rect = originalRect; };
-
+            
             if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                 float mx = ev.button.x, my = ev.button.y;
-                bool hit = mx >= rect.x && mx <= rect.x + rect.w && my >= rect.y && my <= rect.y + rect.h;
+                bool hit = mx >= rect.x && mx <= rect.x + rect.w &&
+                        my >= rect.y && my <= rect.y + rect.h;
                 if (hit) {
                     if (!active) {
                         active = true;
                         SDL_StartTextInput(window);
-                        cursorPos = (int)text.size();
-                        ensureCursorVisible();
                     }
+                    bool shift = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
+                    float textX = mx - (rect.x + 6.0f) + scrollOffset;
+                    int newCol = xToCol(text, textX);
+                    
+                    if (shift) {
+                        if (!hasSelection) {
+                            selAnchor = cursorPos;
+                            hasSelection = true;
+                        }
+                        cursorPos = newCol;
+                    } else {
+                        cursorPos = newCol;
+                        hasSelection = false;
+                    }
+                    mouseSelecting = true;
+                    ensureCursorVisible();
                     restore();
                     return true;
                 } else {
                     if (active) {
                         active = false;
                         SDL_StopTextInput(window);
+                        hasSelection = false;
                     }
                     restore();
                     return false;
                 }
             }
-            if (!active) { restore(); return false; }
-
-            if (ev.type == SDL_EVENT_TEXT_INPUT) {
-                text.insert(cursorPos, ev.text.text);
-                cursorPos += (int)strlen(ev.text.text);
+            
+            if (ev.type == SDL_EVENT_MOUSE_MOTION && mouseSelecting && active) {
+                float mx = ev.motion.x, my = ev.motion.y;
+                float textX = mx - (rect.x + 6.0f) + scrollOffset;
+                cursorPos = xToCol(text, textX);
                 ensureCursorVisible();
                 restore();
                 return true;
             }
+            
+            if (ev.type == SDL_EVENT_MOUSE_BUTTON_UP && ev.button.button == SDL_BUTTON_LEFT) {
+                mouseSelecting = false;
+            }
+            
+            if (!active) { restore(); return false; }
+            
+            if (ev.type == SDL_EVENT_TEXT_INPUT) {
+                if (hasSelection) deleteSelection();
+                text.insert(cursorPos, ev.text.text);
+                cursorPos += (int)strlen(ev.text.text);
+                pushUndoState();
+                ensureCursorVisible();
+                restore();
+                return true;
+            }
+            
             if (ev.type == SDL_EVENT_KEY_DOWN) {
+                bool shift = (ev.key.mod & SDL_KMOD_SHIFT) != 0;
+                bool ctrl = (ev.key.mod & SDL_KMOD_CTRL) != 0;
+                
+                // Ctrl+A: Select all
+                if (ctrl && ev.key.key == SDLK_A) {
+                    selAnchor = 0;
+                    cursorPos = (int)text.size();
+                    hasSelection = true;
+                    ensureCursorVisible();
+                    restore();
+                    return true;
+                }
+                
+                // Ctrl+C: Copy
+                if (ctrl && ev.key.key == SDLK_C) {
+                    if (hasSelection) {
+                        auto [start, end] = getSelectionRange();
+                        std::string selected = text.substr(start, end - start);
+                        SDL_SetClipboardText(selected.c_str());
+                    }
+                    restore();
+                    return true;
+                }
+                
+                // Ctrl+X: Cut
+                if (ctrl && ev.key.key == SDLK_X) {
+                    if (hasSelection) {
+                        auto [start, end] = getSelectionRange();
+                        std::string selected = text.substr(start, end - start);
+                        SDL_SetClipboardText(selected.c_str());
+                        deleteSelection();
+                        pushUndoState();
+                    }
+                    restore();
+                    return true;
+                }
+                
+                // Ctrl+V: Paste
+                if (ctrl && ev.key.key == SDLK_V) {
+                    char* clipText = SDL_GetClipboardText();
+                    if (clipText) {
+                        if (hasSelection) deleteSelection();
+                        text.insert(cursorPos, clipText);
+                        cursorPos += (int)strlen(clipText);
+                        SDL_free(clipText);
+                        pushUndoState();
+                        ensureCursorVisible();
+                    }
+                    restore();
+                    return true;
+                }
+                
+                // Ctrl+Z: Undo
+                if (ctrl && ev.key.key == SDLK_Z) {
+                    undo();
+                    restore();
+                    return true;
+                }
+                
+                // Ctrl+Y or Ctrl+Shift+Z: Redo
+                if (ctrl && (ev.key.key == SDLK_Y || (shift && ev.key.key == SDLK_Z))) {
+                    redo();
+                    restore();
+                    return true;
+                }
+                
                 switch (ev.key.key) {
                     case SDLK_BACKSPACE:
-                        if (cursorPos > 0) {
+                        if (hasSelection) {
+                            deleteSelection();
+                            pushUndoState();
+                        } else if (cursorPos > 0) {
                             text.erase(cursorPos - 1, 1);
                             --cursorPos;
-                            ensureCursorVisible();
+                            pushUndoState();
                         }
-                        restore(); return true;
+                        ensureCursorVisible();
+                        restore();
+                        return true;
+                        
                     case SDLK_DELETE:
-                        if (cursorPos < (int)text.size()) {
+                        if (hasSelection) {
+                            deleteSelection();
+                            pushUndoState();
+                        } else if (cursorPos < (int)text.size()) {
                             text.erase(cursorPos, 1);
-                            ensureCursorVisible();
+                            pushUndoState();
                         }
-                        restore(); return true;
+                        ensureCursorVisible();
+                        restore();
+                        return true;
+                        
                     case SDLK_LEFT:
-                        if (cursorPos > 0) { --cursorPos; ensureCursorVisible(); }
-                        restore(); return true;
+                        if (cursorPos > 0) {
+                            if (shift) {
+                                if (!hasSelection) {
+                                    selAnchor = cursorPos;
+                                    hasSelection = true;
+                                }
+                                --cursorPos;
+                            } else {
+                                if (hasSelection) {
+                                    auto [start, end] = getSelectionRange();
+                                    cursorPos = start;
+                                    hasSelection = false;
+                                } else {
+                                    --cursorPos;
+                                }
+                            }
+                        }
+                        ensureCursorVisible();
+                        restore();
+                        return true;
+                        
                     case SDLK_RIGHT:
-                        if (cursorPos < (int)text.size()) { ++cursorPos; ensureCursorVisible(); }
-                        restore(); return true;
+                        if (cursorPos < (int)text.size()) {
+                            if (shift) {
+                                if (!hasSelection) {
+                                    selAnchor = cursorPos;
+                                    hasSelection = true;
+                                }
+                                ++cursorPos;
+                            } else {
+                                if (hasSelection) {
+                                    auto [start, end] = getSelectionRange();
+                                    cursorPos = end;
+                                    hasSelection = false;
+                                } else {
+                                    ++cursorPos;
+                                }
+                            }
+                        }
+                        ensureCursorVisible();
+                        restore();
+                        return true;
+                        
                     case SDLK_HOME:
-                        cursorPos = 0; ensureCursorVisible(); restore(); return true;
+                        if (shift) {
+                            if (!hasSelection) {
+                                selAnchor = cursorPos;
+                                hasSelection = true;
+                            }
+                            cursorPos = 0;
+                        } else {
+                            cursorPos = 0;
+                            hasSelection = false;
+                        }
+                        ensureCursorVisible();
+                        restore();
+                        return true;
+                        
                     case SDLK_END:
-                        cursorPos = (int)text.size(); ensureCursorVisible(); restore(); return true;
+                        if (shift) {
+                            if (!hasSelection) {
+                                selAnchor = cursorPos;
+                                hasSelection = true;
+                            }
+                            cursorPos = (int)text.size();
+                        } else {
+                            cursorPos = (int)text.size();
+                            hasSelection = false;
+                        }
+                        ensureCursorVisible();
+                        restore();
+                        return true;
+                        
                     case SDLK_RETURN:
                     case SDLK_ESCAPE:
-                        active = false; SDL_StopTextInput(window); restore(); return true;
+                        active = false;
+                        SDL_StopTextInput(window);
+                        hasSelection = false;
+                        restore();
+                        return true;
+                        
                     default:
                         break;
                 }
             }
+            
             restore();
             return false;
         }
-
+        
         void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY,
                         SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
-            SDL_FRect r = rect; r.x -= offsetX; r.y -= offsetY;
-            bool hit = cursorX >= r.x && cursorX <= r.x + r.w && cursorY >= r.y && cursorY <= r.y + r.h;
+            SDL_FRect r = rect;
+            r.x -= offsetX;
+            r.y -= offsetY;
+            bool hit = cursorX >= r.x && cursorX <= r.x + r.w &&
+                    cursorY >= r.y && cursorY <= r.y + r.h;
             if (confirmDown && !confirmDownLastFrame) {
                 if (hit) {
-                    if (!active) { active = true; SDL_StartTextInput(window); cursorPos = (int)text.size(); ensureCursorVisible(); }
+                    if (!active) { 
+                        active = true; 
+                        SDL_StartTextInput(window); 
+                        cursorPos = (int)text.size(); 
+                        ensureCursorVisible(); 
+                    }
                 } else {
-                    if (active) { active = false; SDL_StopTextInput(window); }
+                    if (active) { 
+                        active = false; 
+                        SDL_StopTextInput(window); 
+                        hasSelection = false;
+                    }
                 }
             }
-            // Gamepad doesn't provide text input; keyboard is assumed.
         }
-
+        
+        // --- Rendering ---
         void render(float offsetX, float offsetY) override {
             SDL_FRect originalRect = rect;
             rect.x -= offsetX;
             rect.y -= offsetY;
-
-            SDL_Color bg = active ? SDL_Color{255,255,255,255} : SDL_Color{245,245,255,255};
+            
+            // Background & border
+            SDL_Color bg = active ? SDL_Color{255, 255, 255, 255} : SDL_Color{245, 245, 255, 255};
             SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, bg.a);
             SDL_RenderFillRect(renderer, &rect);
-            SDL_Color border = active ? SDL_Color{52,110,235,255} : SDL_Color{130,130,130,255};
+            
+            SDL_Color border = active ? SDL_Color{52, 110, 235, 255} : SDL_Color{130, 130, 130, 255};
             SDL_SetRenderDrawColor(renderer, border.r, border.g, border.b, border.a);
             SDL_RenderRect(renderer, &rect);
-
+            
             if (!font || !textEngine) { rect = originalRect; return; }
-
+            
             bool showPlaceholder = text.empty() && !active;
             const std::string& display = showPlaceholder ? placeholder : text;
-            SDL_Color col = showPlaceholder ? SDL_Color{150,150,150,255} : SDL_Color{20,20,20,255};
-
-            // Build visible substring based on scrollOffset
-            std::string visibleText;
-            int visibleStart = 0;
-            if (!display.empty()) {
-                // Measure total width and find start index
-                int totalW = 0, totalH = 0;
-                TTF_GetStringSize(font, display.c_str(), display.size(), &totalW, &totalH);
-                float availableWidth = rect.w - 16.0f;
-                if (totalW > availableWidth) {
-                    // We have scrolling. Find the first character that fits given scrollOffset.
-                    // scrollOffset is in pixels from the left.
-                    int curW = 0;
-                    for (size_t i = 0; i < display.size(); ++i) {
-                        int cw = 0, ch = 0;
-                        std::string chStr = display.substr(i, 1);
-                        TTF_GetStringSize(font, chStr.c_str(), 1, &cw, &ch);
-                        if (curW + cw > scrollOffset) {
-                            visibleStart = (int)i;
-                            break;
-                        }
-                        curW += cw;
-                    }
-                    // Now find how many characters fit from visibleStart
-                    int w = 0;
-                    for (size_t i = visibleStart; i < display.size(); ++i) {
-                        int cw = 0, ch = 0;
-                        std::string chStr = display.substr(i, 1);
-                        TTF_GetStringSize(font, chStr.c_str(), 1, &cw, &ch);
-                        if (w + cw > availableWidth) break;
-                        w += cw;
-                        visibleText += chStr;
-                    }
-                } else {
-                    visibleText = display;
+            SDL_Color textColor = showPlaceholder ? SDL_Color{150, 150, 150, 255} : SDL_Color{20, 20, 20, 255};
+            
+            // Clip to the interior
+            SDL_Rect clipRect = { (int)rect.x + 4, (int)rect.y + 2,
+                                (int)rect.w - 8, (int)rect.h - 4 };
+            SDL_SetRenderClipRect(renderer, &clipRect);
+            
+            const float availableWidth = rect.w - 12.0f;
+            const float textStartX = rect.x + 6.0f;
+            
+            // Draw selection highlight
+            if (hasSelection && !showPlaceholder) {
+                auto [start, end] = getSelectionRange();
+                float selStartX = textStartX + getTextWidth(text.substr(0, start)) - scrollOffset;
+                float selEndX = textStartX + getTextWidth(text.substr(0, end)) - scrollOffset;
+                
+                if (selEndX > selStartX) {
+                    SDL_SetRenderDrawColor(renderer, 51, 153, 255, 100);
+                    SDL_FRect selRect = { selStartX, rect.y + 4.0f, selEndX - selStartX, rect.h - 8.0f };
+                    SDL_RenderFillRect(renderer, &selRect);
                 }
             }
-
-            // Draw visible text
-            if (!visibleText.empty() || active) {
-                // For cursor, we need to draw the text plus possibly a caret.
-                std::string toDraw = visibleText;
-                if (active) {
-                    Uint64 ticks = SDL_GetTicks();
-                    if ((ticks / 500) % 2 == 0) {
-                        // Determine where to draw the cursor relative to visibleText
-                        // If cursor is before visibleStart, draw at start; if after visibleStart+visibleText size, draw at end.
-                        int cursorLocal = cursorPos - visibleStart;
-                        if (cursorLocal < 0) cursorLocal = 0;
-                        if (cursorLocal > (int)visibleText.size()) cursorLocal = (int)visibleText.size();
-                        // Insert a '|' at cursorLocal
-                        toDraw.insert(cursorLocal, "|");
-                    }
-                }
-                TTF_Text* t = TTF_CreateText(textEngine, font, toDraw.c_str(), 0);
+            
+            // Draw text
+            if (!display.empty()) {
+                float drawX = textStartX - scrollOffset;
+                TTF_Text* t = TTF_CreateText(textEngine, font, display.c_str(), 0);
                 if (t) {
-                    TTF_SetTextColor(t, col.r, col.g, col.b, col.a);
-                    // Compute draw x: we want to draw from the left but shifted by -scrollOffset relative to the full text.
-                    // Since visibleText starts at visibleStart, we need to offset the drawing by the width of the prefix.
-                    float drawX = rect.x + 8.0f;
-                    // If we scrolled, we need to subtract the width of the hidden prefix.
-                    if (visibleStart > 0) {
-                        std::string prefix = display.substr(0, visibleStart);
-                        int pw = 0, ph = 0;
-                        TTF_GetStringSize(font, prefix.c_str(), prefix.size(), &pw, &ph);
-                        drawX -= pw;
-                    }
+                    TTF_SetTextColor(t, textColor.r, textColor.g, textColor.b, textColor.a);
                     TTF_DrawRendererText(t, drawX, rect.y + (rect.h - 20.0f) * 0.5f);
                     TTF_DestroyText(t);
                 }
             }
-
+            
+            // Draw cursor
+            if (active) {
+                Uint64 ticks = SDL_GetTicks();
+                if ((ticks / 500) % 2 == 0) {
+                    float cursorX = textStartX + getTextWidth(text.substr(0, cursorPos)) - scrollOffset;
+                    float minX = rect.x + 4.0f;
+                    float maxX = rect.x + rect.w - 4.0f;
+                    
+                    if (cursorX >= minX && cursorX <= maxX) {
+                        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+                        SDL_FRect cursorRect = { cursorX, rect.y + 4.0f, 2.0f, rect.h - 8.0f };
+                        SDL_RenderFillRect(renderer, &cursorRect);
+                    }
+                }
+            }
+            
+            SDL_SetRenderClipRect(renderer, nullptr);
             rect = originalRect;
         }
-
+        
         void deactivate(SDL_Window* window) {
             active = false;
             SDL_StopTextInput(window);
+            hasSelection = false;
         }
 
     private:
@@ -1781,28 +2419,100 @@ namespace Gui {
         std::string placeholder, text;
         bool active = false;
         int cursorPos = 0;
-        int scrollOffset = 0; // pixel offset from the left
-
-        void ensureCursorVisible() {
-            if (text.empty()) { scrollOffset = 0; return; }
-            // Measure text up to cursor
-            std::string prefix = text.substr(0, cursorPos);
-            int pw = 0, ph = 0;
-            TTF_GetStringSize(font, prefix.c_str(), prefix.size(), &pw, &ph);
-            float availableWidth = rect.w - 16.0f;
-            // If cursor is beyond visible area, adjust scrollOffset
-            if (pw > scrollOffset + availableWidth) {
-                // Move scroll so cursor is at the right edge
-                scrollOffset = pw - availableWidth;
-            } else if (pw < scrollOffset) {
-                // Move scroll so cursor is at left edge
-                scrollOffset = pw;
+        float scrollOffset = 0.0f;
+        
+        // Selection
+        int selAnchor = 0;
+        bool hasSelection = false;
+        bool mouseSelecting = false;
+        
+        // Undo/Redo
+        struct UndoState {
+            std::string text;
+            int cursorPos;
+        };
+        std::vector<UndoState> undoStack;
+        std::vector<UndoState> redoStack;
+        static constexpr size_t MAX_UNDO_STATES = 100;
+        
+        void pushUndoState() {
+            undoStack.push_back({text, cursorPos});
+            if (undoStack.size() > MAX_UNDO_STATES) {
+                undoStack.erase(undoStack.begin());
             }
-            // Clamp to 0..max
-            int totalW = 0, totalH = 0;
-            TTF_GetStringSize(font, text.c_str(), text.size(), &totalW, &totalH);
-            int maxScroll = std::max(0, totalW - (int)availableWidth);
-            scrollOffset = std::clamp(scrollOffset, 0, maxScroll);
+            redoStack.clear();
+        }
+        
+        void undo() {
+            if (undoStack.empty()) return;
+            redoStack.push_back({text, cursorPos});
+            auto state = undoStack.back();
+            undoStack.pop_back();
+            text = state.text;
+            cursorPos = state.cursorPos;
+            hasSelection = false;
+            ensureCursorVisible();
+        }
+        
+        void redo() {
+            if (redoStack.empty()) return;
+            undoStack.push_back({text, cursorPos});
+            auto state = redoStack.back();
+            redoStack.pop_back();
+            text = state.text;
+            cursorPos = state.cursorPos;
+            hasSelection = false;
+            ensureCursorVisible();
+        }
+        
+        std::pair<int, int> getSelectionRange() const {
+            int start = std::min(selAnchor, cursorPos);
+            int end = std::max(selAnchor, cursorPos);
+            return {start, end};
+        }
+        
+        void deleteSelection() {
+            if (!hasSelection) return;
+            auto [start, end] = getSelectionRange();
+            text.erase(start, end - start);
+            cursorPos = start;
+            hasSelection = false;
+        }
+        
+        float getTextWidth(const std::string& str) const {
+            if (str.empty() || !font) return 0.0f;
+            int w = 0, h = 0;
+            TTF_GetStringSize(font, str.c_str(), str.size(), &w, &h);
+            return (float)w;
+        }
+        
+        int xToCol(const std::string& line, float localX) const {
+            if (localX <= 0.0f || line.empty()) return 0;
+            
+            float prevW = 0.0f;
+            for (size_t i = 1; i <= line.size(); ++i) {
+                float currW = getTextWidth(line.substr(0, i));
+                float mid = (prevW + currW) * 0.5f;
+                if (localX < mid) return (int)i - 1;
+                prevW = currW;
+            }
+            return (int)line.size();
+        }
+        
+        void ensureCursorVisible() {
+            if (text.empty()) { scrollOffset = 0.0f; return; }
+            
+            const float availableWidth = rect.w - 12.0f;
+            float cursorPixel = getTextWidth(text.substr(0, cursorPos));
+            
+            if (cursorPixel < scrollOffset) {
+                scrollOffset = cursorPixel;
+            } else if (cursorPixel > scrollOffset + availableWidth) {
+                scrollOffset = cursorPixel - availableWidth;
+            }
+            
+            float maxScroll = std::max(0.0f, getTextWidth(text) - availableWidth);
+            scrollOffset = std::clamp(scrollOffset, 0.0f, maxScroll);
         }
     };
 
@@ -1889,6 +2599,45 @@ namespace Gui {
     private:
         float m_zoom = 1.0f;
 
+        struct UndoState {
+            std::vector<std::string> lines;
+            int cursorRow;
+            int cursorCol;
+        };
+        std::vector<UndoState> undoStack;
+        std::vector<UndoState> redoStack;
+        static constexpr size_t MAX_UNDO_STATES = 100;
+
+        void pushUndoState() {
+            undoStack.push_back({lines, cursorRow, cursorCol});
+            if (undoStack.size() > MAX_UNDO_STATES) {
+                undoStack.erase(undoStack.begin());
+            }
+            redoStack.clear();
+        }
+
+        void undo() {
+            if (undoStack.empty()) return;
+            redoStack.push_back({lines, cursorRow, cursorCol});
+            auto state = undoStack.back();
+            undoStack.pop_back();
+            lines = state.lines;
+            cursorRow = state.cursorRow;
+            cursorCol = state.cursorCol;
+            ensureCursorVisible();
+        }
+
+        void redo() {
+            if (redoStack.empty()) return;
+            undoStack.push_back({lines, cursorRow, cursorCol});
+            auto state = redoStack.back();
+            redoStack.pop_back();
+            lines = state.lines;
+            cursorRow = state.cursorRow;
+            cursorCol = state.cursorCol;
+            ensureCursorVisible();
+        }
+
     public:
         void setZoom(float z) { m_zoom = z; refreshScrollbars(); }
 
@@ -1959,6 +2708,49 @@ namespace Gui {
             // Keyboard input while active
             if (ev.type == SDL_EVENT_KEY_DOWN) {
                 bool shift = (ev.key.mod & SDL_KMOD_SHIFT) != 0;
+                bool ctrl = (ev.key.mod & SDL_KMOD_CTRL) != 0;
+
+                if (ctrl && ev.key.key == SDLK_C) {
+                    // TextArea doesn't have selection yet, so copy current line
+                    if (cursorRow >= 0 && cursorRow < (int)lines.size()) {
+                            SDL_SetClipboardText(lines[cursorRow].c_str());
+                        }
+                        return true;
+                }
+
+                // Ctrl+V: Paste
+                if (ctrl && ev.key.key == SDLK_V) {
+                    char* clipText = SDL_GetClipboardText();
+                    if (clipText) {
+                        std::string text(clipText);
+                        SDL_free(clipText);
+                        for (char c : text) {
+                            if (c == '\n') {
+                                newline();
+                            } else if (c == '\r') {
+                                continue;
+                            } else if (c == '\t') {
+                                insertChar('\t');
+                            } else if (c >= 32 && c < 127) {
+                                insertChar(c);
+                            }
+                        }
+                        pushUndoState();
+                    }
+                    return true;
+                }
+
+                // Ctrl+Z: Undo
+                if (ctrl && ev.key.key == SDLK_Z) {
+                    undo();
+                    return true;
+                }
+
+                // Ctrl+Y or Ctrl+Shift+Z: Redo
+                if (ctrl && (ev.key.key == SDLK_Y || (shift && ev.key.key == SDLK_Z))) {
+                    redo();
+                    return true;
+                }
                 switch (ev.key.key) {
                     case SDLK_LEFT:  moveCursor(cursorRow, cursorCol - 1, shift); return true;
                     case SDLK_RIGHT: moveCursor(cursorRow, cursorCol + 1, shift); return true;
@@ -2216,6 +3008,7 @@ namespace Gui {
                 line.insert(cursorCol, 1, ch);
                 cursorCol++;
             }
+            pushUndoState();
             ensureCursorVisible();
         }
 
@@ -2230,6 +3023,7 @@ namespace Gui {
                 line += next;
                 lines.erase(lines.begin() + cursorRow + 1);
             }
+            pushUndoState();
             ensureCursorVisible();
         }
 
@@ -2249,6 +3043,7 @@ namespace Gui {
                 line.erase(cursorCol - 1, 1);
                 cursorCol--;
             }
+            pushUndoState();
             ensureCursorVisible();
         }
 
@@ -2260,6 +3055,7 @@ namespace Gui {
             lines.insert(lines.begin() + cursorRow + 1, rest);
             cursorRow++;
             cursorCol = 0;
+            pushUndoState();
             ensureCursorVisible();
         }
 
@@ -3285,6 +4081,8 @@ namespace Gui {
         filenameEdit(r, te, f, {0,0,1,1}, "filename"),
         renderer(r), font(f), textEngine(te)
         {
+            listScrollbar.setOrientation(Gui::ScrollOrientation::Vertical);
+            listScrollbar.onChange = [this](float v) { listScrollOffset = v; };
             refreshEntries();
             loadIcons();
         }
@@ -3296,6 +4094,7 @@ namespace Gui {
             if (sceneIcon)   SDL_DestroyTexture(sceneIcon);
             if (textIcon)    SDL_DestroyTexture(textIcon);
             if (musicIcon)   SDL_DestroyTexture(musicIcon);
+            if (imgIcon)     SDL_DestroyTexture(imgIcon);
         }
 
         void setCallback(std::function<void(const std::string&)> cb) { callback = cb; }
@@ -3392,6 +4191,58 @@ namespace Gui {
             }
         }
 
+    private:
+        Gui::Scrollbar listScrollbar;
+        float listScrollOffset = 0.0f;
+        SDL_FRect getListRect(const SDL_FRect& win) const {
+            return { win.x + 10, win.y + 75, win.w - 20, win.h - 140 };
+        }
+        void updateScrollbarGeometry(const SDL_FRect& listRect) {
+            const float rowHeight = 24.0f;
+            float contentHeight = entries.size() * rowHeight;
+            float viewHeight = listRect.h;
+            // Place the scrollbar on the right edge of the list (inside, with a small margin)
+            float sbWidth = 12.0f;
+            listScrollbar.setGeometry(
+                listRect.x + listRect.w - sbWidth - 2,
+                listRect.y + 2,
+                sbWidth,
+                listRect.h - 4,
+                contentHeight,
+                viewHeight
+            );
+            // Clamp the offset to the new max
+            listScrollOffset = std::clamp(listScrollOffset, 0.0f, listScrollbar.maxOffset());
+            listScrollbar.setOffsetNoCallback(listScrollOffset);
+        }
+        void updateScrollbar() {
+            // Called whenever the list content changes (refreshEntries) or the dialog opens.
+            // We need a valid win rect to compute listRect; we can use the animRect() if open,
+            // otherwise fallback to logicalRect.
+            SDL_FRect win = (state == DialogState::Opened) ? animRect() : logicalRect;
+            SDL_FRect listRect = getListRect(win);
+            updateScrollbarGeometry(listRect);
+        }
+
+        float listRectHeight() const {
+            SDL_FRect win = (state == DialogState::Opened) ? animRect() : logicalRect;
+            return getListRect(win).h;
+        }
+
+        void ensureItemVisible(int index) {
+            if (index < 0 || index >= (int)entries.size()) return;
+            float rowHeight = 24.0f;
+            float itemTop = index * rowHeight;
+            float itemBottom = itemTop + rowHeight;
+            if (itemTop < listScrollOffset) {
+                listScrollOffset = itemTop;
+            } else if (itemBottom > listScrollOffset + listRectHeight()) {
+                listScrollOffset = itemBottom - listRectHeight();
+            }
+            listScrollOffset = std::clamp(listScrollOffset, 0.0f, listScrollbar.maxOffset());
+            listScrollbar.setOffsetNoCallback(listScrollOffset);
+        }
+
     protected:
         void onOpen() override {
             int winW, winH;
@@ -3406,12 +4257,18 @@ namespace Gui {
             selectedFilePath.clear();
             goToRoot();
             loadIcons();
+            updateScrollbar();
         }
 
         bool onHandleEvent(const SDL_Event& ev) override {
+            // ── Scrollbar gets first chance at all events ──
+            if (listScrollbar.handleEvent(ev)) return true;
+
             if (saveMode) {
                 if (filenameEdit.handleEvent(ev, window, 0.0f, 0.0f)) return true;
             }
+
+            // ── Delete confirmation overlay ──
             if (showDeleteConfirmation) {
                 if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                     float mx = ev.button.x, my = ev.button.y;
@@ -3421,12 +4278,12 @@ namespace Gui {
                     float boxY = win.y + (win.h - boxH) * 0.5f;
                     SDL_FRect yesBtn = { boxX + 20.0f, boxY + boxH - 50.0f, 120.0f, 36.0f };
                     SDL_FRect noBtn  = { boxX + boxW - 140.0f, boxY + boxH - 50.0f, 120.0f, 36.0f };
-                    
-                    if (mx >= yesBtn.x && mx <= yesBtn.x + yesBtn.w && my >= yesBtn.y && my <= yesBtn.y + yesBtn.h) {
+
+                    if (mx >= yesBtn.x && mx <= yesBtn.x + yesBtn.w &&
+                        my >= yesBtn.y && my <= yesBtn.y + yesBtn.h) {
                         if (deleteIndex >= 0 && deleteIndex < (int)entries.size()) {
                             std::string pathToDelete = (std::filesystem::path(currentPath) / entries[deleteIndex]).string();
                             std::error_code ec;
-                            // remove_all works for both files and directories
                             std::filesystem::remove_all(pathToDelete, ec);
                             if (ec) SDL_Log("Failed to delete '%s': %s", pathToDelete.c_str(), ec.message().c_str());
                             else    SDL_Log("Deleted '%s'", pathToDelete.c_str());
@@ -3435,7 +4292,8 @@ namespace Gui {
                         refreshEntries();
                         return true;
                     }
-                    if (mx >= noBtn.x && mx <= noBtn.x + noBtn.w && my >= noBtn.y && my <= noBtn.y + noBtn.h) {
+                    if (mx >= noBtn.x && mx <= noBtn.x + noBtn.w &&
+                        my >= noBtn.y && my <= noBtn.y + noBtn.h) {
                         showDeleteConfirmation = false;
                         return true;
                     }
@@ -3443,14 +4301,10 @@ namespace Gui {
                 if (ev.type == SDL_EVENT_KEY_DOWN) {
                     if (ev.key.key == SDLK_ESCAPE) { showDeleteConfirmation = false; return true; }
                 }
-                return true; // Consume all other events while confirming
+                return true; // consume all other events while confirming
             }
-            // --- Save-mode "overwrite existing file?" confirmation ---
-            // Double-clicking an existing entry while the Save dialog is open
-            // lands here instead of immediately saving over it (see the list
-            // interaction handling below), so the user gets a Yes/No check
-            // just like deleting, and the filename field is already filled
-            // in either way -- no retyping needed if they say No.
+
+            // ── Overwrite confirmation (Save mode) ──
             if (showOverwriteConfirmation) {
                 if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                     float mx = ev.button.x, my = ev.button.y;
@@ -3461,7 +4315,8 @@ namespace Gui {
                     SDL_FRect yesBtn = { boxX + 20.0f, boxY + boxH - 50.0f, 130.0f, 36.0f };
                     SDL_FRect noBtn  = { boxX + boxW - 150.0f, boxY + boxH - 50.0f, 130.0f, 36.0f };
 
-                    if (mx >= yesBtn.x && mx <= yesBtn.x + yesBtn.w && my >= yesBtn.y && my <= yesBtn.y + yesBtn.h) {
+                    if (mx >= yesBtn.x && mx <= yesBtn.x + yesBtn.w &&
+                        my >= yesBtn.y && my <= yesBtn.y + yesBtn.h) {
                         if (overwriteIndex >= 0 && overwriteIndex < (int)entries.size() && callback) {
                             std::string fullPath = (std::filesystem::path(currentPath) / entries[overwriteIndex]).string();
                             callback(fullPath);
@@ -3469,7 +4324,8 @@ namespace Gui {
                         showOverwriteConfirmation = false;
                         return true;
                     }
-                    if (mx >= noBtn.x && mx <= noBtn.x + noBtn.w && my >= noBtn.y && my <= noBtn.y + noBtn.h) {
+                    if (mx >= noBtn.x && mx <= noBtn.x + noBtn.w &&
+                        my >= noBtn.y && my <= noBtn.y + noBtn.h) {
                         showOverwriteConfirmation = false;
                         return true;
                     }
@@ -3485,13 +4341,14 @@ namespace Gui {
                         return true;
                     }
                 }
-                return true; // Consume all other events while confirming
+                return true;
             }
-            // --- NEW: Handle Active Rename Mode ---
+
+            // ── Active rename mode ──
             if (isRenaming) {
                 bool wasActive = renameEdit.isActive();
                 renameEdit.handleEvent(ev, window, 0.0f, 0.0f);
-                
+
                 if (ev.type == SDL_EVENT_KEY_DOWN) {
                     if (ev.key.key == SDLK_RETURN) {
                         commitRename();
@@ -3503,16 +4360,15 @@ namespace Gui {
                         return true;
                     }
                 }
-                
-                // If the user clicked outside the LineEdit, it deactivates itself. Commit the rename.
+
                 if (wasActive && !renameEdit.isActive()) {
                     commitRename();
                     return true;
                 }
-                
-                return true; // Consume all events while renaming
+                return true; // consume while renaming
             }
-            // Context menu handling
+
+            // ── Context menu (empty space) ──
             if (showContextMenu) {
                 if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                     float mx = ev.button.x, my = ev.button.y;
@@ -3523,7 +4379,7 @@ namespace Gui {
                         int idx = (int)((my - menuRect.y) / itemH);
                         if (idx >= 0 && idx < (int)contextMenuItems.size()) {
                             if (idx == 0) createNewFolder();
-                            if (idx == 1) createNewScene();
+                            else if (idx == 1) createNewScene();
                             else if (idx == 2) createNewScript();
                             else if (idx == 3) createNewHeader();
                             else if (idx == 4) createNewConfig();
@@ -3541,6 +4397,8 @@ namespace Gui {
                 }
                 return true;
             }
+
+            // ── Item context menu (right‑click on a file/folder) ──
             if (showItemContextMenu) {
                 if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                     float mx = ev.button.x, my = ev.button.y;
@@ -3549,14 +4407,14 @@ namespace Gui {
                         my >= menuRect.y && my <= menuRect.y + menuRect.h) {
                         float itemH = 28.0f;
                         int idx = (int)((my - menuRect.y) / itemH);
-                        if (idx == 0) { // Rename was clicked
+                        if (idx == 0) { // Rename
                             isRenaming = true;
                             renameIndex = selectedIndex;
                             renameEdit.clear();
                             for (char c : entries[renameIndex]) renameEdit.appendText(std::string(1, c));
                             renameEdit.setActive(true);
                             SDL_StartTextInput(window);
-                        } else if (idx == 1) {
+                        } else if (idx == 1) { // Delete
                             showDeleteConfirmation = true;
                             deleteIndex = selectedIndex;
                             showItemContextMenu = false;
@@ -3574,7 +4432,8 @@ namespace Gui {
                 }
                 return true;
             }
-            // Back button
+
+            // ── Back button ──
             if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                 float mx = ev.button.x, my = ev.button.y;
                 SDL_FRect win = animRect();
@@ -3586,71 +4445,72 @@ namespace Gui {
                 }
             }
 
-            // Path edit
+            // ── Path edit ──
             if (pathEdit.handleEvent(ev, window, 0.0f, 0.0f)) return true;
 
-            // List interactions (left click)
-            if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
+            // ── Mouse interactions on the file list ──
+            if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
                 float mx = ev.button.x, my = ev.button.y;
                 SDL_FRect win = animRect();
-                SDL_FRect listRect = { win.x + 10, win.y + 70, win.w - 20, win.h - 110 };
-                if (mx >= listRect.x && mx <= listRect.x + listRect.w &&
-                    my >= listRect.y && my <= listRect.y + listRect.h) {
-                    float rowHeight = 24.0f;
-                    int idx = (int)((my - listRect.y) / rowHeight);
-                    if (idx >= 0 && idx < (int)entries.size()) {
-                        selectedIndex = idx;
-                        if (isDir[idx]) {
-                            goToDirectory(entries[idx]);
-                        } else if (ev.button.clicks >= 2) {
-                            if (saveMode) {
-                                // Pre-fill the filename regardless of the user's
-                                // eventual choice, so hitting "No" still leaves
-                                // the Save dialog ready to go without retyping.
-                                filenameEdit.clear();
-                                for (char c : entries[idx]) filenameEdit.appendText(std::string(1, c));
-                                showOverwriteConfirmation = true;
-                                overwriteIndex = idx;
-                            } else {
-                                selectedFilePath = (std::filesystem::path(currentPath) / entries[idx]).string();
-                                selectFile(entries[idx]);
+                SDL_FRect listRect = getListRect(win);
+
+                // Left‑click: select / open / double‑click
+                if (ev.button.button == SDL_BUTTON_LEFT) {
+                    if (mx >= listRect.x && mx <= listRect.x + listRect.w &&
+                        my >= listRect.y && my <= listRect.y + listRect.h) {
+                        float rowHeight = 24.0f;
+                        // ------------------------- IMPORTANT -------------------------
+                        // Offset the Y coordinate by the current scroll offset so that
+                        // clicks land on the correct row even when the list is scrolled.
+                        int idx = (int)((my - listRect.y + listScrollOffset) / rowHeight);
+                        // -------------------------------------------------------------
+                        if (idx >= 0 && idx < (int)entries.size()) {
+                            selectedIndex = idx;
+                            if (isDir[idx]) {
+                                goToDirectory(entries[idx]);
+                            } else if (ev.button.clicks >= 2) {
+                                if (saveMode) {
+                                    filenameEdit.clear();
+                                    for (char c : entries[idx]) filenameEdit.appendText(std::string(1, c));
+                                    showOverwriteConfirmation = true;
+                                    overwriteIndex = idx;
+                                } else {
+                                    selectedFilePath = (std::filesystem::path(currentPath) / entries[idx]).string();
+                                    selectFile(entries[idx]);
+                                }
                             }
+                            return true;
+                        }
+                    }
+                }
+
+                // Right‑click: context menu (item or empty space)
+                if (ev.button.button == SDL_BUTTON_RIGHT) {
+                    if (mx >= listRect.x && mx <= listRect.x + listRect.w &&
+                        my >= listRect.y && my <= listRect.y + listRect.h) {
+                        float rowHeight = 24.0f;
+                        // Again, apply scroll offset to get the correct row index
+                        int idx = (int)((my - listRect.y + listScrollOffset) / rowHeight);
+                        if (idx >= 0 && idx < (int)entries.size()) {
+                            // Right‑click on an item → show item context menu
+                            selectedIndex = idx;
+                            itemContextMenuX = mx;
+                            itemContextMenuY = my;
+                            showItemContextMenu = true;
+                            showContextMenu = false;
+                        } else {
+                            // Right‑click on empty space → show "New..." menu
+                            contextMenuX = mx;
+                            contextMenuY = my;
+                            showContextMenu = true;
+                            showItemContextMenu = false;
                         }
                         return true;
                     }
                 }
             }
 
-            // Right-click -> context menu
-            if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_RIGHT) {
-                float mx = ev.button.x, my = ev.button.y;
-                SDL_FRect win = animRect();
-                SDL_FRect listRect = { win.x + 10, win.y + 70, win.w - 20, win.h - 110 };
-                if (mx >= listRect.x && mx <= listRect.x + listRect.w &&
-                    my >= listRect.y && my <= listRect.y + listRect.h) {
-                    float rowHeight = 24.0f;
-                    int idx = (int)((my - listRect.y) / rowHeight);
-                    
-                    // --- MODIFIED: Distinguish between item and empty space ---
-                    if (idx >= 0 && idx < (int)entries.size()) {
-                        // Right-clicked on an item
-                        selectedIndex = idx;
-                        itemContextMenuX = mx;
-                        itemContextMenuY = my;
-                        showItemContextMenu = true;
-                        showContextMenu = false; // Hide the "New..." menu
-                    } else {
-                        // Right-clicked on empty space
-                        contextMenuX = mx;
-                        contextMenuY = my;
-                        showContextMenu = true;
-                        showItemContextMenu = false; // Hide the item menu
-                    }
-                    return true;
-                }
-            }
-
-            // Keyboard navigation
+            // ── Keyboard navigation ──
             if (ev.type == SDL_EVENT_KEY_DOWN) {
                 if (ev.key.key == SDLK_RETURN) {
                     if (selectedIndex >= 0 && selectedIndex < (int)entries.size()) {
@@ -3669,13 +4529,21 @@ namespace Gui {
                 }
                 if (ev.key.key == SDLK_DOWN) {
                     selectedIndex = std::min(selectedIndex + 1, (int)entries.size() - 1);
+                    // Ensure the newly selected item is visible (scroll to it if needed)
+                    ensureItemVisible(selectedIndex);
                     return true;
                 }
                 if (ev.key.key == SDLK_UP) {
                     selectedIndex = std::max(selectedIndex - 1, 0);
+                    ensureItemVisible(selectedIndex);
                     return true;
                 }
             }
+
+            // ── Mouse wheel inside the list area is already caught by the scrollbar,
+            //     but we also let the scrollbar handle it directly (done at the top).
+            //     No extra handling needed here.
+
             return false;
         }
 
@@ -3695,29 +4563,37 @@ namespace Gui {
             pathEdit.setRect({ win.x + 45, win.y + 40, win.w - 98, 28 });
             pathEdit.render(0.0f, 0.0f);
 
-            // List area
-            SDL_FRect listRect = { win.x + 10, win.y + 75, win.w - 20, win.h - 140 };
+            // ── File list area ──
+            SDL_FRect listRect = getListRect(win);
+            // Background and border
             SDL_SetRenderDrawColor(renderer, 50, 50, 60, 255);
             SDL_RenderFillRect(renderer, &listRect);
             SDL_SetRenderDrawColor(renderer, 80, 80, 100, 255);
             SDL_RenderRect(renderer, &listRect);
 
+            // ── Clip to list area ──
             SDL_Rect clip = { (int)listRect.x, (int)listRect.y, (int)listRect.w, (int)listRect.h };
             SDL_SetRenderClipRect(renderer, &clip);
 
-            // Draw entries with icons
             float rowHeight = 24.0f;
-            float y = listRect.y;
+            float y = listRect.y - listScrollOffset;   // apply scroll offset
             const float iconSize = 32.0f;
             const float textOffset = iconSize + 6.0f;
 
             for (size_t i = 0; i < entries.size(); ++i) {
+                // Skip rows that are completely outside the visible area
+                if (y + rowHeight < listRect.y || y > listRect.y + listRect.h) {
+                    y += rowHeight;
+                    continue;
+                }
+
+                // Row background (selected / normal)
                 SDL_Color bg = (i == selectedIndex) ? SDL_Color{70, 70, 120, 255} : SDL_Color{60, 60, 70, 255};
                 SDL_SetRenderDrawColor(renderer, bg.r, bg.g, bg.b, bg.a);
                 SDL_FRect rowRect = { listRect.x, y, listRect.w, rowHeight };
                 SDL_RenderFillRect(renderer, &rowRect);
 
-                // Choose icon (texture)
+                // Icon
                 SDL_Texture* icon = nullptr;
                 if (isDir[i]) {
                     icon = folderIcon;
@@ -3728,8 +4604,8 @@ namespace Gui {
                     else if (ext == ".json") icon = sceneIcon;
                     else if (ext == ".txt" || ext == "")  icon = textIcon;
                     else if (ext == ".mp3" || ext == ".wav") icon = musicIcon;
+                    else if (ext == ".svg" || ext == ".svg") icon = imgIcon;
                 }
-
                 if (icon) {
                     SDL_FRect iconRect = { listRect.x + 4, y + (rowHeight - iconSize) * 0.5f, iconSize, iconSize };
                     SDL_RenderTexture(renderer, icon, nullptr, &iconRect);
@@ -3737,21 +4613,27 @@ namespace Gui {
                     drawText(isDir[i] ? "[DIR]" : "[FILE]", listRect.x + 4, y + 2, {200,200,180,255});
                 }
 
+                // File / folder name (or rename edit box if active)
                 SDL_Color textColor = isDir[i] ? SDL_Color{200,200,180,255} : SDL_Color{220,220,240,255};
                 if (isRenaming && i == renameIndex) {
                     SDL_FRect editRect = { listRect.x + textOffset, y + 2, listRect.w - textOffset - 10, rowHeight - 4 };
                     renameEdit.setRect(editRect);
                     renameEdit.render(0.0f, 0.0f);
                 } else {
-                    SDL_Color textColor = isDir[i] ? SDL_Color{200,200,180,255} : SDL_Color{220,220,240,255};
                     drawText(entries[i].c_str(), listRect.x + textOffset, y + 2, textColor);
                 }
+
                 y += rowHeight;
             }
 
             SDL_SetRenderClipRect(renderer, nullptr);
 
-            // Context menu
+            // ── Render the scrollbar ──
+            // Update its geometry first (in case listRect changed)
+            updateScrollbarGeometry(listRect);
+            listScrollbar.render(renderer, 0.0f, 0.0f);
+
+            // ── Context menus ──
             if (showContextMenu) {
                 SDL_FRect menuRect = getContextMenuRect();
                 SDL_SetRenderDrawColor(renderer, 40, 40, 50, 220);
@@ -3775,6 +4657,7 @@ namespace Gui {
                     yPos += itemH;
                 }
             }
+
             if (showItemContextMenu) {
                 SDL_FRect menuRect = getItemContextMenuRect();
                 SDL_SetRenderDrawColor(renderer, 40, 40, 50, 220);
@@ -3798,9 +4681,10 @@ namespace Gui {
                     yPos += itemH;
                 }
             }
+
+            // ── Save‑mode file name field ──
             if (saveMode) {
                 drawText("File:", win.x + 10, win.y + win.h - 40, {220,220,220,255});
-                // Fix: Start after the Cancel button (which ends at x+120) and end before the Save button
                 filenameEdit.setRect({ win.x + 130, win.y + win.h - 45, win.w - 260, 28 });
                 filenameEdit.render(0.0f, 0.0f);
             }
@@ -3929,6 +4813,7 @@ namespace Gui {
         SDL_Texture* sceneIcon  = nullptr;
         SDL_Texture* textIcon   = nullptr;
         SDL_Texture* musicIcon  = nullptr;
+        SDL_Texture* imgIcon    = nullptr;
 
         bool showContextMenu = false;
         float contextMenuX = 0, contextMenuY = 0;
@@ -3979,6 +4864,7 @@ namespace Gui {
             if (!sceneIcon)   sceneIcon   = loadOrFallback("scene_icon.svg",   SDL_Color{80,200,120,255}, "Scne");
             if (!textIcon)    textIcon    = loadOrFallback("file_icon.svg",    SDL_Color{80,100,120,255}, "Txt");
             if (!musicIcon)   musicIcon   = loadOrFallback("music_icon.svg",   SDL_Color{80,100,120,255}, "Wav/Mp4");
+            if (!imgIcon)   imgIcon   = loadOrFallback("img_icon.svg",   SDL_Color{80,100,120,255}, "Svg");
         }
 
         SDL_FRect getContextMenuRect() const {
@@ -4027,6 +4913,7 @@ namespace Gui {
             } catch (const std::exception& e) {
                 SDL_Log("FileExplorer: error reading directory: %s", e.what());
             }
+            updateScrollbar();
         }
 
         void goToParent() {
@@ -5532,6 +6419,10 @@ namespace Gui {
             for (auto& f : fields) {
                 for (auto& wgt : f.widgets) {
                     if (wgt->handleEvent(ev, window, 0.0f, 0.0f)) consumed = true;
+                    if (wgt->getType() == "LineEdit") {
+                        auto* le = static_cast<Gui::LineEdit*>(wgt.get());
+                        if (le->isActive()) f.textEverActive = true;
+                    }
                 }
             }
             if (componentSelector.handleEvent(ev, window, 0.0f, 0.0f)) return true;
@@ -5655,33 +6546,33 @@ namespace Gui {
                             else if (f.key == "z_index") world->z_index_pool[e].z = (int)val;
                             else if (f.key == "phys_shape") {
                                 auto newShape = SpinboxIndexToShapeType((int)val);
-                                // Default to a basic triangle when switching to Polygon with no
-                                // points yet defined. Points are TOP-LEFT relative, matching the
-                                // convention used by the mouse polygon editor and the overlay
-                                // renderer (both subtract width*0.5/height*0.5 from stored points).
-                                if (newShape == Physics::ShapeType::Polygon && world->physics_body_pool[e].polygonPoints.empty()) {
-                                    world->physics_body_pool[e].polygonPoints = MakeDefaultTrianglePoints(
-                                        world->physics_body_pool[e].width, world->physics_body_pool[e].height);
+                                if (newShape == Physics::ShapeType::Polygon) {
+                                    auto& pb = world->physics_body_pool[e];
+                                    float oldW = pb.width;
+                                    float oldH = pb.height;
+                                    float newW = world->rectangle_shape_pool[e].w;
+                                    float newH = world->rectangle_shape_pool[e].h;
+                                    
+                                    // Rescale existing polygon points to match new dimensions
+                                    if (!pb.polygonPoints.empty() && oldW > 0.0001f && oldH > 0.0001f) {
+                                        float scaleX = newW / oldW;
+                                        float scaleY = newH / oldH;
+                                        for (auto& pt : pb.polygonPoints) {
+                                            pt.x *= scaleX;
+                                            pt.y *= scaleY;
+                                        }
+                                    }
+                                    
+                                    // Always update width/height to match rectangle shape
+                                    pb.width = newW;
+                                    pb.height = newH;
+                                    
+                                    // Create default points if none exist
+                                    if (pb.polygonPoints.empty()) {
+                                        pb.polygonPoints = MakeDefaultTrianglePoints(newW, newH);
+                                    }
                                 }
                                 world->physics_body_pool[e].shapeType = newShape;
-                            }
-                            else if (f.key == "phys_w") {
-                                auto& pb = world->physics_body_pool[e];
-                                float oldW = pb.width;
-                                if (!pb.polygonPoints.empty() && oldW > 0.0001f) {
-                                    float scale = val / oldW;
-                                    for (auto& pt : pb.polygonPoints) pt.x *= scale;
-                                }
-                                pb.width = val;
-                            }
-                            else if (f.key == "phys_h") {
-                                auto& pb = world->physics_body_pool[e];
-                                float oldH = pb.height;
-                                if (!pb.polygonPoints.empty() && oldH > 0.0001f) {
-                                    float scale = val / oldH;
-                                    for (auto& pt : pb.polygonPoints) pt.y *= scale;
-                                }
-                                pb.height = val;
                             }
                             else if (f.key == "phys_r") world->physics_body_pool[e].radius = val;
                             else if (f.key == "anim_speed") world->animation_state_pool[e].active().speed = val;
@@ -5698,7 +6589,18 @@ namespace Gui {
                         std::string text = le->getText();
                         if (text != f.lastSyncedText) {
                             if (f.key == "metadata_name") {
-                                world->metadata_pool[e].name = text;
+                                // Guard: only commit if the user actually
+                                // focused this field. Selecting an entity
+                                // rebuilds this field from the entity's
+                                // current name (lastSyncedText is seeded to
+                                // match), so a diff here should only ever
+                                // happen because of real typing -- but this
+                                // makes that guarantee explicit rather than
+                                // implicit, so a name can never be reset to
+                                // blank just by selecting/reselecting.
+                                if (f.textEverActive) {
+                                    world->metadata_pool[e].name = text;
+                                }
                             } else if (f.key == "tex_res") {
                                 if (!text.empty()) {
                                     g_resources.TextureManager.Load(text, text);
@@ -5822,6 +6724,15 @@ namespace Gui {
             std::vector<std::unique_ptr<IGuiElement>> widgets;
             float lastSyncedValue = 0.0f;
             std::string lastSyncedText = "";
+            // Set once a LineEdit widget in this field has actually been
+            // clicked into / focused by the user. Used to guard against
+            // writing to world state (e.g. metadata name) from anything
+            // other than a genuine user edit -- rebuilding this field (which
+            // happens every time the selection changes) always seeds
+            // lastSyncedText/widget text from the current world value, so a
+            // freshly-rebuilt field can never itself look like an edit; this
+            // flag makes that guarantee explicit and easy to audit.
+            bool textEverActive = false;
 
             Field() = default;
             Field(Field&&) = default;
@@ -5897,12 +6808,14 @@ namespace Gui {
                 for (char c : val) le->appendText(std::string(1, c));
                 auto btn = std::make_unique<Gui::Button>(renderer, font, "...", SDL_FPoint{0,0}, 30, 26);
                 btn->onClicked = [this, lePtr = le.get()]() {
-                    fileExplorer.setFilter("*.svg;");
-                    fileExplorer.setSaveMode(false, ""); // ensure "Open" mode, not left over from a prior resource save
-                    fileExplorer.setCallback([lePtr](const std::string& path) {
+                    fileExplorer.setFilter("*.svg;*.png;*.jpg;*.jpeg");
+                    fileExplorer.setSaveMode(false, "");
+                    fileExplorer.setCallback([this, lePtr](const std::string& path) {
                         lePtr->clear();
                         for (char c : path) lePtr->appendText(std::string(1, c));
                         lePtr->deactivate(nullptr);
+                        // Commit the change to the world immediately
+                        this->commitAllFields();
                     });
                     fileExplorer.open();
                 };
@@ -6202,6 +7115,48 @@ namespace Gui {
     private:
         int tabWidth = 4;
 
+        struct UndoState {
+            std::vector<std::string> lines;
+            int cursorRow;
+            int cursorCol;
+        };
+        std::vector<UndoState> undoStack;
+        std::vector<UndoState> redoStack;
+        static constexpr size_t MAX_UNDO_STATES = 100;
+
+        // Add these methods to TextEditor class:
+        void pushUndoState() {
+            undoStack.push_back({lines, cursorRow, cursorCol});
+            if (undoStack.size() > MAX_UNDO_STATES) {
+                undoStack.erase(undoStack.begin());
+            }
+            redoStack.clear();
+        }
+
+        void undo() {
+            if (undoStack.empty()) return;
+            redoStack.push_back({lines, cursorRow, cursorCol});
+            auto state = undoStack.back();
+            undoStack.pop_back();
+            lines = state.lines;
+            cursorRow = state.cursorRow;
+            cursorCol = state.cursorCol;
+            hasSelection = false;
+            updateScrollbars();
+        }
+
+        void redo() {
+            if (redoStack.empty()) return;
+            undoStack.push_back({lines, cursorRow, cursorCol});
+            auto state = redoStack.back();
+            redoStack.pop_back();
+            lines = state.lines;
+            cursorRow = state.cursorRow;
+            cursorCol = state.cursorCol;
+            hasSelection = false;
+            updateScrollbars();
+        }
+
     public:
         void setTabWidth(int w) { tabWidth = std::max(1, w); }
         int getTabWidth() const { return tabWidth; }
@@ -6226,6 +7181,15 @@ namespace Gui {
             if (e.type == SDL_EVENT_KEY_DOWN) {
                 bool shift = (e.key.mod & SDL_KMOD_SHIFT) != 0;
                 bool ctrl  = (e.key.mod & SDL_KMOD_CTRL) != 0;
+                if (ctrl && e.key.key == SDLK_Z) {
+                    undo();
+                    return true;
+                }
+                // Ctrl+Y or Ctrl+Shift+Z: Redo
+                if (ctrl && (e.key.key == SDLK_Y || (shift && e.key.key == SDLK_Z))) {
+                    redo();
+                    return true;
+                }
                 if (ctrl && e.key.key == SDLK_A) {
                     selAnchorRow = 0; selAnchorCol = 0;
                     cursorRow = (int)lines.size() - 1;
@@ -6658,6 +7622,7 @@ namespace Gui {
                 line.insert(cursorCol, 1, ch);
                 cursorCol++;
             }
+            pushUndoState();
         }
 
         void deleteChar() {
@@ -6672,6 +7637,7 @@ namespace Gui {
                 line += next;
                 lines.erase(lines.begin() + cursorRow + 1);
             }
+            pushUndoState();
         }
 
         void backspace() {
@@ -6690,6 +7656,7 @@ namespace Gui {
                 line.erase(cursorCol - 1, 1);
                 cursorCol--;
             }
+            pushUndoState();
         }
 
         void newline() {
@@ -6701,6 +7668,7 @@ namespace Gui {
             lines.insert(lines.begin() + cursorRow + 1, rest);
             cursorRow++;
             cursorCol = 0;
+            pushUndoState();
         }
         
 
@@ -6851,6 +7819,8 @@ inline void animation_system(ECSWorld& world, float dt)
         if (world.has_animation_state[i])
         {
             auto& state = world.animation_state_pool[i];
+
+            
             auto& clip = state.active();          // use active clip
             if (!clip.isPlaying || clip.imageFrameResources.empty()) continue;
             if (clip.speed <= 0.0001f) continue;
@@ -6859,7 +7829,18 @@ inline void animation_system(ECSWorld& world, float dt)
             float frameDuration = 1.0f / clip.speed;
             if (clip.timer >= frameDuration) {
                 clip.timer -= frameDuration;
-                clip.currentFrame = (clip.currentFrame + 1) % (int)clip.imageFrameResources.size();
+                int frameCount = (int)clip.imageFrameResources.size();
+                if (clip.currentFrame + 1 >= frameCount) {
+                    if (clip.loop) {
+                        clip.currentFrame = 0;
+                    } else {
+                        clip.currentFrame = frameCount - 1; // hold on the last frame
+                        clip.isPlaying = false;
+                        clip.timer = 0.0f;
+                    }
+                } else {
+                    clip.currentFrame++;
+                }
             }
         }
     }
@@ -6873,7 +7854,6 @@ inline bool render_entity_texture(SDL_Renderer* renderer, const ECSWorld& world,
 
 
     if (!tex) {
-        std::cerr << "Tex failed: " << SDL_GetError() << "\n";
         return false;
     }
 
@@ -6894,6 +7874,56 @@ inline bool render_entity_texture(SDL_Renderer* renderer, const ECSWorld& world,
     } else {
         SDL_RenderTextureRotated(renderer, tex, nullptr, &dst, rot, &center, SDL_FLIP_NONE);
     }
+    return true;
+}
+
+inline bool render_entity_animation(SDL_Renderer* renderer, const ECSWorld& world, Entity i, float screenX, float screenY, float cameraZoom = 1.0f)
+{
+    // ── Editor canvas preview for AnimationState ────────────────────────
+    // Renders the active clip's current frame on the editor canvas.
+    // Works with the Play/Stop buttons in Entity Inspector which toggle
+    // the active clip's isPlaying flag. animation_system() advances the
+    // frame counter each frame when isPlaying is true.
+    if (!world.has_animation_state[i]) return false;
+
+    const auto& anim = world.animation_state_pool[i];
+    const auto& clip = anim.active();
+
+    if (clip.imageFrameResources.empty()) return false;
+
+    int frameIdx = clip.currentFrame;
+    if (frameIdx < 0) frameIdx = 0;
+    if (frameIdx >= (int)clip.imageFrameResources.size())
+        frameIdx = (int)clip.imageFrameResources.size() - 1;
+
+    const std::string& texPath = clip.imageFrameResources[frameIdx];
+    if (texPath.empty()) return false;
+
+    SDL_Texture* tex = g_resources.TextureManager.Get(texPath);
+    if (!tex) {
+        if (!g_resources.TextureManager.Load(texPath, texPath)) {
+            std::cerr << "Anim frame failed to load: " << texPath << " - " << SDL_GetError() << "\n";
+            return false;
+        }
+        tex = g_resources.TextureManager.Get(texPath);
+    }
+    if (!tex) return false;
+
+    float tw, th;
+    SDL_GetTextureSize(tex, &tw, &th);
+
+    // Per-clip frame size override (set in the Inspector)
+    if (clip.frameWidth > 0.0f) tw = clip.frameWidth;
+    if (clip.frameHeight > 0.0f) th = clip.frameHeight;
+
+    float scaleX = (world.has_scale[i] ? world.scale_pool[i].x : 1.0f) * cameraZoom;
+    float scaleY = (world.has_scale[i] ? world.scale_pool[i].y : 1.0f) * cameraZoom;
+    float rot    = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
+
+    SDL_FRect dst = { screenX, screenY, tw * scaleX, th * scaleY };
+    SDL_FPoint center = { dst.w * 0.5f, dst.h * 0.5f };
+
+    SDL_RenderTextureRotated(renderer, tex, nullptr, &dst, rot, &center, SDL_FLIP_NONE);
     return true;
 }
 
@@ -7025,6 +8055,25 @@ inline void render_physics_shape_overlay(SDL_Renderer* renderer, const Component
     // Restore whatever the caller had set so nothing downstream is affected.
     SDL_SetRenderDrawColor(renderer, prevR, prevG, prevB, prevA);
     SDL_SetRenderDrawBlendMode(renderer, prevBlend);
+}
+
+inline void draw_physics_debug_overlay(SDL_Renderer* renderer, const ECSWorld& world, const Tools::Camera& camera) {
+    for (Entity i = 0; i < world.entity_count; ++i) {
+        if (!world.has_physics_body[i] || !world.has_position[i]) continue;
+        
+        float w = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f;
+        float h = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f;
+        
+        SDL_FPoint screenPos = camera.worldToScreen(world.position_pool[i].x, world.position_pool[i].y);
+        float centerX = screenPos.x + (w * camera.zoom) * 0.5f;
+        float centerY = screenPos.y + (h * camera.zoom) * 0.5f;
+        
+        float rot = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
+        float sx = (world.has_scale[i] ? world.scale_pool[i].x : 1.0f) * camera.zoom;
+        float sy = (world.has_scale[i] ? world.scale_pool[i].y : 1.0f) * camera.zoom;
+        
+        render_physics_shape_overlay(renderer, world.physics_body_pool[i], centerX, centerY, rot, sx, sy);
+    }
 }
 
 struct GizmoHandles {
@@ -7294,9 +8343,24 @@ void render_system_and_scene_gui_in_editor(
     float savedTargetY = camera.targetY;
 
     // ── Pass 1: Entities, transformed through the camera ─────────────────
+    // Build a list of entities that have position, then sort by z_index
+    std::vector<Entity> renderOrder;
+    renderOrder.reserve(world.entity_count);
     for (Entity i = 0; i < world.entity_count; ++i) {
-        if (!world.has_position[i]) continue;
+        if (world.has_position[i]) {
+            renderOrder.push_back(i);
+        }
+    }
 
+    // Sort by z_index (entities without z_index get 0)
+    std::sort(renderOrder.begin(), renderOrder.end(), [&](Entity a, Entity b) {
+        int za = world.has_z_index[a] ? world.z_index_pool[a].z : 0;
+        int zb = world.has_z_index[b] ? world.z_index_pool[b].z : 0;
+        return za < zb;
+    });
+
+    // Render in z-order
+    for (Entity i : renderOrder) {
         // Use camera to get screen coordinates
         SDL_FPoint screen = camera.worldToScreen(
             world.position_pool[i].x, world.position_pool[i].y);
@@ -7312,11 +8376,13 @@ void render_system_and_scene_gui_in_editor(
         float centerX = screenX + scaledW * 0.5f;
         float centerY = screenY + scaledH * 0.5f;
 
-        // Render texture (static TextureRef, or an AnimationState's current
-        // frame image even when there's no TextureRef component at all).
+        // Render texture/animation
         bool hasTexture = false;
-        if (world.has_texture_ref[i] || world.has_animation_state[i]) {
+        if (world.has_texture_ref[i]) {
             hasTexture = render_entity_texture(renderer, world, i, screenX, screenY, camera.zoom);
+        }
+        if (world.has_animation_state[i]) {
+            hasTexture = render_entity_animation(renderer, world, i, screenX, screenY, camera.zoom) || hasTexture;
         }
 
         // Draw transformed outline (if no texture or selected)
@@ -7393,12 +8459,9 @@ void render_system_and_scene_gui_in_editor(
                     float syp = ly * sy;
                     float rx = sxp * cosR - syp * sinR;
                     float ry = sxp * sinR + syp * cosR;
-
-                    float vx = centerX + rx;
-                    float vy = centerY + ry;
-
+                    float vx = centerX + rx * camera.zoom;
+                    float vy = centerY + ry * camera.zoom;
                     SDL_FRect handleRect = { vx - 4.0f, vy - 4.0f, 8.0f, 8.0f };
-
                     SDL_SetRenderDrawColor(renderer, 0, 255, 255, 255);
                     SDL_RenderFillRect(renderer, &handleRect);
                     SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
@@ -7659,13 +8722,11 @@ const SDL_Event& e)
                 if (phys.shapeType == Physics::ShapeType::Polygon &&
                     vertexDrag.vertexIndex >= 0 &&
                     vertexDrag.vertexIndex < (int)phys.polygonPoints.size()) {
-
-                    float logicalX = e.motion.x - canvasViewX + editorScrollX;
-                    float logicalY = e.motion.y - canvasViewY + editorScrollY;
+                    SDL_FPoint worldPt = g_editorCamera.screenToWorld(e.motion.x, e.motion.y);
+                    float logicalX = worldPt.x;
+                    float logicalY = worldPt.y;
                     b2Vec2 newLocal = worldToLocalPolygon(ent, logicalX, logicalY);
-
                     phys.polygonPoints[vertexDrag.vertexIndex] = newLocal;
-
                     // Update drag start to avoid jumping
                     vertexDrag.startMouseX = e.motion.x;
                     vertexDrag.startMouseY = e.motion.y;
@@ -7828,11 +8889,18 @@ const SDL_Event& e)
             if (isInsideCanvas(e.motion.x, e.motion.y)) {
                 int dx = e.motion.x - lastDragX; int dy = e.motion.y - lastDragY;
                 if (dx != 0 || dy != 0) {
+                    // Screen-space mouse delta must be converted to world-space
+                    // delta through the camera (divide by zoom, same as
+                    // Camera::pan) so dragging tracks the cursor/ruler
+                    // correctly regardless of pan or zoom level. Entities are
+                    // no longer clamped to a fixed rectangle -- the world is
+                    // effectively infinite and bound only by what the camera
+                    // can see, not by an arbitrary old canvas-sized box.
+                    float worldDx = dx / g_editorCamera.zoom;
+                    float worldDy = dy / g_editorCamera.zoom;
                     for (Entity i = 0; i < world.entity_count; i++) {
                         if (world.has_position[i] && world.has_selection[i] && world.selection_pool[i].isSelected) {
-                            world.position_pool[i].x += dx; world.position_pool[i].y += dy;
-                            if (world.has_rectangle_shape[i]) clamp_entity_position_to_canvas(world.position_pool[i], world.rectangle_shape_pool[i].w, world.rectangle_shape_pool[i].h);
-                            else clamp_entity_position_to_canvas(world.position_pool[i]);
+                            world.position_pool[i].x += worldDx; world.position_pool[i].y += worldDy;
                         }
                     }
                     if (selectedGuiElem) {
@@ -7977,11 +9045,16 @@ float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame)
                 float dx = cursorX - lastGamepadCursorX;
                 float dy = cursorY - lastGamepadCursorY;
                 if (dx != 0.0f || dy != 0.0f) {
+                    // Same camera-aware conversion as the mouse path: cursor
+                    // movement is screen-space, entity positions are
+                    // world-space, so divide by zoom. No more fixed-rectangle
+                    // clamp -- entities can move anywhere in the world.
+                    float worldDx = dx / g_editorCamera.zoom;
+                    float worldDy = dy / g_editorCamera.zoom;
                     for (Entity i = 0; i < world.entity_count; i++) {
                         if (world.has_position[i] && world.has_selection[i] && world.selection_pool[i].isSelected) {
-                            world.position_pool[i].x += dx;
-                            world.position_pool[i].y += dy;
-                            clamp_entity_position_to_canvas(world.position_pool[i]);
+                            world.position_pool[i].x += worldDx;
+                            world.position_pool[i].y += worldDy;
                         }
                     }
                     if (selectedGuiElem) {
@@ -8043,6 +9116,13 @@ struct Scene {
     std::string projectRoot;          // absolute path to the project folder
     ECSWorld world;
     std::vector<std::unique_ptr<Gui::IGuiElement>> guiElements;
+
+    // Set true the first time the attached script has generated its biomes
+    // and decoration entities for this scene. Persisted to the scene JSON
+    // so a later load knows generation already happened and doesn't
+    // duplicate the work (e.g. re-spawning decorations on top of the ones
+    // already saved in the scene).
+    bool areBiomesAndEntitiesGenerated = false;
 };
 
 
@@ -8170,6 +9250,7 @@ public:
         file >> j;
 
         scene.name = j.value("scene_name", "Untitled");
+        scene.areBiomesAndEntitiesGenerated = j.value("are_biomes_and_entities_generated", false);
 
         // --- 0. Script attachment (required) ---
         scene.scriptAttached = j.value("script_attached", "");
@@ -8312,6 +9393,7 @@ public:
                             clip.name = clipJson.value("name", "default");
                             clip.speed = clipJson.value("speed", 10.0f);
                             clip.isPlaying = clipJson.value("isPlaying", true);
+                            clip.loop = clipJson.value("loop", true);
                             clip.imageFrameResources = clipJson.value("imageFrames", std::vector<std::string>());
                             clip.frameWidth = clipJson.value("frameWidth", 0.0f);
                             clip.frameHeight = clipJson.value("frameHeight", 0.0f);
@@ -8365,6 +9447,7 @@ public:
         file >> j;
 
         scene.name = j.value("scene_name", "Untitled");
+        scene.areBiomesAndEntitiesGenerated = j.value("are_biomes_and_entities_generated", false);
 
         // --- 0. Script attachment (required) ---
         scene.scriptAttached = j.value("script_attached", "");
@@ -8456,7 +9539,7 @@ public:
                     scene.world.add_physics_body(id);
                     const auto& pb = comps["PhysicsBody"];
                     if (pb.is_string()) {
-                        std::string resPath = (std::filesystem::path(scene.projectRoot) / pb.get<std::string>()).string();
+                        std::string resPath = resolveComponentResourcePath(scene.projectRoot, pb.get<std::string>());
                         try {
                             scene.world.assign_physics_resource(id, resPath);
                         } catch (const std::exception& e) {
@@ -8492,7 +9575,7 @@ public:
                     if (!scene.world.has_animation_state[id]) scene.world.add_animation_state(id);
                     const auto& as = comps["AnimationState"];
                     if (as.is_string()) {
-                        std::string resPath = (std::filesystem::path(scene.projectRoot) / as.get<std::string>()).string();
+                        std::string resPath = resolveComponentResourcePath(scene.projectRoot, as.get<std::string>());
                         try {
                             scene.world.assign_animation_resource(id, resPath, scene.projectRoot);
                         } catch (const std::exception& e) {
@@ -8506,6 +9589,7 @@ public:
                             clip.name = clipJson.value("name", "default");
                             clip.speed = clipJson.value("speed", 10.0f);
                             clip.isPlaying = clipJson.value("isPlaying", true);
+                            clip.loop = clipJson.value("loop", true);
                             clip.imageFrameResources = clipJson.value("imageFrames", std::vector<std::string>());
                             clip.frameWidth = clipJson.value("frameWidth", 0.0f);
                             clip.frameHeight = clipJson.value("frameHeight", 0.0f);
@@ -8548,6 +9632,7 @@ public:
         nlohmann::json j;
         j["scene_name"]      = scene.name;
         j["script_attached"] = scene.scriptAttached;
+        j["are_biomes_and_entities_generated"] = scene.areBiomesAndEntitiesGenerated;
 
         // --- 1. Save ECS Entities ---
         nlohmann::json entitiesJson = nlohmann::json::array();
@@ -8732,5 +9817,253 @@ private:
             j["children"] = childArr;
         }
         return j;
+    }
+};
+
+// ============================================================
+// WorldBinary — Fast binary serialization for generated entities
+// ============================================================
+namespace WorldBinary {
+    constexpr uint32_t MAGIC = 0x444C5257; // "WRLD" in little-endian
+    constexpr uint32_t VERSION = 2;
+
+    enum ComponentMask : uint32_t {
+        POS = 1 << 0, RECT = 1 << 1, Z = 1 << 2, TEX = 1 << 3,
+        ANIM = 1 << 4, PHYS = 1 << 5, ROT = 1 << 6, SCALE = 1 << 7,
+        META = 1 << 8 // <-- ADDED: Metadata component mask
+    };
+
+    inline std::string makeRelative(const std::string& path, const std::string& root) {
+        if (path.empty() || root.empty()) return path;
+        std::string rel = std::filesystem::relative(path, root).string();
+        return rel.empty() ? path : rel;
+    }
+
+    inline bool save(const std::string& filepath, const ECSWorld& world, 
+                     const std::vector<Entity>& entities, bool generatedFlag, const std::string& projectRoot) {
+        std::ofstream out(filepath, std::ios::binary);
+        if (!out) return false;
+
+        uint32_t magic = MAGIC;
+        uint32_t version = VERSION;
+        uint8_t genFlag = generatedFlag ? 1 : 0;
+        uint32_t count = (uint32_t)entities.size();
+
+        out.write((char*)&magic, 4);
+        out.write((char*)&version, 4);
+        out.write((char*)&genFlag, 1);
+        out.write((char*)&count, 4);
+
+        for (Entity e : entities) {
+            uint32_t mask = 0;
+            if (world.has_position[e]) mask |= POS;
+            if (world.has_rectangle_shape[e]) mask |= RECT;
+            if (world.has_z_index[e]) mask |= Z;
+            if (world.has_texture_ref[e]) mask |= TEX;
+            if (world.has_animation_state[e]) mask |= ANIM;
+            if (world.has_physics_body[e]) mask |= PHYS;
+            if (world.has_rotation[e]) mask |= ROT;
+            if (world.has_scale[e]) mask |= SCALE;
+            if (world.has_metadata[e]) mask |= META; // <-- ADDED
+            
+            out.write((char*)&mask, 4);
+
+            if (mask & POS) {
+                out.write((char*)&world.position_pool[e].x, 4);
+                out.write((char*)&world.position_pool[e].y, 4);
+            }
+            if (mask & RECT) {
+                out.write((char*)&world.rectangle_shape_pool[e].w, 4);
+                out.write((char*)&world.rectangle_shape_pool[e].h, 4);
+            }
+            if (mask & Z) {
+                int32_t z = world.z_index_pool[e].z;
+                out.write((char*)&z, 4);
+            }
+            if (mask & TEX) {
+                std::string s = makeRelative(world.texture_ref_pool[e].resourceName, projectRoot);
+                uint32_t len = (uint32_t)s.size();
+                out.write((char*)&len, 4);
+                out.write(s.data(), len);
+            }
+            if (mask & ANIM) {
+                std::string s = makeRelative(world.animation_resource_path[e], projectRoot);
+                uint32_t len = (uint32_t)s.size();
+                out.write((char*)&len, 4);
+                out.write(s.data(), len);
+            }
+            if (mask & PHYS) {
+                // Persist the resource path too (useful for the editor to
+                // show/re-link the source .physicsres file), but do NOT rely
+                // on it alone: entities whose PhysicsBody was defined inline
+                // in the scene JSON (the "legacy" format) have an empty
+                // physics_resource_path, and previously that meant nothing
+                // usable was saved for them at all. Save the actual body
+                // definition directly so a round trip through this file
+                // always reconstructs a working physics body.
+                std::string s = makeRelative(world.physics_resource_path[e], projectRoot);
+                uint32_t len = (uint32_t)s.size();
+                out.write((char*)&len, 4);
+                out.write(s.data(), len);
+
+                const auto& def = world.physics_body_pool[e];
+                int32_t shapeType = (int32_t)def.shapeType;
+                int32_t bodyType  = (int32_t)def.bodyType;
+                uint8_t isSensor  = def.isSensor ? 1 : 0;
+                out.write((char*)&shapeType, 4);
+                out.write((char*)&bodyType, 4);
+                out.write((char*)&def.width, 4);
+                out.write((char*)&def.height, 4);
+                out.write((char*)&def.radius, 4);
+                out.write((char*)&def.density, 4);
+                out.write((char*)&isSensor, 1);
+                out.write((char*)&def.category, 2);
+                out.write((char*)&def.mask, 2);
+
+                uint32_t polyCount = (uint32_t)def.polygonPoints.size();
+                out.write((char*)&polyCount, 4);
+                for (const auto& pt : def.polygonPoints) {
+                    out.write((char*)&pt.x, 4);
+                    out.write((char*)&pt.y, 4);
+                }
+            }
+            if (mask & ROT) {
+                out.write((char*)&world.rotation_pool[e].degrees, 4);
+            }
+            if (mask & SCALE) {
+                out.write((char*)&world.scale_pool[e].x, 4);
+                out.write((char*)&world.scale_pool[e].y, 4);
+            }
+            if (mask & META) { // <-- ADDED: Save metadata name
+                std::string s = world.metadata_pool[e].name;
+                uint32_t len = (uint32_t)s.size();
+                out.write((char*)&len, 4);
+                out.write(s.data(), len);
+            }
+        }
+        return true;
+    }
+
+    inline bool load(const std::string& filepath, ECSWorld& world, 
+                     std::vector<Entity>& outEntities, bool& generatedFlag, const std::string& projectRoot) {
+        std::ifstream in(filepath, std::ios::binary);
+        if (!in) return false;
+
+        uint32_t magic, version, count;
+        uint8_t genFlag;
+        in.read((char*)&magic, 4);
+        in.read((char*)&version, 4);
+        in.read((char*)&genFlag, 1);
+        in.read((char*)&count, 4);
+
+        if (magic != MAGIC || version != VERSION) return false;
+        generatedFlag = (genFlag != 0);
+
+        outEntities.clear();
+        outEntities.reserve(count);
+
+        for (uint32_t i = 0; i < count; ++i) {
+            Entity e = world.create_entity();
+            world.add_selection(e);
+            outEntities.push_back(e);
+
+            uint32_t mask;
+            in.read((char*)&mask, 4);
+
+            if (mask & POS) {
+                world.add_position(e);
+                in.read((char*)&world.position_pool[e].x, 4);
+                in.read((char*)&world.position_pool[e].y, 4);
+            }
+            if (mask & RECT) {
+                world.add_rectangle_shape(e);
+                in.read((char*)&world.rectangle_shape_pool[e].w, 4);
+                in.read((char*)&world.rectangle_shape_pool[e].h, 4);
+            }
+            if (mask & Z) {
+                world.add_z_index(e);
+                int32_t z;
+                in.read((char*)&z, 4);
+                world.z_index_pool[e].z = z;
+            }
+            if (mask & TEX) {
+                world.add_texture_ref(e);
+                uint32_t len;
+                in.read((char*)&len, 4);
+                std::string s(len, '\0');
+                if (len > 0) in.read(s.data(), len);
+                world.texture_ref_pool[e].resourceName = resolveComponentResourcePath(projectRoot, s);
+            }
+            if (mask & ANIM) {
+                uint32_t len;
+                in.read((char*)&len, 4);
+                std::string s(len, '\0');
+                if (len > 0) in.read(s.data(), len);
+                std::string resPath = resolveComponentResourcePath(projectRoot, s);
+                try { world.assign_animation_resource(e, resPath, projectRoot); } catch (...) {}
+            }
+            if (mask & PHYS) {
+                uint32_t len;
+                in.read((char*)&len, 4);
+                std::string s(len, '\0');
+                if (len > 0) in.read(s.data(), len);
+                std::string resPath = s.empty() ? std::string() : resolveComponentResourcePath(projectRoot, s);
+
+                int32_t shapeType, bodyType;
+                float width, height, radius, density;
+                uint8_t isSensor;
+                uint16_t category, maskBits;
+                in.read((char*)&shapeType, 4);
+                in.read((char*)&bodyType, 4);
+                in.read((char*)&width, 4);
+                in.read((char*)&height, 4);
+                in.read((char*)&radius, 4);
+                in.read((char*)&density, 4);
+                in.read((char*)&isSensor, 1);
+                in.read((char*)&category, 2);
+                in.read((char*)&maskBits, 2);
+
+                uint32_t polyCount = 0;
+                in.read((char*)&polyCount, 4);
+                std::vector<b2Vec2> polygonPoints(polyCount);
+                for (uint32_t p = 0; p < polyCount; ++p) {
+                    in.read((char*)&polygonPoints[p].x, 4);
+                    in.read((char*)&polygonPoints[p].y, 4);
+                }
+
+                world.add_physics_body(e);
+                auto& def = world.physics_body_pool[e];
+                def.shapeType = (Physics::ShapeType)shapeType;
+                def.bodyType  = (b2BodyType)bodyType;
+                def.width     = width;
+                def.height    = height;
+                def.radius    = radius;
+                def.density   = density;
+                def.isSensor  = (isSensor != 0);
+                def.category  = category;
+                def.mask      = maskBits;
+                def.polygonPoints = std::move(polygonPoints);
+                def.bodyId = b2_nullBodyId; // fresh runtime handle, recreated by physics_sync_system
+                world.physics_resource_path[e] = resPath;
+            }
+            if (mask & ROT) {
+                world.add_rotation(e);
+                in.read((char*)&world.rotation_pool[e].degrees, 4);
+            }
+            if (mask & SCALE) {
+                world.add_scale(e);
+                in.read((char*)&world.scale_pool[e].x, 4);
+                in.read((char*)&world.scale_pool[e].y, 4);
+            }
+            if (mask & META) { // <-- ADDED: Load metadata name
+                world.add_metadata(e);
+                uint32_t len;
+                in.read((char*)&len, 4);
+                std::string s(len, '\0');
+                if (len > 0) in.read(s.data(), len);
+                world.metadata_pool[e].name = s;
+            }
+        }
+        return true;
     }
 };

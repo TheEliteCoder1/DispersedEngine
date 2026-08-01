@@ -45,6 +45,7 @@ void main_loop_callback() {
                               1.0f);
     }
 
+
     g_script->onDraw();
     SDL_RenderPresent(g_renderer);
 }

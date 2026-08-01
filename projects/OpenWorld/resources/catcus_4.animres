@@ -1,0 +1,95 @@
+{
+    "activeClipIndex": 0,
+    "clips": [
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [
+                "assets\\textures\\catcus.svg"
+            ],
+            "isPlaying": true,
+            "name": "default",
+            "speed": 10.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [],
+            "isPlaying": true,
+            "name": "clip2",
+            "speed": 10.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [],
+            "isPlaying": true,
+            "name": "clip3",
+            "speed": 10.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [],
+            "isPlaying": true,
+            "name": "clip4",
+            "speed": 10.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [],
+            "isPlaying": true,
+            "name": "clip5",
+            "speed": 10.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [],
+            "isPlaying": true,
+            "name": "clip6",
+            "speed": 10.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [],
+            "isPlaying": true,
+            "name": "clip7",
+            "speed": 10.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [],
+            "isPlaying": true,
+            "name": "clip8",
+            "speed": 10.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [],
+            "isPlaying": true,
+            "name": "clip9",
+            "speed": 10.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [],
+            "isPlaying": true,
+            "name": "clip10",
+            "speed": 10.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [],
+            "isPlaying": true,
+            "name": "clip11",
+            "speed": 10.0
+        }
+    ]
+}

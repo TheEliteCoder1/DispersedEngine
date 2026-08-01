@@ -1,0 +1,26 @@
+{
+    "activeClipIndex": 0,
+    "clips": [
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [
+                "assets\\textures\\grass-wind-1.svg",
+                "assets\\textures\\grass-wind-2.svg",
+                "assets\\textures\\grass-wind-3.svg",
+                "assets\\textures\\grass-wind-4.svg"
+            ],
+            "isPlaying": true,
+            "name": "default",
+            "speed": 4.5
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [],
+            "isPlaying": true,
+            "name": "clip2",
+            "speed": 10.0
+        }
+    ]
+}

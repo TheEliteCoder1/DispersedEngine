@@ -1,0 +1,15 @@
+{
+    "activeClipIndex": 0,
+    "clips": [
+        {
+            "frameHeight": 90.0,
+            "frameWidth": 95.0,
+            "imageFrames": [
+                "assets\\textures\\iceCrystal.svg"
+            ],
+            "isPlaying": false,
+            "name": "default",
+            "speed": 1.0
+        }
+    ]
+}
