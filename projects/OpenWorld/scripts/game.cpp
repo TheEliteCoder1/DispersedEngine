@@ -4,16 +4,37 @@
 #include <emscripten/emscripten.h>
 #endif
  
+// Registers GameScript with the engine's ScriptRegistry under the key
+// "GameScript", matching the stem of whatever script_attached path scene
+// JSON files use (e.g. "OpenWorld/scripts/GameScript.cpp"). This is what
+// lets SceneParser::loadFromFile()/ProjectScript_loadFromFile() and
+// change_scene() instantiate a GameScript polymorphically through nothing
+// but a ScriptBase* — no code in engine.h needs to know GameScript exists.
+REGISTER_SCRIPT(GameScript, "game")
+
 static SDL_Renderer *g_renderer = nullptr;
 static SDL_Window *g_window = nullptr;
 TTF_TextEngine *g_textEngine = nullptr;
-static GameScript *g_script = nullptr;
 static GameContext *g_context = nullptr;
 static bool g_running = true;
 static Uint64 g_lastTime = 0;
 static constexpr float dtStep = 1000.0f;
 static constexpr float minDt = 0.1f;
- 
+
+// The active scene's script is polymorphic (ScriptBase*, owned by
+// GameContext::scene->script) so that different scenes can run entirely
+// different ScriptBase subclasses. Generic dispatch (onStart/onUpdate/
+// onDraw/onEnd) goes straight through that pointer. The rendering/physics
+// helpers below additionally need GameScript-specific data (player,
+// tileMap, minimap, ySort settings, ...) that isn't part of ScriptBase,
+// so they recover it with a dynamic_cast and simply skip that extra
+// behavior when the active scene's script isn't a GameScript at all
+// (e.g. a menu or losing-screen scene driven by some other script type).
+static GameScript* ActiveGameScript(GameContext& ctx) {
+    if (!ctx.scene || !ctx.scene->script) return nullptr;
+    return dynamic_cast<GameScript*>(ctx.scene->script.get());
+}
+
 // ---------------------------------------------------------------------------
 // Shared per-frame helpers
 //
@@ -27,26 +48,31 @@ static constexpr float minDt = 0.1f;
  
 // Steps the physics world, syncs the resulting Box2D transforms back into
 // the ECS position pool, and clamps the player back inside the camera
-// bounds if the physics step let it drift out.
-static void StepPhysicsAndSync(GameContext& ctx, GameScript& script, float dt) {
+// bounds if the physics step let it drift out. The player-clamp step is
+// GameScript-specific (it needs a `player` entity handle), so it's skipped
+// entirely when the active scene isn't running a GameScript.
+static void StepPhysicsAndSync(GameContext& ctx, float dt) {
     if (!ctx.physicsWorld) return;
  
     // Fixed 60 Hz step keeps the simulation stable regardless of frame rate
     ctx.physicsWorld->Step(1.0f / 60.0f, 4);
     movement_system(ctx.scene->world, dt);
  
+    GameScript* script = ActiveGameScript(ctx);
+    if (!script) return;
+
     // Keep the player inside the world bounds by teleporting the body back
     // if movement_system let it drift past the camera bounds.
-    if (script.player != (Entity)-1 &&
-        ctx.scene->world.has_physics_body[script.player] &&
-        b2Body_IsValid(ctx.scene->world.physics_body_pool[script.player].bodyId) &&
+    if (script->player != (Entity)-1 &&
+        ctx.scene->world.has_physics_body[script->player] &&
+        b2Body_IsValid(ctx.scene->world.physics_body_pool[script->player].bodyId) &&
         ctx.camera.boundsEnabled)
     {
-        auto& pos = ctx.scene->world.position_pool[script.player];
-        float w = ctx.scene->world.has_rectangle_shape[script.player]
-                ? ctx.scene->world.rectangle_shape_pool[script.player].w : 50.0f;
-        float h = ctx.scene->world.has_rectangle_shape[script.player]
-                ? ctx.scene->world.rectangle_shape_pool[script.player].h : 50.0f;
+        auto& pos = ctx.scene->world.position_pool[script->player];
+        float w = ctx.scene->world.has_rectangle_shape[script->player]
+                ? ctx.scene->world.rectangle_shape_pool[script->player].w : 50.0f;
+        float h = ctx.scene->world.has_rectangle_shape[script->player]
+                ? ctx.scene->world.rectangle_shape_pool[script->player].h : 50.0f;
         float minX = ctx.camera.boundsMinX;
         float maxX = ctx.camera.boundsMaxX - w;
         float minY = ctx.camera.boundsMinY;
@@ -61,7 +87,7 @@ static void StepPhysicsAndSync(GameContext& ctx, GameScript& script, float dt) {
             pos.y = clampedY;
             // Teleport the Box2D body to match and kill any residual velocity
             // so the player doesn't "bounce" off the wall next frame.
-            b2BodyId bid = ctx.scene->world.physics_body_pool[script.player].bodyId;
+            b2BodyId bid = ctx.scene->world.physics_body_pool[script->player].bodyId;
             b2Body_SetTransform(bid,
                 Physics::PxToM(b2Vec2{ pos.x + w * 0.5f, pos.y + h * 0.5f }),
                 b2Body_GetRotation(bid));
@@ -70,10 +96,11 @@ static void StepPhysicsAndSync(GameContext& ctx, GameScript& script, float dt) {
     }
 }
  
-// Clears the screen, renders the tilemap, builds the (z-index + Y-sorted)
-// draw order, renders every visible entity, then the physics debug overlay
-// and minimap, and presents.
-static void RenderFrame(SDL_Renderer* renderer, SDL_Window* window, GameContext& ctx, GameScript& script) {
+// Clears the screen, renders every visible entity (Y-sorted, if a
+// GameScript is active), calls the active script's onDraw() polymorphically,
+// then layers on GameScript-specific extras (tilemap, physics debug,
+// minimap, healthbar) when the active scene's script actually is one.
+static void RenderFrame(SDL_Renderer* renderer, SDL_Window* window, GameContext& ctx) {
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(renderer, 10, 10, 20, 255);
     SDL_RenderClear(renderer);
@@ -83,21 +110,40 @@ static void RenderFrame(SDL_Renderer* renderer, SDL_Window* window, GameContext&
  
     // 1. Compute visible world rect for culling
     SDL_FRect visibleWorld = Tools::computeVisibleWorldRect(ctx.camera, winW, winH);
+
+    GameScript* script = ActiveGameScript(ctx);
+
+    // 2. Render the tiled biome backgrounds (GameScript-specific)
+    if (script) {
+        script->tileMap.render(renderer, ctx.camera, visibleWorld);
+    }
  
-    // 2. Render the tiled biome backgrounds
-    script.tileMap.render(renderer, ctx.camera, visibleWorld);
- 
-    // 3. Build render order (excluding the main background entity, handled by tileMap).
-    //    Player and decorations share the same z tier (see onStart), so this Y-sort
-    //    actually determines who draws in front of whom instead of z_index deciding
-    //    it outright.
-    std::vector<Entity> exclude = { script.background };
+    // 3. Build render order. If a GameScript is active, exclude the main
+    //    background entity (handled by tileMap above) and use its Y-sort
+    //    settings; player and decorations share the same z tier (see
+    //    GameScript::onStart), so this Y-sort actually determines who
+    //    draws in front of whom instead of z_index deciding it outright.
+    //    Scenes with no GameScript (e.g. a menu) just get sensible
+    //    defaults with nothing excluded.
+    std::vector<Entity> exclude;
+    bool ySortEnabled = true;
+    Tools::YSortAnchor ySortAnchor = Tools::YSortAnchor::Bottom;
+    if (script) {
+        exclude = { script->background };
+        ySortEnabled = script->ySortEnabled;
+        ySortAnchor = script->ySortAnchor;
+    }
     std::vector<Entity> renderOrder = Tools::buildVisibleRenderOrder(
         ctx.scene->world, visibleWorld, exclude,
-        script.ySortEnabled, script.ySortAnchor);
+        ySortEnabled, ySortAnchor);
  
     // 4. Render visible entities
     for (Entity i : renderOrder) {
+        // Entities mid-vanish are drawn entirely by GameScript::onDraw()
+        // via vanishEffects.render() (fading sprite strips + black particle
+        // trail) instead of their normal sprite, so the two don't overlap.
+        if (script && script->vanishEffects.isActive(i)) continue;
+
         SDL_FPoint screenPos = ctx.camera.worldToScreen(
             ctx.scene->world.position_pool[i].x,
             ctx.scene->world.position_pool[i].y);
@@ -108,28 +154,42 @@ static void RenderFrame(SDL_Renderer* renderer, SDL_Window* window, GameContext&
             render_entity_texture(renderer, ctx.scene->world, i, screenPos.x, screenPos.y, ctx.camera.zoom);
     }
  
-    script.onDraw();
+    // Polymorphic dispatch: whatever ScriptBase subclass is actually
+    // driving this scene gets to draw, regardless of concrete type.
+    if (ctx.scene->script) {
+        ctx.scene->script->onDraw();
+    }
  
-    if (script.drawPhysicsDebug) {
+    if (script && script->drawPhysicsDebug) {
         draw_physics_debug_overlay(renderer, ctx.scene->world, ctx.camera);
     }
  
-    // 5. Render the minimap
-    script.minimap.render(renderer, ctx.scene->world, script.player, winW, winH);
+    // 5. Render the minimap/healthbar (GameScript-specific; minimap already
+    //    guards internally on player == (Entity)-1).
+    if (script) {
+        script->minimap.render(renderer, ctx.scene->world, script->player, winW, winH);
 
-    SDL_FPoint playerScreen = ctx.camera.worldToScreen(
-        ctx.scene->world.position_pool[script.player].x,
-        ctx.scene->world.position_pool[script.player].y
-    );
+        // Player-anchored healthbar. Guarded because change_scene() can swap
+        // in a scene (e.g. the losing screen) with no player entity at all,
+        // in which case script->player has been reset to (Entity)-1, or
+        // with an entirely different script type, in which case `script`
+        // itself is null and this whole block is skipped.
+        if (script->player != (Entity)-1 && ctx.scene->world.has_position[script->player]) {
+            SDL_FPoint playerScreen = ctx.camera.worldToScreen(
+                ctx.scene->world.position_pool[script->player].x,
+                ctx.scene->world.position_pool[script->player].y
+            );
 
-    // Offset above the player (e.g., 20 pixels up) and center horizontally
-    float barOffsetY = -30.0f; // above player's top
+            // Offset above the player (e.g., 20 pixels up) and center horizontally
+            float barOffsetY = -30.0f; // above player's top
 
-    script.healthbar.render(renderer,
-        playerScreen.x,
-        playerScreen.y + barOffsetY
-    );
- 
+            script->healthbar.render(renderer,
+                playerScreen.x,
+                playerScreen.y + barOffsetY
+            );
+        }
+    }
+
     SDL_RenderPresent(renderer);
 }
  
@@ -154,17 +214,22 @@ void main_loop_callback() {
         }
     }
  
-    g_script->onUpdate(dt);
+    // Polymorphic dispatch: onUpdate() runs on whatever ScriptBase subclass
+    // is attached to the *currently active* scene, which may have changed
+    // (via change_scene()) since last frame.
+    if (g_context->scene->script) {
+        g_context->scene->script->onUpdate(dt);
+    }
  
     // Same physics step + ECS sync the native loop uses — this was
     // previously missing here, which meant the player's position_pool
     // never advanced on web at all once the direct-position fallback
     // was removed from onUpdate().
-    StepPhysicsAndSync(*g_context, *g_script, dt);
+    StepPhysicsAndSync(*g_context, dt);
  
     animation_system(g_context->scene->world, dt);
  
-    RenderFrame(g_renderer, g_window, *g_context, *g_script);
+    RenderFrame(g_renderer, g_window, *g_context);
 }
 #endif
  
@@ -377,7 +442,7 @@ void GameScript::checkCollisions(float dt) {
     auto& playerPhys = ctx->scene->world.physics_body_pool[player];
     if (!b2Body_IsValid(playerPhys.bodyId)) return;
  
-    if (knockbackTimer > 0.0f || deathState) {
+    if (knockbackTimer > 0.0f) {
         return;
     }
  
@@ -412,31 +477,30 @@ void GameScript::checkCollisions(float dt) {
                         if (ctx->scene->world.has_metadata[e]) {
                             if (Tools::contains(ctx->scene->world.metadata_pool[e].name, "catcus")) {
                                 // 1. Reduce HP
-                                if (healthbar.getCurrentVal() > 0) {
-                                    healthbar.damage(10.0f);
-                                    ProjectScript_MIXER_PlaySound("punch", 0.7, 1.0);    
- 
-                                    b2Vec2 normal = contactData[i].manifold.normal;
-                                    b2Vec2 bounceDir = isPlayerA ? b2Vec2{-normal.x, -normal.y} : normal;
-    
-                                    // 3. Apply velocity ONCE
-                                    constexpr float ppm = Physics::PIXELS_PER_METER;
-                                    b2Body_SetLinearVelocity(
-                                        playerBodyId, 
-                                        b2Vec2{ bounceDir.x * knockbackSpeed / ppm, bounceDir.y * knockbackSpeed / ppm }
-                                    );
-    
-                                    // 4. Set timer to ignore input and prevent re-triggering
-                                    knockbackTimer = 0.25f; // Slides for ~0.25 seconds
-    
-                                    // extra effects
-                                    SDL_RumbleGamepad(ctx->gamepad, 0xC000, 0xFFFF, 200);
+                                healthbar.damage(10.0f);
+                                ProjectScript_MIXER_PlaySound("punch", 0.7, 1.0);    
 
-                                } else {
+                                b2Vec2 normal = contactData[i].manifold.normal;
+                                b2Vec2 bounceDir = isPlayerA ? b2Vec2{-normal.x, -normal.y} : normal;
 
-                                    ctx->scene->world.animation_state_pool[player].play("death", true, false);
+                                // 3. Apply velocity ONCE
+                                constexpr float ppm = Physics::PIXELS_PER_METER;
+                                b2Body_SetLinearVelocity(
+                                    playerBodyId, 
+                                    b2Vec2{ bounceDir.x * knockbackSpeed / ppm, bounceDir.y * knockbackSpeed / ppm }
+                                );
+
+                                // 4. Set timer to ignore input and prevent re-triggering
+                                knockbackTimer = 0.25f; // Slides for ~0.25 seconds
+
+                                // extra effects
+                                SDL_RumbleGamepad(ctx->gamepad, 0xC000, 0xFFFF, 200);
+
+                                if (healthbar.getCurrentVal() <= 0) {
                                     deathState = true;
-
+                                    if (!vanishEffects.isActive(player)) {
+                                        vanishEffects.start(player);
+                                    }
                                 }
                                 return; // Exit after first trigger to avoid multiple HP drains/bounces per frame
                             }
@@ -451,94 +515,110 @@ void GameScript::checkCollisions(float dt) {
  
 void GameScript::onUpdate(float dt) {
     if (!(ctx && ctx->scene) || player == (Entity)-1) return;
-    if (deathState) return;
+
+    // Ticked unconditionally (not just while deathState is true) so the
+    // effect always finishes its particle trail even if game state moves on
+    // (e.g. deathState gets reset) while a vanish is still fading out.
+    vanishEffects.update(ctx->scene->world, dt);
+
+    if (deathState) {
+        if (vanishEffects.activeCount() == 0)
+            change_scene(*ctx->sceneParser,*ctx->scene,ctx->sceneFilePath,"OpenWorld/scenes/losing_screen.json",static_cast<void*>(ctx),ctx->physicsWorld);
+    } else {
  
-    // Detect cactus contact and, if not already sliding from a previous hit,
-    // apply the knockback velocity + start the knockback timer.
-    checkCollisions(dt);
- 
-    float dx = 0.0f, dy = 0.0f;
- 
-    // --- KNOCKBACK STATE ---
-    if (knockbackTimer > 0.0f) {
-        knockbackTimer -= dt; // Count down the timer
-        
-        // Player input is ignored, and velocity is NOT overwritten below.
-        // The b2Body_SetLinearDamping(8.0f) set in onStart() will naturally 
-        // and smoothly slide the player to a halt over this duration.
-    } 
-    // --- NORMAL MOVEMENT STATE ---
-    else {
-        const bool* keys = SDL_GetKeyboardState(nullptr);
-        if (keys[SDL_SCANCODE_A]) dx -= 1.0f;
-        if (keys[SDL_SCANCODE_D]) dx += 1.0f;
-        if (keys[SDL_SCANCODE_W]) dy -= 1.0f;
-        if (keys[SDL_SCANCODE_S]) dy += 1.0f;
-        
-        if (ctx->gamepad) {
-            const float stickDeadzone = 0.2f;
-            float gx = SDL_GetGamepadAxis(ctx->gamepad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0f;
-            float gy = SDL_GetGamepadAxis(ctx->gamepad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
-            if (std::fabs(gx) > stickDeadzone) dx += gx;
-            if (std::fabs(gy) > stickDeadzone) dy += gy;
-        }
- 
-        // Normalize so diagonal movement isn't faster
-        if (dx != 0.0f || dy != 0.0f) {
-            float len = std::sqrt(dx * dx + dy * dy);
-            if (len > 1.0f) { dx /= len; dy /= len; }
-        }
-    }
- 
-    // --- Animation State Update ---
-    if (ctx->scene->world.has_animation_state[player]) {
-        auto& anim = ctx->scene->world.animation_state_pool[player];
-        // Only change animation if we are NOT currently knocking back
-        if (knockbackTimer <= 0.0f) {
+        // Detect cactus contact and, if not already sliding from a previous hit,
+        // apply the knockback velocity + start the knockback timer.
+        checkCollisions(dt);
+    
+        float dx = 0.0f, dy = 0.0f;
+    
+        // --- KNOCKBACK STATE ---
+        if (knockbackTimer > 0.0f) {
+            knockbackTimer -= dt; // Count down the timer
+            
+            // Player input is ignored, and velocity is NOT overwritten below.
+            // The b2Body_SetLinearDamping(8.0f) set in onStart() will naturally 
+            // and smoothly slide the player to a halt over this duration.
+        } 
+        // --- NORMAL MOVEMENT STATE ---
+        else {
+            const bool* keys = SDL_GetKeyboardState(nullptr);
+            if (keys[SDL_SCANCODE_A]) dx -= 1.0f;
+            if (keys[SDL_SCANCODE_D]) dx += 1.0f;
+            if (keys[SDL_SCANCODE_W]) dy -= 1.0f;
+            if (keys[SDL_SCANCODE_S]) dy += 1.0f;
+            
+            if (ctx->gamepad) {
+                const float stickDeadzone = 0.2f;
+                float gx = SDL_GetGamepadAxis(ctx->gamepad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0f;
+                float gy = SDL_GetGamepadAxis(ctx->gamepad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
+                if (std::fabs(gx) > stickDeadzone) dx += gx;
+                if (std::fabs(gy) > stickDeadzone) dy += gy;
+            }
+    
+            // Normalize so diagonal movement isn't faster
             if (dx != 0.0f || dy != 0.0f) {
-                if (anim.activeName() != "walk") {
-                    anim.play("walk", true);
-                }
-            } else {
-                if (anim.activeName() != "idle") {
-                    anim.play("idle", true);
+                float len = std::sqrt(dx * dx + dy * dy);
+                if (len > 1.0f) { dx /= len; dy /= len; }
+            }
+        }
+    
+        // --- Animation State Update ---
+        if (ctx->scene->world.has_animation_state[player]) {
+            auto& anim = ctx->scene->world.animation_state_pool[player];
+            // Only change animation if we are NOT currently knocking back
+            if (knockbackTimer <= 0.0f) {
+                if (dx != 0.0f || dy != 0.0f) {
+                    if (anim.activeName() != "walk") {
+                        anim.play("walk", true);
+                    }
+                } else {
+                    if (anim.activeName() != "idle") {
+                        anim.play("idle", true);
+                    }
                 }
             }
         }
-    }
- 
-    // --- Physics Velocity Application ---
-    if (ctx->physicsWorld &&
-        ctx->scene->world.has_physics_body[player] &&
-        b2Body_IsValid(ctx->scene->world.physics_body_pool[player].bodyId))
-    {
-        // ONLY overwrite velocity if we are NOT in a knockback state
-        if (knockbackTimer <= 0.0f) {
-            constexpr float ppm = Physics::PIXELS_PER_METER;
-            b2Body_SetLinearVelocity(
-                ctx->scene->world.physics_body_pool[player].bodyId,
-                b2Vec2{ dx * moveSpeed / ppm, dy * moveSpeed / ppm });
-        }
-        // If knockbackTimer > 0.0f, we do NOTHING here. 
-        // The velocity set in checkCollisions is preserved, and the physics 
-        // solver's damping will smoothly slide the player to a halt.
-    }
- 
-    // Camera follow
-    ctx->camera.centerOnEntity(ctx->scene->world.position_pool[player],
-        ctx->scene->world.rectangle_shape_pool[player].w,
-        ctx->scene->world.rectangle_shape_pool[player].h);
     
-    int winW, winH;
-    SDL_GetWindowSize(ctx->window, &winW, &winH);
-    ctx->camera.setupForCanvas(0.0f, 0.0f, (float)winW, (float)winH);
-    ctx->camera.clampToBounds(winW, winH);
+        // --- Physics Velocity Application ---
+        if (ctx->physicsWorld &&
+            ctx->scene->world.has_physics_body[player] &&
+            b2Body_IsValid(ctx->scene->world.physics_body_pool[player].bodyId))
+        {
+            // ONLY overwrite velocity if we are NOT in a knockback state
+            if (knockbackTimer <= 0.0f) {
+                constexpr float ppm = Physics::PIXELS_PER_METER;
+                b2Body_SetLinearVelocity(
+                    ctx->scene->world.physics_body_pool[player].bodyId,
+                    b2Vec2{ dx * moveSpeed / ppm, dy * moveSpeed / ppm });
+            }
+            // If knockbackTimer > 0.0f, we do NOTHING here. 
+            // The velocity set in checkCollisions is preserved, and the physics 
+            // solver's damping will smoothly slide the player to a halt.
+        }
+    
+        // Camera follow
+        ctx->camera.centerOnEntity(ctx->scene->world.position_pool[player],
+            ctx->scene->world.rectangle_shape_pool[player].w,
+            ctx->scene->world.rectangle_shape_pool[player].h);
+        
+        int winW, winH;
+        SDL_GetWindowSize(ctx->window, &winW, &winH);
+        ctx->camera.setupForCanvas(0.0f, 0.0f, (float)winW, (float)winH);
+        ctx->camera.clampToBounds(winW, winH);
+    }
 }
  
 
 
 
 void GameScript::onDraw() {
+    // Draws the fading sprite strips + batched black-particle trail for any
+    // entity currently vanishing (see RenderFrame(), which skips their
+    // normal sprite so this fully replaces it instead of drawing under it).
+    if (ctx) {
+        vanishEffects.render(ctx->renderer, ctx->scene->world, ctx->camera);
+    }
 }
  
 void GameScript::onEnd() {
@@ -631,18 +711,33 @@ int main(int argc, char *argv[])
         SDL_free(gamepadIDs);
     }
  
-    GameScript script;
-    script.ctx = &ctx;
-    g_renderer  = renderer;
-    g_window    = window;
+    // The scene's script instance was already created polymorphically back
+    // in parser.ProjectScript_loadFromFile() above (SceneParser resolves
+    // scene.script_attached through ScriptRegistry — see
+    // instantiateScriptForScene() in engine.h). main() no longer hard-codes
+    // a concrete GameScript here at all: it just hands this GameContext to
+    // whatever script the scene actually resolved, then drives it purely
+    // through the ScriptBase interface. If a scene names a different
+    // script class, or change_scene() later swaps in one, this code below
+    // doesn't need to change at all — that's the whole point of the
+    // registry + polymorphic dispatch.
+    if (!scene.script) {
+        std::cerr << "[Warning] Scene '" << scene.name
+                   << "' has no active script (script_attached='" << scene.scriptAttached
+                   << "') -- running with no game logic.\n";
+    } else {
+        scene.script->setContext(&ctx);
+    }
+
+    g_renderer   = renderer;
+    g_window     = window;
     g_textEngine = textEngine;
-    g_script    = &script;
-    g_context   = &ctx;
-    g_lastTime  = SDL_GetTicks();
+    g_context    = &ctx;
+    g_lastTime   = SDL_GetTicks();
  
     ctx.physicsWorld = new Physics::PhysicsWorld(0.0f);
  
-    script.onStart();
+    if (scene.script) scene.script->onStart();
  
 #ifdef __EMSCRIPTEN__
     emscripten_set_main_loop(main_loop_callback, 0, 1);
@@ -659,6 +754,9 @@ int main(int argc, char *argv[])
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) running = false;
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) running = false;
+            if (ctx.scene && ctx.scene->script) {
+                ctx.scene->script->onEvent(e);
+            }
             if (e.type == SDL_EVENT_GAMEPAD_ADDED && !ctx.gamepad)
                 ctx.gamepad = SDL_OpenGamepad(e.gdevice.which);
             else if (e.type == SDL_EVENT_GAMEPAD_REMOVED && ctx.gamepad &&
@@ -668,16 +766,19 @@ int main(int argc, char *argv[])
             }
         }
  
-        script.onUpdate(dt);
-        StepPhysicsAndSync(ctx, script, dt);
+        // Polymorphic dispatch: ctx.scene->script may point at a completely
+        // different ScriptBase subclass than it did last frame if
+        // change_scene() swapped scenes in the meantime.
+        if (ctx.scene->script) ctx.scene->script->onUpdate(dt);
+        StepPhysicsAndSync(ctx, dt);
         animation_system(ctx.scene->world, dt);
  
-        RenderFrame(renderer, window, ctx, script);
+        RenderFrame(renderer, window, ctx);
     }
  
 #endif
  
-    script.onEnd();
+    if (ctx.scene->script) ctx.scene->script->onEnd();
     if (ctx.gamepad) SDL_CloseGamepad(ctx.gamepad);
     if (textEngine) TTF_DestroyRendererTextEngine(textEngine);
     ProjectScript_TTF_Clear();

@@ -213,37 +213,38 @@ std::string get_system_output(const char* cmd) {
 int main(int argc, char* argv[]) {
     const float windowWidth  = 1600.0f;
     const float windowHeight = 900.0f;
+
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) { std::cerr << "SDL Initialization failed: " << SDL_GetError() << std::endl; return 1; }
     if (!TTF_Init()) { std::cerr << "TTF Initialization failed: " << SDL_GetError() << std::endl; SDL_Quit(); return 1; }
     if (!MIX_Init()) { SDL_Log("Could not initialize mixer: %s", SDL_GetError()); SDL_Quit(); return -1; }
-    
+
     SDL_Window* window = SDL_CreateWindow("Dispersed Engine", (int)windowWidth, (int)windowHeight, SDL_WINDOW_RESIZABLE);
     if (!window) { std::cerr << "Window creation failed: " << SDL_GetError() << std::endl; TTF_Quit(); SDL_Quit(); return 1; }
     SDL_SetWindowOpacity(window, 0.95f);
-    
+
     SDL_Surface* iconSurface = IMG_Load((getAssetsPath() + "icon.svg").c_str());
     if (!iconSurface) SDL_Log("Failed to load icon: %s", SDL_GetError()); else SDL_SetWindowIcon(window, iconSurface);
-    
+
     SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
     if (!renderer) { std::cerr << "Renderer creation failed: " << SDL_GetError() << std::endl; SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1; }
-    
     g_resources.TextureManager.SetRenderer(renderer);
+
     if (!g_resources.AudioManager.CreateMixerDevice()) { SDL_Log("Audio mixer init failed"); }
-    
+
     TTF_TextEngine* textEngine = TTF_CreateRendererTextEngine(renderer);
     g_resources.FontManager.Load("regularFont", getAssetsPath() + "fredoka.ttf", 20);
     g_resources.FontManager.Load("visualFont", getAssetsPath() + "fira.ttf", 18);
     g_resources.FontManager.Load("largeFont", getAssetsPath() + "fira.ttf", 23);
-    
+
     Gui::TextEditor textEditor(renderer, textEngine, g_resources.FontManager.Get("largeFont"), {0, 0, 100, 100});
     textEditor.setVisible(false);
 
     VisualLogic::VisualScriptEditor visualEditor(renderer, textEngine, g_resources.FontManager.Get("visualFont"), window, {0, 0, 100, 100});
     visualEditor.setVisible(false);
-    
+
     std::filesystem::path projectsAbsPath = std::filesystem::absolute(getProjectsPath());
     Gui::FileExplorer fileExplorer(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window, projectsAbsPath.string(), "*.json");
-    
+
     SDL_Gamepad* gamepad = nullptr;
     const float deadzone = 0.2f, stickScrollSpeed = 400.0f, stickCursorSpeed = 800.0f;
     int gamepadCount = 0;
@@ -253,27 +254,28 @@ int main(int argc, char* argv[]) {
         if (gamepad) SDL_Log("Gamepad connected: %s", SDL_GetGamepadName(gamepad)); else SDL_Log("Failed to open gamepad: %s", SDL_GetError());
         SDL_free(gamepadIDs);
     } else { SDL_Log("No gamepads found at startup."); }
-    
+
     float cursorX = windowWidth / 2.0f, cursorY = windowHeight / 2.0f;
     bool confirmLastFrame = false; float lastTriggerValue = 0.0f;
+
     Gui::VirtualKeyboard* virtualKeyboard = new Gui::VirtualKeyboard(renderer, textEngine, g_resources.FontManager.Get("regularFont"));
     bool showVirtualKeyboard = false;
-    
+
     AddEntityDialog* dialog = new AddEntityDialog(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window);
     AddGuiElemDialog* dialog2 = new AddGuiElemDialog(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window);
     Gui::AddChildDialog addChildDialog(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window, nullptr);
-    
+
     SceneParser sceneParser(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window);
     Scene scene;
     ECSWorld& world = scene.world;
     std::vector<std::unique_ptr<Gui::IGuiElement>>& guiElements = scene.guiElements;
     std::string currentSceneFilePath;
-    
+
     Gui::SceneInspector inspector(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window);
     Gui::IGuiElement* selectedGuiElem = nullptr;
     inspector.setGuiElementsVector(&guiElements);
     inspector.setAddChildDialog(&addChildDialog);
-    
+
     Gui::EntityInspector entityInspector(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window, fileExplorer);
     Entity selectedEntity = (Entity)-1;
     auto selectEntity = [&](Entity e) {
@@ -285,49 +287,44 @@ int main(int argc, char* argv[]) {
             } else { entityInspector.clearTarget(); }
         }
     };
-    
+
     Gui::Scrollbar verticalScrollbar, horizontalScrollbar;
     verticalScrollbar.setOrientation(Gui::ScrollOrientation::Vertical);
     horizontalScrollbar.setOrientation(Gui::ScrollOrientation::Horizontal);
     static bool scrollConnected = false;
     if (!scrollConnected) {
-        verticalScrollbar.onChange = [](float v){ 
-            editorScrollY = v; 
-            g_editorCamera.targetY = v;  // ← Sync to camera
+        verticalScrollbar.onChange = [](float v){
+            editorScrollY = v;
+            g_editorCamera.targetY = v;
         };
-        horizontalScrollbar.onChange = [](float v){ 
-            editorScrollX = v; 
-            g_editorCamera.targetX = v;  // ← Sync to camera
+        horizontalScrollbar.onChange = [](float v){
+            editorScrollX = v;
+            g_editorCamera.targetX = v;
         };
         scrollConnected = true;
     }
-        
+
     auto makeButton = [&](const std::string& label, std::function<void()> cb) {
         auto btn = std::make_unique<Gui::Button>(renderer, g_resources.FontManager.Get("regularFont"), label, SDL_FPoint{0,0}, 100, 50);
         btn->onClicked = cb; return btn;
     };
-    
+
     auto loadBtn = makeButton("O-Scene", [&]() {
         if (selectedGuiElem) { selectedGuiElem->editorSelected = false; selectedGuiElem = nullptr; }
         inspector.setTarget(nullptr);
         fileExplorer.setNewTitle("File Explorer - [*.json]"); fileExplorer.setFilter("*.json");
-        fileExplorer.setSaveMode(false, ""); 
+        fileExplorer.setSaveMode(false, "");
         fileExplorer.setCallback([&](const std::string& path) {
             scene = sceneParser.loadFromFile(path); currentSceneFilePath = path;
             entityInspector.setProjectRoot(scene.projectRoot);
-            for (auto& elem : scene.guiElements) {
-                SDL_FPoint pos = { elem->getX(), elem->getY() };
-                clamp_guiElem_position_to_canvas(pos, elem->getWidth(), elem->getHeight());
-                elem->setPos({ static_cast<int>(pos.x), static_cast<int>(pos.y) });
-            }
             fileExplorer.reset();
         });
         fileExplorer.open();
     });
-    
+
     auto openScriptBtn = makeButton("O-Script", [&]() {
         fileExplorer.setNewTitle("File Explorer - [*.cpp;*.h;*.txt;*.*]"); fileExplorer.setFilter("*.cpp;*.h;*.txt;*.*;*.json");
-        fileExplorer.setSaveMode(false, ""); 
+        fileExplorer.setSaveMode(false, "");
         fileExplorer.setCallback([&](const std::string& path) {
             textEditor.loadFile(path);
             showCanvas = false; showVisualEditor = false;
@@ -348,7 +345,7 @@ int main(int argc, char* argv[]) {
         });
         fileExplorer.open();
     });
-    
+
     auto saveVisualBtn = makeButton("S-Visual", [&]() {
         if (visualEditor.isFileLoaded()) {
             visualEditor.saveFile();
@@ -366,6 +363,7 @@ int main(int argc, char* argv[]) {
             fileExplorer.open();
         }
     });
+
     auto loadVisualBtn = makeButton("Load Visual", [&]() {
         fileExplorer.setNewTitle("Load Visual Script");
         fileExplorer.setFilter("*.cpp;*.*");
@@ -383,20 +381,20 @@ int main(int argc, char* argv[]) {
     auto saveBtn = makeButton("Save", [&](){
         inspector.commitAllFields();
         if (!currentSceneFilePath.empty()) {
-        sceneParser.saveToFile(scene, currentSceneFilePath);
-        entityInspector.setProjectRoot(scene.projectRoot);
-        SDL_Log("[Editor] Scene saved to %s", currentSceneFilePath.c_str());
+            sceneParser.saveToFile(scene, currentSceneFilePath);
+            entityInspector.setProjectRoot(scene.projectRoot);
+            SDL_Log("[Editor] Scene saved to %s", currentSceneFilePath.c_str());
         }
         textEditor.saveFile();
         if (visualEditor.isFileLoaded()) visualEditor.saveFile();
     });
-    
+
     auto addEntBtn = makeButton("+ Entity", [dialog](){ modeBeforeDialog = currentEditMode; currentEditMode = EditMode::Dialog; dialog->open(); });
     auto addGuiElemBtn = makeButton("+ GuiElem", [dialog2]() { modeBeforeDialog = currentEditMode; currentEditMode = EditMode::Dialog; dialog2->open(); });
-    
+
     textEditor.onClose = [&]() { showCanvas = true; showVisualEditor = false; textEditor.setVisible(false); visualEditor.setVisible(false); SDL_StopTextInput(window); };
     visualEditor.onClose = [&]() { showCanvas = true; showVisualEditor = false; textEditor.setVisible(false); visualEditor.setVisible(false); };
-    
+
     auto selectModeBtn = makeButton("Select", [](){ currentEditMode = EditMode::Select; });
     auto moveBtn = makeButton("Move", [](){ currentEditMode = EditMode::MoveWithMouse; });
     auto deleteBtn = makeButton("Delete", [](){ currentEditMode = EditMode::Delete; });
@@ -407,35 +405,27 @@ int main(int argc, char* argv[]) {
         if (selectedGuiElem) { selectedGuiElem->editorSelected = false; selectedGuiElem = nullptr; }
     });
     auto inspectorToggleBtn = makeButton("Inspector", [](){ inspectorVisible = !inspectorVisible; });
-    // "Editor" now toggles between the Scene canvas and whichever of
-    // Text/Visual was last active; opening Canvas always hides both.
     auto canvasBtn = makeButton("Editor", [&textEditor, &visualEditor, window](){
         showCanvas = !showCanvas;
         if (showCanvas) { showVisualEditor = false; textEditor.setVisible(false); visualEditor.setVisible(false); SDL_StopTextInput(window); }
     });
-    // "Visual" opens/focuses the node-graph editor exclusively — closes the
-    // canvas and the text editor if either is currently shown.
     auto visualBtn = makeButton("Visual", [&textEditor, &visualEditor](){
         showCanvas = false; showVisualEditor = true;
         textEditor.setVisible(false); visualEditor.setVisible(true);
     });
-    
-    auto toolbarContainer = std::make_unique<Gui::ScrollableContainer>(
-    renderer, textEngine, g_resources.FontManager.Get("regularFont"),
-    Gui::ScrollOrientation::Horizontal);
 
+    auto toolbarContainer = std::make_unique<Gui::ScrollableContainer>(
+        renderer, textEngine, g_resources.FontManager.Get("regularFont"),
+        Gui::ScrollOrientation::Horizontal);
     auto toolbarBox = std::make_unique<Gui::HBoxContainer>();
     toolbarBox->setPadding(5);
     toolbarBox->setSpacing(5);
-
-
     toolbarBox->setPadding(5); toolbarBox->setSpacing(5);
-    toolbarBox->addChild(std::move(loadBtn)); 
+    toolbarBox->addChild(std::move(loadBtn));
     toolbarBox->addChild(std::move(openScriptBtn));
-    toolbarBox->addChild(std::move(openVisualBtn)); 
+    toolbarBox->addChild(std::move(openVisualBtn));
     toolbarBox->addChild(std::move(saveVisualBtn));
     toolbarBox->addChild(std::move(saveBtn));
-    
     toolbarBox->addChild(std::move(addEntBtn)); toolbarBox->addChild(std::move(addGuiElemBtn));
     toolbarBox->addChild(std::move(selectModeBtn)); toolbarBox->addChild(std::move(moveBtn)); toolbarBox->addChild(std::move(deleteBtn));
     toolbarBox->addChild(std::move(selectSingleBtn)); toolbarBox->addChild(std::move(selectMultiBtn)); toolbarBox->addChild(std::move(deselectBtn));
@@ -447,19 +437,13 @@ int main(int argc, char* argv[]) {
     for (auto& child : children) {
         totalW += child->getWidth() + toolbarBox->getSpacing();
     }
-    totalW -= toolbarBox->getSpacing(); // remove last spacing
-
-    // Set the HBox rect to (0,0, totalW, 60).
+    totalW -= toolbarBox->getSpacing();
     toolbarBox->setRect({0.0f, 0.0f, totalW, 60.0f});
-
-    // Wrap it in the scrollable container.
     toolbarContainer->setChild(std::move(toolbarBox));
-    // Set the container's rect to the full top bar width and height.
     toolbarContainer->setRect({0.0f, 0.0f, windowWidth, 60.0f});
 
     auto canvasTools = std::make_unique<Gui::RightAlignedHBoxContainer>();
     canvasTools->setPadding(5); canvasTools->setSpacing(5);
-
     auto polyBtn = std::make_unique<Gui::Button>(renderer, g_resources.FontManager.Get("regularFont"), "Poly", SDL_FPoint{0,0}, 60, 30);
     polyBtn->onClicked = [&world]() {
         editor_isDrawingPolygon = !editor_isDrawingPolygon;
@@ -473,7 +457,6 @@ int main(int argc, char* argv[]) {
             }
         }
     };
-
     auto gridBtn = std::make_unique<Gui::Button>(renderer, g_resources.FontManager.Get("regularFont"), "Grid", SDL_FPoint{0,0}, 60, 30);
     gridBtn->onClicked = [](){ editor_showGrid = !editor_showGrid; };
     canvasTools->addChild(std::move(polyBtn));
@@ -485,17 +468,17 @@ int main(int argc, char* argv[]) {
     float scrollOffset = 0.0f; const float maxScrollOffset = 1000.0f, scrollSpeed = 60.0f;
     Uint64 last_time = SDL_GetTicks(); float delta_time = 0.0f;
 
-    // ── Camera state variables ──────────────────────────────────────────────
+    // Camera state — P+drag to pan (no more Z gate for zoom)
     static bool cameraPanning = false;
     static float cameraLastMouseX = 0.0f, cameraLastMouseY = 0.0f;
-    static bool cameraZooming = false;
 
     while (running) {
         Uint64 current_time = SDL_GetTicks();
         delta_time = (float)(current_time - last_time) / 1000.0f; last_time = current_time;
-        
+
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) running = false;
+
             if (e.type == SDL_EVENT_KEY_DOWN) {
                 bool ctrlDown = (e.key.mod & (SDL_KMOD_LCTRL | SDL_KMOD_RCTRL));
                 if (ctrlDown && e.key.key == SDLK_I) inspectorVisible = !inspectorVisible;
@@ -510,25 +493,21 @@ int main(int argc, char* argv[]) {
                     cameraPanning = true;
                     SDL_GetMouseState(&cameraLastMouseX, &cameraLastMouseY);
                 }
-                // Camera: Z + scroll wheel = zoom
-                if (e.key.key == SDLK_Z) {
-                    cameraZooming = true;
-                }
             }
             if (e.type == SDL_EVENT_KEY_UP) {
                 if (e.key.key == SDLK_P) cameraPanning = false;
-                if (e.key.key == SDLK_Z) cameraZooming = false;
             }
+
             if (e.type == SDL_EVENT_GAMEPAD_ADDED && !gamepad) { gamepad = SDL_OpenGamepad(e.gdevice.which); }
             if (e.type == SDL_EVENT_GAMEPAD_REMOVED && gamepad && SDL_GetGamepadID(gamepad) == e.gdevice.which) { SDL_CloseGamepad(gamepad); gamepad = nullptr; }
-            
+
             toolbarContainer->handleEvent(e, window, 0.0f, 0.0f);
-            
+
             bool consumedByCanvasTools = false;
             if (showCanvas) {
                 consumedByCanvasTools = canvasTools->handleEvent(e, window, 0.0f, 0.0f);
             }
-            
+
             if (fileExplorer.isOpen()) {
                 auto action = fileExplorer.handleEvent(e);
                 if (action == Gui::Dialog::Action::Confirm) {
@@ -538,6 +517,7 @@ int main(int argc, char* argv[]) {
                 else if (action == Gui::Dialog::Action::Cancel) fileExplorer.reset();
                 continue;
             }
+
             if (dialog->isOpen()) {
                 if (showVirtualKeyboard && e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
                     Gui::ITextInput* currentInput = dialog->getCurrentTextInput();
@@ -559,6 +539,7 @@ int main(int argc, char* argv[]) {
                 } else if (action == Gui::Dialog::Action::Cancel) { dialog->reset(); showVirtualKeyboard = false; currentEditMode = modeBeforeDialog; }
                 continue;
             }
+
             if (dialog2->isOpen()) {
                 auto action = dialog2->handleEvent(e);
                 if (action == Gui::Dialog::Action::Confirm) {
@@ -566,15 +547,17 @@ int main(int argc, char* argv[]) {
                     create_gui_element_with_user_input(renderer, textEngine, g_resources.FontManager.Get("regularFont"), scene.guiElements, dialog2->guiElemType.getCurrentOption(), "untitled");
                     if (scene.guiElements.size() > countBefore) {
                         auto& newElem = scene.guiElements.back();
-                        float centerX = editorScrollX + canvasViewW / 2.0f, centerY = editorScrollY + canvasViewH / 2.0f;
+                        // GUI is screen-space: spawn at the screen centre of the canvas view.
+                        float centerX = canvasViewX + canvasViewW / 2.0f;
+                        float centerY = canvasViewY + canvasViewH / 2.0f;
                         SDL_FPoint pos = { centerX - newElem->getWidth() / 2.0f, centerY - newElem->getHeight() / 2.0f };
-                        clamp_guiElem_position_to_canvas(pos, newElem->getWidth(), newElem->getHeight());
                         newElem->setPos({ static_cast<int>(pos.x), static_cast<int>(pos.y) });
                     }
                     dialog2->reset(); showVirtualKeyboard = false; currentEditMode = modeBeforeDialog;
                 } else if (action == Gui::Dialog::Action::Cancel) { dialog2->reset(); showVirtualKeyboard = false; currentEditMode = modeBeforeDialog; }
                 continue;
             }
+
             if (addChildDialog.isOpen()) {
                 auto action = addChildDialog.handleEvent(e);
                 if (action == Gui::Dialog::Action::Confirm) {
@@ -610,12 +593,12 @@ int main(int argc, char* argv[]) {
                 }
                 continue;
             }
-            
+
             if (!showCanvas) {
                 if (showVisualEditor) { if (visualEditor.handleEvent(e, window, 0.0f, 0.0f)) continue; }
                 else { if (textEditor.handleEvent(e, window, 0.0f, 0.0f)) continue; }
             }
-            
+
             bool consumedByScrollbar = false;
             if (showCanvas) {
                 if (verticalScrollbar.handleEvent(e)) consumedByScrollbar = true;
@@ -631,41 +614,40 @@ int main(int argc, char* argv[]) {
                 cameraLastMouseY = e.motion.y;
             }
 
-            // ── Camera: Z + scroll wheel = zoom toward cursor ───────────────
-            if (!consumedByScrollbar && cameraZooming && e.type == SDL_EVENT_MOUSE_WHEEL) {
-                float mx, my; 
-                SDL_GetMouseState(&mx, &my);
-                if (mx >= canvasViewX && mx <= canvasViewX + canvasViewW &&
-                    my >= canvasViewY && my <= canvasViewY + canvasViewH) {
-                    float factor = (e.wheel.y > 0) ? 1.1f : (1.0f / 1.1f);
-                    g_editorCamera.zoomToward(mx, my, factor);
-                    consumedByScrollbar = true;
+            // ── Mouse wheel: scene scrollbars first, then camera zoom ─────
+            // No Z key required. Scrollbars inside Panels get first claim
+            // so they keep working; everything else zooms the camera.
+            if (!consumedByScrollbar && e.type == SDL_EVENT_MOUSE_WHEEL) {
+                bool consumedByScene = false;
+                for (auto& elem : guiElements) {
+                    if (elem->handleEvent(e, window, 0.0f, 0.0f)) { consumedByScene = true; break; }
+                }
+                if (!consumedByScene) {
+                    float mx, my;
+                    SDL_GetMouseState(&mx, &my);
+                    if (mx >= canvasViewX && mx <= canvasViewX + canvasViewW &&
+                        my >= canvasViewY && my <= canvasViewY + canvasViewH) {
+                        float factor = (e.wheel.y > 0.0f) ? 1.1f : (1.0f / 1.1f);
+                        g_editorCamera.zoomToward(mx, my, factor);
+                    }
                 }
             }
 
-            if (!consumedByScrollbar && e.type == SDL_EVENT_MOUSE_WHEEL) {
-                bool consumedByScene = false;
-                float guiOffsetX = editorScrollX - canvasViewX, guiOffsetY = editorScrollY - canvasViewY;
-                for (auto& elem : guiElements) { if (elem->handleEvent(e, window, guiOffsetX, guiOffsetY)) { consumedByScene = true; break; } }
-                if (!consumedByScene) {
-                    scrollOffset += (e.wheel.y > 0.0f) ? -scrollSpeed : scrollSpeed;
-                    scrollOffset = std::clamp(scrollOffset, 0.0f, maxScrollOffset);
-                }
-            }
-            
             if (!consumedByCanvasTools) {
                 edit_object_with_editor_mouse(renderer, world, scene.guiElements, selectedGuiElem, e);
             }
-            
+
             if (selectedGuiElem) { if (inspector.handleEvent(e)) continue; }
             else if (selectedEntity != (Entity)-1) { if (entityInspector.handleEvent(e)) continue; }
-            
-            if (e.type != SDL_EVENT_MOUSE_WHEEL) {
-                float guiOffsetX = editorScrollX - canvasViewX, guiOffsetY = editorScrollY - canvasViewY;
-                for (auto& elem : guiElements) elem->handleEvent(e, window, guiOffsetX, guiOffsetY);
-            }
+
+            // ── Scene GUI elements are INERT in the editor ────────────────
+            // Runtime interaction (LineEdit focus, Button onClicked, SpinBox
+            // stepping, etc.) is disabled. Selection and movement go through
+            // edit_object_with_editor_mouse/gamepad instead. Scrollbars still
+            // receive wheel events in the wheel block above.
+            // (The old forwarding loop is intentionally removed.)
         }
-        
+
         if (gamepad) {
             auto applyAxis = [&](SDL_GamepadAxis axis) -> float {
                 float raw = SDL_GetGamepadAxis(gamepad, axis) / 32767.0f;
@@ -673,19 +655,20 @@ int main(int argc, char* argv[]) {
                 float sign = raw > 0.0f ? 1.0f : -1.0f;
                 return sign * ((std::abs(raw) - deadzone) / (1.0f - deadzone));
             };
+
             float lx = applyAxis(SDL_GAMEPAD_AXIS_LEFTX), ly = applyAxis(SDL_GAMEPAD_AXIS_LEFTY), ry = applyAxis(SDL_GAMEPAD_AXIS_RIGHTY);
             cursorX = std::clamp(cursorX + lx * stickCursorSpeed * delta_time, 0.0f, windowWidth);
             cursorY = std::clamp(cursorY + ly * stickCursorSpeed * delta_time, 0.0f, windowHeight);
             scrollOffset = std::clamp(scrollOffset + ry * stickScrollSpeed * delta_time, 0.0f, maxScrollOffset);
             bool confirmNow = SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_SOUTH);
-            
+
             if (showVirtualKeyboard) {
                 float trigger = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) / 32767.0f;
                 if (trigger > 0.5f && lastTriggerValue <= 0.5f) virtualKeyboard->toggleShift();
                 lastTriggerValue = trigger;
                 if (SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_EAST) && !confirmLastFrame) virtualKeyboard->requestClose();
             }
-            
+
             if (dialog->isOpen()) {
                 Gui::ITextInput* currentInput = dialog->getCurrentTextInput();
                 bool wasActive = (currentInput != nullptr);
@@ -722,8 +705,10 @@ int main(int argc, char* argv[]) {
                     else textEditor.handleGamepad(cursorX, cursorY, 0.0f, 0.0f, window, confirmNow, confirmLastFrame);
                 }
                 edit_object_with_editor_gamepad(world, scene.guiElements, selectedGuiElem, cursorX, cursorY, confirmNow, confirmLastFrame);
-                float guiOffsetX = editorScrollX - canvasViewX, guiOffsetY = editorScrollY - canvasViewY;
-                for (auto& elem : guiElements) elem->handleGamepad(cursorX, cursorY, guiOffsetX, guiOffsetY, window, confirmNow, confirmLastFrame);
+
+                // Scene GUI runtime interaction is disabled for gamepad too.
+                // (The old handleGamepad forwarding loop is intentionally removed.)
+
                 if (selectedGuiElem) inspector.handleGamepad(cursorX, cursorY, confirmNow, confirmLastFrame);
                 else if (selectedEntity != (Entity)-1) entityInspector.handleGamepad(cursorX, cursorY, confirmNow, confirmLastFrame);
             }
@@ -741,6 +726,7 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+
         if (lastSelectedEntity != (Entity)-1) {
             if (lastSelectedEntity >= world.entity_count || !world.has_position[lastSelectedEntity]) {
                 lastSelectedEntity = (Entity)-1;
@@ -756,6 +742,7 @@ int main(int argc, char* argv[]) {
             if (lastSelectedEntity != (Entity)-1) selectEntity(lastSelectedEntity); else selectEntity((Entity)-1);
             prevSelectedEntity = lastSelectedEntity;
         }
+
         static Gui::IGuiElement* prevSelectedGuiElem = nullptr;
         if (selectedGuiElem != prevSelectedGuiElem) {
             if (selectedGuiElem) {
@@ -764,72 +751,64 @@ int main(int argc, char* argv[]) {
             } else inspector.setTarget(nullptr);
             prevSelectedGuiElem = selectedGuiElem;
         }
-        
+
         SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255); SDL_RenderClear(renderer);
+
         int winW, winH; SDL_GetWindowSize(window, &winW, &winH);
         const float toolbarHeight = 60.0f;
         const float inspectorWidth = inspectorVisible ? Gui::SceneInspector::PANEL_W : 0.0f;
-        canvasViewX = 0.0f; 
+        canvasViewX = 0.0f;
         canvasViewY = toolbarHeight;
-        canvasViewW = (float)winW - (inspectorVisible ? inspectorWidth : 0.0f); 
+        canvasViewW = (float)winW - (inspectorVisible ? inspectorWidth : 0.0f);
         canvasViewH = (float)winH - toolbarHeight;
-        if (canvasViewW < 200) canvasViewW = 200; 
+        if (canvasViewW < 200) canvasViewW = 200;
         if (canvasViewH < 200) canvasViewH = 200;
 
         const float minLogicalW = 1390.0f;
         const float minLogicalH = 690.0f;
         const float sbSize = 12.0f;
-
         float contentW = std::max(canvasViewW, minLogicalW);
         float contentH = std::max(canvasViewH, minLogicalH);
-
-        // 2. Update globals so clamp_entity_position_to_canvas works correctly
         g_canvasLogicalWidth = contentW;
         g_canvasLogicalHeight = contentH;
 
-        // 3. Setup scrollbars with DYNAMIC content sizes
         verticalScrollbar.setGeometry(
             canvasViewX + canvasViewW - sbSize, canvasViewY, sbSize, canvasViewH,
-            contentH,       // ← Content height (scrollable area)
-            canvasViewH     // ← View height (visible area)
+            contentH, canvasViewH
         );
         horizontalScrollbar.setGeometry(
             canvasViewX, canvasViewY + canvasViewH - sbSize, canvasViewW - sbSize, sbSize,
-            contentW,             // ← Content width (scrollable area)
-            canvasViewW - sbSize  // ← View width (visible area)
+            contentW, canvasViewW - sbSize
         );
 
-        // 4. Sync legacy scroll offsets to the camera
         editorScrollX = g_editorCamera.targetX;
         editorScrollY = g_editorCamera.targetY;
-                
+
         toolbarContainer->render(0.0f, 0.0f);
+
         if (showCanvas) {
             render_editor_canvas(renderer);
-            // ── Draw the scene and GUI elements (includes the old Poly/Grid buttons) ──
             render_system_and_scene_gui_in_editor(
-                renderer, textEngine, g_resources.FontManager.Get("regularFont"), 
-                world, canvasViewX, canvasViewY, 
-                editorScrollX, editorScrollY, 
-                guiElements, 
-                g_editorCamera // <-- NEW PARAMETER
+                renderer, textEngine, g_resources.FontManager.Get("regularFont"),
+                world, canvasViewX, canvasViewY,
+                editorScrollX, editorScrollY,
+                guiElements,
+                g_editorCamera
             );
             verticalScrollbar.render(renderer);
             horizontalScrollbar.render(renderer);
-            
-            // ── NEW: Render canvas tools ON TOP of everything else in the canvas area ──
-            float toolsX = canvasViewX + canvasViewW - 10; 
+
+            float toolsX = canvasViewX + canvasViewW - 10;
             float toolsY = canvasViewY + 30;
-            float containerWidth = 140;                   
+            float containerWidth = 140;
             canvasTools->setRect({ toolsX - containerWidth, toolsY, containerWidth, 40 });
             canvasTools->render(0.0f, 0.0f);
-
         } else if (showVisualEditor) {
             visualEditor.setRect({canvasViewX, canvasViewY, canvasViewW, canvasViewH}); visualEditor.render(0.0f, 0.0f);
         } else {
             textEditor.setRect({canvasViewX, canvasViewY, canvasViewW, canvasViewH}); textEditor.render(0.0f, 0.0f);
         }
-        
+
         if (inspectorVisible) {
             if (selectedGuiElem) { inspector.syncFromTarget(); inspector.render((float)winH); }
             else if (selectedEntity != (Entity)-1) { entityInspector.commitAllFields(); entityInspector.syncFromWorld(); entityInspector.render((float)winH); }
@@ -844,43 +823,46 @@ int main(int argc, char* argv[]) {
                 if (t) { TTF_SetTextColor(t, 100, 100, 120, 255); TTF_DrawRendererText(t, bg.x + 10, bg.y + 40); TTF_DestroyText(t); }
             }
         }
-        
+
         dialog->tick(delta_time); if (dialog->isOpen()) dialog->render();
         dialog2->tick(delta_time); if (dialog2->isOpen()) dialog2->render();
         addChildDialog.tick(delta_time); if (addChildDialog.isOpen()) addChildDialog.render();
-
         if (entityInspector.animFrameEditor && entityInspector.animFrameEditor->isOpen()) {
             entityInspector.animFrameEditor->tick(delta_time);
             if (!fileExplorer.isOpen()) {
                 entityInspector.animFrameEditor->render();
             }
         }
-
         fileExplorer.tick(delta_time); if (fileExplorer.isOpen()) fileExplorer.render();
-        
+
         SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
         SDL_FRect crosshair_firstrect = { cursorX - 10.0f, cursorY - 1.0f, 20.0f, 2.0f };
         SDL_FRect crosshair_secondrect = { cursorX - 1.0f, cursorY - 10.0f, 2.0f, 20.0f };
         SDL_RenderFillRect(renderer, &crosshair_firstrect); SDL_RenderFillRect(renderer, &crosshair_secondrect);
+
         if (showVirtualKeyboard) virtualKeyboard->render();
-        
         SDL_RenderPresent(renderer);
     }
-    
+
     // delete pointers
     delete dialog; delete dialog2; delete virtualKeyboard;
+
     // gamepad cleanup
     if (gamepad) SDL_CloseGamepad(gamepad);
+
     // clears all allocations and also calls library quit functions unless that is internal
     g_resources.FontManager.Clear();
     g_resources.TextureManager.Clear();
     g_resources.AudioManager.Clear();
     TTF_Quit();
     MIX_Quit();
+
     // icon cleanup
     if (iconSurface) SDL_DestroySurface(iconSurface);
+
     // systems cleanup
     TTF_DestroyRendererTextEngine(textEngine); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window);
+
     // final exit
     SDL_Quit();
     return 0;

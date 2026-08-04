@@ -1,5 +1,6 @@
 #pragma once
 #include "engine.h"
+#include "particles.h"
 #include <vector>
 #include <string>
 #include <functional>
@@ -69,6 +70,15 @@ class GameScript : public ScriptBase {
 public:
     std::string getName() const override { return "GameScript"; }
     GameContext* ctx = nullptr;
+
+    // engine.h's ScriptRegistry/SceneParser/change_scene machinery only
+    // knows ScriptBase, not GameContext (a project-defined type), so the
+    // context is handed over as void* and cast back here. Called once
+    // right after ScriptRegistry creates this instance for a scene, and
+    // again by change_scene() whenever this script becomes the active one
+    // for a newly-loaded scene.
+    void setContext(void* context) override { ctx = static_cast<GameContext*>(context); }
+
     float moveSpeed = 300.0f;
 
     // Biome grid configuration
@@ -82,6 +92,13 @@ public:
     float hitCooldown = 0.0f;
 
     Healthbar healthbar;
+
+    // Drives the black-particle "vanish" effect (see particles.h). Started
+    // once when the player dies (see checkCollisions), ticked every frame
+    // from onUpdate(), and drawn from onDraw(). A vanish's own progress and
+    // particles live entirely inside this object, so nothing else on
+    // GameScript needs to track fade state by hand.
+    Particles::VanishSystem vanishEffects;
 
     void checkCollisions(float dt);
     

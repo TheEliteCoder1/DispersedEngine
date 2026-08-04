@@ -89,6 +89,7 @@
 // -Remove the trailing commas to avoid json scene/resource issues.
 // -Make paths relative and remove double slashes for exports if you notice issues.
 // -Always check engine components if they exist before acessing them to avoid bugs.
+// -use build.bat instead of fast_build.bat to help with debugging project config bugs.
 
 // Update the helper functions to handle Emscripten's virtual FS better:
 inline std::string getProjectsPath(const std::string& relativePath = "") {
@@ -179,8 +180,8 @@ inline std::string resolveComponentResourcePath(const std::string& projectsRoot,
 }
 
 using Entity = uint32_t;
-const size_t MAX_ENTITIES = 1000000;
-Entity lastSelectedEntity = (Entity)-1;
+inline const size_t MAX_ENTITIES = 1000000;
+inline Entity lastSelectedEntity = (Entity)-1;
 
 enum EditMode {
     Select = 0,
@@ -189,28 +190,28 @@ enum EditMode {
     Dialog
 };
 
-EditMode currentEditMode = EditMode::Select;
+inline EditMode currentEditMode = EditMode::Select;
 // Remembers the mode that was active before a Dialog was opened, so it can be
 // restored once the dialog closes (otherwise the editor gets stuck in Dialog
 // mode forever, and edit_object_with_editor_mouse/gamepad both bail out early
 // whenever currentEditMode == Dialog, silently disabling select/move/delete).
-EditMode modeBeforeDialog = EditMode::Select;
+inline EditMode modeBeforeDialog = EditMode::Select;
 
 enum SelectionMode {
     SingleSelect = 0,
     MultiSelect
 };
-SelectionMode currentSelectionmode = SelectionMode::SingleSelect;
+inline SelectionMode currentSelectionmode = SelectionMode::SingleSelect;
 
 // Editor scroll offsets and viewport (updated each frame in main.cpp)
-float editorScrollX = 0.0f;
-float editorScrollY = 0.0f;
-bool inspectorVisible = true;
+inline float editorScrollX = 0.0f;
+inline float editorScrollY = 0.0f;
+inline bool inspectorVisible = true;
 
-float canvasViewX = 105.0f;
-float canvasViewY = 105.0f;
-float canvasViewW = 1390.0f;
-float canvasViewH = 690.0f;
+inline float canvasViewX = 105.0f;
+inline float canvasViewY = 105.0f;
+inline float canvasViewW = 1390.0f;
+inline float canvasViewH = 690.0f;
 inline bool editor_showGrid = false;
 inline float editor_cellW = 32.0f;
 inline float editor_cellH = 32.0f;
@@ -221,14 +222,14 @@ inline bool isInsideCanvas(float x, float y) {
            y >= canvasViewY && y <= canvasViewY + canvasViewH;
 }
 
-bool isDraggingLeftMouse = false;
-int lastDragX = 0;
-int lastDragY = 0;
+inline bool isDraggingLeftMouse = false;
+inline int lastDragX = 0;
+inline int lastDragY = 0;
 
-bool isGamepadDragging = false;
-bool gamepadDidDrag = false;
-float lastGamepadCursorX = 0.0f;
-float lastGamepadCursorY = 0.0f;
+inline bool isGamepadDragging = false;
+inline bool gamepadDidDrag = false;
+inline float lastGamepadCursorX = 0.0f;
+inline float lastGamepadCursorY = 0.0f;
 
 struct VertexDragState {
     Entity target = (Entity)-1;
@@ -236,8 +237,8 @@ struct VertexDragState {
     float startMouseX = 0.0f, startMouseY = 0.0f;
     float startVertexX = 0.0f, startVertexY = 0.0f;
 };
-VertexDragState vertexDrag;
-bool isDraggingVertex = false;
+inline VertexDragState vertexDrag;
+inline bool isDraggingVertex = false;
 
 namespace Components {
     struct Metadata { std::string name; };
@@ -367,6 +368,11 @@ namespace Components {
             size_t idx = (size_t)c.currentFrame % c.imageFrameResources.size();
             return {c.imageFrameResources[idx], {0,0,0,0}};
         }
+    };
+
+    struct ColorMod {
+        float alpha = 1.0f;          // 0.0 .. 1.0
+        SDL_Color tint = {255,255,255,255};   // (not used yet)
     };
 }
 
@@ -894,7 +900,7 @@ struct ECSWorld {
     }
 };
 
-void physics_sync_system(ECSWorld& world, Physics::PhysicsWorld& physWorld) {
+inline void physics_sync_system(ECSWorld& world, Physics::PhysicsWorld& physWorld) {
     for (Entity i = 0; i < world.entity_count; ++i) {
         if (world.has_physics_body[i] && world.has_position[i]) {
             auto& def = world.physics_body_pool[i];
@@ -927,7 +933,7 @@ void physics_sync_system(ECSWorld& world, Physics::PhysicsWorld& physWorld) {
 
 namespace Tools {
 
-    bool contains(std::string_view haystack, std::string_view needle) {
+    inline bool contains(std::string_view haystack, std::string_view needle) {
         return haystack.find(needle) != std::string_view::npos;
     }
 
@@ -1158,7 +1164,7 @@ namespace Tools {
     };
 
     // --- Culling & Render Order ---
-    bool aabbOverlap(const SDL_FRect& a, const SDL_FRect& b) {
+    inline bool aabbOverlap(const SDL_FRect& a, const SDL_FRect& b) {
         return a.x < b.x + b.w && a.x + a.w > b.x &&
             a.y < b.y + b.h && a.y + a.h > b.y;
     }
@@ -1981,7 +1987,6 @@ namespace Gui {
         
         // --- ITextInput ---
         void appendText(const std::string& str) override {
-            if (!active) return;
             if (hasSelection) deleteSelection();
             text.insert(cursorPos, str);
             cursorPos += (int)str.size();
@@ -8098,7 +8103,7 @@ enum GizmoOperation {
     GizmoRotate
 };
 
-GizmoOperation currentGizmoOp = GizmoNone;
+inline GizmoOperation currentGizmoOp = GizmoNone;
 
 struct GizmoDragState {
     Entity target = (Entity)-1;
@@ -8107,7 +8112,7 @@ struct GizmoDragState {
     float startCenterX = 0.0f, startCenterY = 0.0f;
 };
 
-GizmoDragState gizmoDrag;
+inline GizmoDragState gizmoDrag;
 
 
 inline GizmoHandles render_transform_gizmo(SDL_Renderer* renderer, float screenX, float screenY, bool isSelected) {
@@ -8166,13 +8171,13 @@ inline void movement_system(ECSWorld& world, float dt) {
     }
 }
 
-void deselect_all(ECSWorld& world) {
+inline void deselect_all(ECSWorld& world) {
     for (Entity i = 0; i < world.entity_count; i++) {
         if (world.has_selection[i]) world.selection_pool[i].isSelected = false;
     }
 }
 
-void drawText(TTF_TextEngine* textEngine, TTF_Font* font, const char* s, float x, float y, SDL_Color c) {
+inline void drawText(TTF_TextEngine* textEngine, TTF_Font* font, const char* s, float x, float y, SDL_Color c) {
     TTF_Text* t = TTF_CreateText(textEngine, font, s, 0);
     if (!t) return;
     TTF_SetTextColor(t, c.r, c.g, c.b, c.a);
@@ -8321,7 +8326,7 @@ inline void render_canvas_ruler(SDL_Renderer* renderer,
 
 
 
-void render_system_and_scene_gui_in_editor(
+inline void render_system_and_scene_gui_in_editor(
     SDL_Renderer* renderer,
     TTF_TextEngine* textEngine,
     TTF_Font* font,
@@ -8484,12 +8489,10 @@ void render_system_and_scene_gui_in_editor(
     // ── Pass 2: World-space axes (drawn through the camera transform) ────
     render_world_axes(renderer, camera, viewX, viewY, canvasViewW, canvasViewH);
 
-    // ── Pass 3: GUI elements (screen-space, with legacy scroll offsets) ──
-    float guiOffsetX = scrollX - viewX;
-    float guiOffsetY = scrollY - viewY;
+    // ── Pass 3: GUI elements (screen-space, without legacy scroll offsets) ──
     for (auto& elem : guiElements) {
-        elem->render(guiOffsetX, guiOffsetY);
-        elem->renderSelectionOutline(renderer, guiOffsetX, guiOffsetY);
+        elem->render(0.0f, 0.0f);
+        elem->renderSelectionOutline(renderer, 0.0f, 0.0f);
     }
 
     // ── Pass 4: Optional grid ────────────────────────────────────────────
@@ -8515,7 +8518,7 @@ void render_system_and_scene_gui_in_editor(
 
 // 2. Pure Game Render System (NO editor canvas offset)
 // This replaces render_system_in_editor by removing the "+ 105" offset
-void render_system_game_debug(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font, const ECSWorld& world) {
+inline void render_system_game_debug(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font, const ECSWorld& world) {
     for (Entity i = 0; i < world.entity_count; ++i) {
         if (world.has_position[i]) {
             
@@ -8548,7 +8551,7 @@ void render_system_game_debug(SDL_Renderer* renderer, TTF_TextEngine* textEngine
     }
 }
 
-void render_system_game_debug_no_text(SDL_Renderer* renderer, TTF_TextEngine* textEngine, const ECSWorld& world) {
+inline void render_system_game_debug_no_text(SDL_Renderer* renderer, TTF_TextEngine* textEngine, const ECSWorld& world) {
     for (Entity i = 0; i < world.entity_count; ++i) {
         if (world.has_position[i]) {
             
@@ -8571,55 +8574,51 @@ void render_system_game_debug_no_text(SDL_Renderer* renderer, TTF_TextEngine* te
     }
 }
 
-void edit_object_with_editor_mouse(SDL_Renderer* renderer, ECSWorld& world,
-std::vector<std::unique_ptr<Gui::IGuiElement>>& guiElements,
-Gui::IGuiElement*& selectedGuiElem,
-const SDL_Event& e)
+inline void edit_object_with_editor_mouse(SDL_Renderer* renderer, ECSWorld& world,
+    std::vector<std::unique_ptr<Gui::IGuiElement>>& guiElements,
+    Gui::IGuiElement*& selectedGuiElem,
+    const SDL_Event& e)
 {
     if (currentEditMode == EditMode::Dialog) return;
-
     const float kPolyPointPickRadius = 10.0f;
+
+    // ------------------------------------------------------------------
+    // Helper: screen-space hit test for GUI elements. GUI is rendered at
+    // raw positions (offset 0,0) in the editor, so raw mouse coords vs
+    // raw element rect is correct at every camera pan/zoom level.
+    // ------------------------------------------------------------------
+    auto guiHitTest = [](Gui::IGuiElement* elem, float x, float y) -> bool {
+        if (!elem) return false;
+        return x >= elem->getX() && x <= elem->getX() + elem->getWidth() &&
+               y >= elem->getY() && y <= elem->getY() + elem->getHeight();
+    };
 
     // ------------------------------------------------------------------
     // Helper: convert world (canvas) coordinates to local polygon space
     // ------------------------------------------------------------------
     auto worldToLocalPolygon = [&](Entity ent, float wx, float wy) -> b2Vec2 {
         if (ent >= world.entity_count) return {0,0};
-
-        // entity rectangle (used for center)
         float rectW = world.has_rectangle_shape[ent] ? world.rectangle_shape_pool[ent].w : 50.0f;
         float rectH = world.has_rectangle_shape[ent] ? world.rectangle_shape_pool[ent].h : 50.0f;
         float posX = world.position_pool[ent].x;
         float posY = world.position_pool[ent].y;
         float centerX = posX + rectW * 0.5f;
         float centerY = posY + rectH * 0.5f;
-
-        // rotation & scale
         float rotDeg = world.has_rotation[ent] ? world.rotation_pool[ent].degrees : 0.0f;
         float scaleX = world.has_scale[ent] ? world.scale_pool[ent].x : 1.0f;
         float scaleY = world.has_scale[ent] ? world.scale_pool[ent].y : 1.0f;
-
-        // physics body half extents
         auto& phys = world.physics_body_pool[ent];
         float halfW = phys.width * 0.5f;
         float halfH = phys.height * 0.5f;
-
-        // World → center‑relative
         float dx = wx - centerX;
         float dy = wy - centerY;
-
-        // Inverse rotation
         float rad = -rotDeg * 3.14159265f / 180.0f;
         float cosA = cos(rad);
         float sinA = sin(rad);
         float rx = dx * cosA - dy * sinA;
         float ry = dx * sinA + dy * cosA;
-
-        // Inverse scale (guard against zero)
         float sx = (fabs(scaleX) > 1e-6f) ? rx / scaleX : 0.0f;
         float sy = (fabs(scaleY) > 1e-6f) ? ry / scaleY : 0.0f;
-
-        // Convert to top‑left relative
         return { sx + halfW, sy + halfH };
     };
 
@@ -8628,20 +8627,16 @@ const SDL_Event& e)
         e.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
         (e.button.button == SDL_BUTTON_LEFT || e.button.button == SDL_BUTTON_RIGHT)) {
         float mx = e.button.x, my = e.button.y;
-
         if (isInsideCanvas(mx, my)) {
             SDL_FPoint worldPt = g_editorCamera.screenToWorld(mx, my);
             float logicalX = worldPt.x;
             float logicalY = worldPt.y;
-
             Entity ent = lastSelectedEntity;
             if (ent != (Entity)-1 && world.has_physics_body[ent]) {
                 auto& phys = world.physics_body_pool[ent];
                 if (phys.shapeType == Physics::ShapeType::Polygon) {
                     b2Vec2 clickPt = worldToLocalPolygon(ent, logicalX, logicalY);
-
                     if (e.button.button == SDL_BUTTON_LEFT) {
-                        // Close polygon if clicking near first point (and we have at least 3 points)
                         if (phys.polygonPoints.size() >= 3) {
                             float dx = clickPt.x - phys.polygonPoints.front().x;
                             float dy = clickPt.y - phys.polygonPoints.front().y;
@@ -8652,21 +8647,16 @@ const SDL_Event& e)
                         }
                         phys.polygonPoints.push_back(clickPt);
                         return;
-                    } else { // SDL_BUTTON_RIGHT: delete nearest point
+                    } else {
                         int nearestIdx = -1;
                         float nearestDistSq = kPolyPointPickRadius * kPolyPointPickRadius;
                         for (size_t i = 0; i < phys.polygonPoints.size(); ++i) {
                             float dx = clickPt.x - phys.polygonPoints[i].x;
                             float dy = clickPt.y - phys.polygonPoints[i].y;
                             float distSq = dx*dx + dy*dy;
-                            if (distSq <= nearestDistSq) {
-                                nearestDistSq = distSq;
-                                nearestIdx = (int)i;
-                            }
+                            if (distSq <= nearestDistSq) { nearestDistSq = distSq; nearestIdx = (int)i; }
                         }
-                        if (nearestIdx != -1) {
-                            phys.polygonPoints.erase(phys.polygonPoints.begin() + nearestIdx);
-                        }
+                        if (nearestIdx != -1) phys.polygonPoints.erase(phys.polygonPoints.begin() + nearestIdx);
                         return;
                     }
                 }
@@ -8674,34 +8664,25 @@ const SDL_Event& e)
         }
     }
 
-    // --- Middle‑mouse vertex dragging (disabled while drawing polygon) ---
+    // --- Middle-mouse vertex dragging (disabled while drawing polygon) ---
     if (!editor_isDrawingPolygon) {
         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_MIDDLE) {
             float mx = e.button.x, my = e.button.y;
             if (!isInsideCanvas(mx, my)) return;
-
             Entity ent = lastSelectedEntity;
             if (ent != (Entity)-1 && world.has_physics_body[ent] &&
                 world.physics_body_pool[ent].shapeType == Physics::ShapeType::Polygon) {
-
                 auto& phys = world.physics_body_pool[ent];
                 SDL_FPoint worldPt = g_editorCamera.screenToWorld(mx, my);
-                float logicalX = worldPt.x;
-                float logicalY = worldPt.y;
-                b2Vec2 localPt = worldToLocalPolygon(ent, logicalX, logicalY);
-
+                b2Vec2 localPt = worldToLocalPolygon(ent, worldPt.x, worldPt.y);
                 int nearestIdx = -1;
                 float nearestDistSq = kPolyPointPickRadius * kPolyPointPickRadius;
                 for (size_t i = 0; i < phys.polygonPoints.size(); ++i) {
                     float dx = localPt.x - phys.polygonPoints[i].x;
                     float dy = localPt.y - phys.polygonPoints[i].y;
                     float d2 = dx*dx + dy*dy;
-                    if (d2 < nearestDistSq) {
-                        nearestDistSq = d2;
-                        nearestIdx = (int)i;
-                    }
+                    if (d2 < nearestDistSq) { nearestDistSq = d2; nearestIdx = (int)i; }
                 }
-
                 if (nearestIdx != -1) {
                     vertexDrag.target = ent;
                     vertexDrag.vertexIndex = nearestIdx;
@@ -8714,7 +8695,6 @@ const SDL_Event& e)
                 }
             }
         }
-
         if (e.type == SDL_EVENT_MOUSE_MOTION && isDraggingVertex) {
             Entity ent = vertexDrag.target;
             if (ent != (Entity)-1 && world.has_physics_body[ent]) {
@@ -8723,17 +8703,12 @@ const SDL_Event& e)
                     vertexDrag.vertexIndex >= 0 &&
                     vertexDrag.vertexIndex < (int)phys.polygonPoints.size()) {
                     SDL_FPoint worldPt = g_editorCamera.screenToWorld(e.motion.x, e.motion.y);
-                    float logicalX = worldPt.x;
-                    float logicalY = worldPt.y;
-                    b2Vec2 newLocal = worldToLocalPolygon(ent, logicalX, logicalY);
-                    phys.polygonPoints[vertexDrag.vertexIndex] = newLocal;
-                    // Update drag start to avoid jumping
+                    phys.polygonPoints[vertexDrag.vertexIndex] = worldToLocalPolygon(ent, worldPt.x, worldPt.y);
                     vertexDrag.startMouseX = e.motion.x;
                     vertexDrag.startMouseY = e.motion.y;
                 }
             }
         }
-
         if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_MIDDLE) {
             isDraggingVertex = false;
             vertexDrag.target = (Entity)-1;
@@ -8741,7 +8716,7 @@ const SDL_Event& e)
         }
     }
 
-    // --- Left‑button up (stop dragging) ---
+    // --- Left-button up (stop dragging) ---
     if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) {
         isDraggingLeftMouse = false;
         currentGizmoOp = GizmoNone;
@@ -8758,20 +8733,23 @@ const SDL_Event& e)
             if (selectedEnt != (Entity)-1 && world.has_position[selectedEnt]) {
                 float cx = world.position_pool[selectedEnt].x + (world.has_rectangle_shape[selectedEnt] ? world.rectangle_shape_pool[selectedEnt].w : 50.0f) * 0.5f;
                 float cy = world.position_pool[selectedEnt].y + (world.has_rectangle_shape[selectedEnt] ? world.rectangle_shape_pool[selectedEnt].h : 50.0f) * 0.5f;
-                float screenCX = canvasViewX + cx - editorScrollX;
-                float screenCY = canvasViewY + cy - editorScrollY;
+                // The gizmo hit-rects must be computed exactly where the gizmo
+                // is DRAWN (render pass uses camera.worldToScreen). The old
+                // canvasViewX/Y + pos - scroll formula ignored camera zoom and
+                // was offset by canvasViewY, so the invisible hit-rects didn't
+                // line up with the visible handles.
+                SDL_FPoint gizmoPos = g_editorCamera.worldToScreen(cx, cy);
+                float screenCX = gizmoPos.x;
+                float screenCY = gizmoPos.y;
                 GizmoHandles handles = render_transform_gizmo(renderer, screenCX, screenCY, true);
                 float mx = e.button.x, my = e.button.y;
-
                 if (mx >= handles.redHandle.x && mx <= handles.redHandle.x + handles.redHandle.w &&
                     my >= handles.redHandle.y && my <= handles.redHandle.y + handles.redHandle.h) {
                     currentGizmoOp = GizmoScaleX;
                     gizmoDrag.target = selectedEnt;
-                    gizmoDrag.startMouseX = mx;
-                    gizmoDrag.startMouseY = my;
+                    gizmoDrag.startMouseX = mx; gizmoDrag.startMouseY = my;
                     gizmoDrag.startValue = world.has_scale[selectedEnt] ? world.scale_pool[selectedEnt].x : 1.0f;
-                    gizmoDrag.startCenterX = screenCX;
-                    gizmoDrag.startCenterY = screenCY;
+                    gizmoDrag.startCenterX = screenCX; gizmoDrag.startCenterY = screenCY;
                     isDraggingLeftMouse = true;
                     return;
                 }
@@ -8779,11 +8757,9 @@ const SDL_Event& e)
                          my >= handles.greenHandle.y && my <= handles.greenHandle.y + handles.greenHandle.h) {
                     currentGizmoOp = GizmoScaleY;
                     gizmoDrag.target = selectedEnt;
-                    gizmoDrag.startMouseX = mx;
-                    gizmoDrag.startMouseY = my;
+                    gizmoDrag.startMouseX = mx; gizmoDrag.startMouseY = my;
                     gizmoDrag.startValue = world.has_scale[selectedEnt] ? world.scale_pool[selectedEnt].y : 1.0f;
-                    gizmoDrag.startCenterX = screenCX;
-                    gizmoDrag.startCenterY = screenCY;
+                    gizmoDrag.startCenterX = screenCX; gizmoDrag.startCenterY = screenCY;
                     isDraggingLeftMouse = true;
                     return;
                 }
@@ -8791,23 +8767,23 @@ const SDL_Event& e)
                          my >= handles.blueHandle.y && my <= handles.blueHandle.y + handles.blueHandle.h) {
                     currentGizmoOp = GizmoRotate;
                     gizmoDrag.target = selectedEnt;
-                    gizmoDrag.startMouseX = mx;
-                    gizmoDrag.startMouseY = my;
+                    gizmoDrag.startMouseX = mx; gizmoDrag.startMouseY = my;
                     gizmoDrag.startValue = world.has_rotation[selectedEnt] ? world.rotation_pool[selectedEnt].degrees : 0.0f;
-                    gizmoDrag.startCenterX = screenCX;
-                    gizmoDrag.startCenterY = screenCY;
+                    gizmoDrag.startCenterX = screenCX; gizmoDrag.startCenterY = screenCY;
                     isDraggingLeftMouse = true;
                     return;
                 }
             }
 
-            // Entity / GUI picking
+            // GUI picking — screen-space, camera-independent. Runtime input is
+            // disabled in main.cpp, so the only thing you can do to a scene
+            // GUI element here is select it via this box.
             Gui::IGuiElement* topmostGui = nullptr;
             for (auto& elem : guiElements) {
-                float ex = elem->getX(); float ey = elem->getY();
-                float ew = elem->getWidth(); float eh = elem->getHeight();
-                if (logicalX >= ex && logicalX <= ex + ew && logicalY >= ey && logicalY <= ey + eh) topmostGui = elem.get();
+                if (guiHitTest(elem.get(), (float)e.button.x, (float)e.button.y)) topmostGui = elem.get();
             }
+
+            // Entity picking — world-space through the camera (zoom-aware).
             Entity topmostEntity = (Entity)-1;
             int maxZ = 0; bool foundEntity = false;
             for (Entity i = 0; i < world.entity_count; i++) {
@@ -8821,6 +8797,7 @@ const SDL_Event& e)
                     }
                 }
             }
+
             if (topmostGui) {
                 if (selectedGuiElem) selectedGuiElem->editorSelected = false;
                 selectedGuiElem = topmostGui; selectedGuiElem->editorSelected = true;
@@ -8844,7 +8821,6 @@ const SDL_Event& e)
                 }
             }
         }
-
         // Gizmo drag (motion)
         if (e.type == SDL_EVENT_MOUSE_MOTION && isDraggingLeftMouse && currentGizmoOp != GizmoNone) {
             Entity ent = gizmoDrag.target;
@@ -8856,15 +8832,13 @@ const SDL_Event& e)
                     if (newScale < 0.01f) newScale = 0.01f;
                     if (world.has_scale[ent]) world.scale_pool[ent].x = newScale;
                     gizmoDrag.startValue = newScale;
-                    gizmoDrag.startMouseX = e.motion.x;
-                    gizmoDrag.startMouseY = e.motion.y;
+                    gizmoDrag.startMouseX = e.motion.x; gizmoDrag.startMouseY = e.motion.y;
                 } else if (currentGizmoOp == GizmoScaleY) {
                     float newScale = gizmoDrag.startValue + dy * 0.02f;
                     if (newScale < 0.01f) newScale = 0.01f;
                     if (world.has_scale[ent]) world.scale_pool[ent].y = newScale;
                     gizmoDrag.startValue = newScale;
-                    gizmoDrag.startMouseX = e.motion.x;
-                    gizmoDrag.startMouseY = e.motion.y;
+                    gizmoDrag.startMouseX = e.motion.x; gizmoDrag.startMouseY = e.motion.y;
                 } else if (currentGizmoOp == GizmoRotate) {
                     float startAngle = atan2(gizmoDrag.startMouseY - gizmoDrag.startCenterY,
                                              gizmoDrag.startMouseX - gizmoDrag.startCenterX);
@@ -8874,56 +8848,66 @@ const SDL_Event& e)
                     float newDeg = gizmoDrag.startValue + deltaDeg;
                     if (world.has_rotation[ent]) world.rotation_pool[ent].degrees = newDeg;
                     gizmoDrag.startValue = newDeg;
-                    gizmoDrag.startMouseX = e.motion.x;
-                    gizmoDrag.startMouseY = e.motion.y;
+                    gizmoDrag.startMouseX = e.motion.x; gizmoDrag.startMouseY = e.motion.y;
                 }
             }
         }
     }
-
     // --- MoveWithMouse mode ---
     else if (currentEditMode == EditMode::MoveWithMouse) {
         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
-            if (isInsideCanvas(e.button.x, e.button.y)) { isDraggingLeftMouse = true; lastDragX = e.button.x; lastDragY = e.button.y; }
+            // A drag may start either on the selected GUI element (anywhere on
+            // screen — it's screen-space chrome and may sit outside the
+            // canvas) or inside the canvas when entities are selected.
+            bool overSelectedGui = selectedGuiElem && guiHitTest(selectedGuiElem, (float)e.button.x, (float)e.button.y);
+            bool hasSelectedEntities = false;
+            for (Entity i = 0; i < world.entity_count; i++) {
+                if (world.has_position[i] && world.has_selection[i] && world.selection_pool[i].isSelected) {
+                    hasSelectedEntities = true;
+                    break;
+                }
+            }
+            bool canDrag = overSelectedGui || (isInsideCanvas(e.button.x, e.button.y) && hasSelectedEntities);
+            if (canDrag) {
+                isDraggingLeftMouse = true;
+                lastDragX = e.button.x;
+                lastDragY = e.button.y;
+            }
         } else if (e.type == SDL_EVENT_MOUSE_MOTION && isDraggingLeftMouse) {
-            if (isInsideCanvas(e.motion.x, e.motion.y)) {
-                int dx = e.motion.x - lastDragX; int dy = e.motion.y - lastDragY;
-                if (dx != 0 || dy != 0) {
-                    // Screen-space mouse delta must be converted to world-space
-                    // delta through the camera (divide by zoom, same as
-                    // Camera::pan) so dragging tracks the cursor/ruler
-                    // correctly regardless of pan or zoom level. Entities are
-                    // no longer clamped to a fixed rectangle -- the world is
-                    // effectively infinite and bound only by what the camera
-                    // can see, not by an arbitrary old canvas-sized box.
+            int dx = e.motion.x - lastDragX;
+            int dy = e.motion.y - lastDragY;
+            if (dx != 0 || dy != 0) {
+                if (selectedGuiElem) {
+                    // GUI is screen-space: moves 1:1 with the mouse, completely
+                    // independent of camera pan AND zoom. No canvas clamp — it
+                    // may live anywhere on screen.
+                    SDL_FPoint newPos = { selectedGuiElem->getX() + dx, selectedGuiElem->getY() + dy };
+                    selectedGuiElem->setPos({ static_cast<int>(newPos.x), static_cast<int>(newPos.y) });
+                } else {
+                    // Entities are world-space: convert the screen-space mouse
+                    // delta through the camera zoom so the entity tracks the
+                    // cursor at every zoom level.
                     float worldDx = dx / g_editorCamera.zoom;
                     float worldDy = dy / g_editorCamera.zoom;
                     for (Entity i = 0; i < world.entity_count; i++) {
                         if (world.has_position[i] && world.has_selection[i] && world.selection_pool[i].isSelected) {
-                            world.position_pool[i].x += worldDx; world.position_pool[i].y += worldDy;
+                            world.position_pool[i].x += worldDx;
+                            world.position_pool[i].y += worldDy;
                         }
                     }
-                    if (selectedGuiElem) {
-                        SDL_FPoint newPos = { selectedGuiElem->getX() + dx, selectedGuiElem->getY() + dy };
-                        clamp_guiElem_position_to_canvas(newPos, selectedGuiElem->getWidth(), selectedGuiElem->getHeight());
-                        selectedGuiElem->setPos({ static_cast<int>(newPos.x), static_cast<int>(newPos.y) });
-                    }
-                    lastDragX = e.motion.x; lastDragY = e.motion.y;
                 }
-            } else isDraggingLeftMouse = false;
+                lastDragX = e.motion.x;
+                lastDragY = e.motion.y;
+            }
         }
     }
-
     // --- Delete mode ---
     else if (currentEditMode == EditMode::Delete) {
         if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
-            SDL_FPoint worldPt = g_editorCamera.screenToWorld(e.button.x, e.button.y);
-            float logicalX = worldPt.x;
-            float logicalY = worldPt.y;
+            // GUI first (it renders on top), in screen-space.
             Gui::IGuiElement* guiToDelete = nullptr;
             for (auto& elem : guiElements) {
-                if (logicalX >= elem->getX() && logicalX <= elem->getX() + elem->getWidth() &&
-                    logicalY >= elem->getY() && logicalY <= elem->getY() + elem->getHeight()) guiToDelete = elem.get();
+                if (guiHitTest(elem.get(), (float)e.button.x, (float)e.button.y)) guiToDelete = elem.get();
             }
             if (guiToDelete) {
                 if (selectedGuiElem == guiToDelete) selectedGuiElem = nullptr;
@@ -8931,6 +8915,10 @@ const SDL_Event& e)
                     [guiToDelete](const std::unique_ptr<Gui::IGuiElement>& p) { return p.get() == guiToDelete; }), guiElements.end());
                 return;
             }
+            // Entities in world-space through the camera.
+            SDL_FPoint worldPt = g_editorCamera.screenToWorld(e.button.x, e.button.y);
+            float logicalX = worldPt.x;
+            float logicalY = worldPt.y;
             Entity topmostEntity = (Entity)-1; int maxZ = 0; bool found = false;
             for (Entity i = 0; i < world.entity_count; i++) {
                 if (world.has_position[i] && world.has_selection[i]) {
@@ -8948,7 +8936,7 @@ const SDL_Event& e)
     }
 }
 
-void edit_object_with_editor_gamepad(ECSWorld& world,
+inline void edit_object_with_editor_gamepad(ECSWorld& world,
 std::vector<std::unique_ptr<Gui::IGuiElement>>& guiElements,
 Gui::IGuiElement*& selectedGuiElem,
 float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame)
@@ -9084,7 +9072,7 @@ float cursorX, float cursorY, bool confirmDown, bool confirmDownLastFrame)
     }
 }
 
-void render_editor_canvas(SDL_Renderer* renderer) {
+inline void render_editor_canvas(SDL_Renderer* renderer) {
     SDL_FRect rect = { canvasViewX, canvasViewY, canvasViewW, canvasViewH };
     SDL_SetRenderDrawColor(renderer, 125, 125, 125, 255);
     SDL_RenderRect(renderer, &rect);
@@ -9102,8 +9090,89 @@ public:
     virtual void onUpdate(float /*dt*/){}
     virtual void onDraw(){}
     virtual void onEnd(){}
+    virtual void onEvent(const SDL_Event& /*e*/){}
     virtual std::string getName() const { return "ScriptBase"; }
+    virtual void setContext(void* /*context*/) {}
 };
+
+// ============================================================
+// ScriptRegistry — enables *real* multi-script dispatch: every Scene
+// resolves and owns its own ScriptBase subclass instance (looked up by
+// name), instead of the whole runtime being hard-wired to one globally
+// shared, concrete script type. A project registers each of its script
+// classes once (typically via the REGISTER_SCRIPT macro below, at
+// namespace scope in the .cpp implementing the class); SceneParser then
+// looks up the right factory for whatever script_attached names in the
+// scene's JSON and instantiates it polymorphically.
+// ============================================================
+using ScriptFactory = std::function<std::unique_ptr<ScriptBase>()>;
+
+class ScriptRegistry {
+public:
+    static ScriptRegistry& instance() {
+        static ScriptRegistry reg;
+        return reg;
+    }
+
+    // Registers `factory` under `name`. Re-registering the same name
+    // simply overwrites the previous factory (useful for hot-reload /
+    // editor re-registration scenarios).
+    void registerScript(const std::string& name, ScriptFactory factory) {
+        factories[name] = std::move(factory);
+    }
+
+    bool has(const std::string& name) const {
+        return factories.find(name) != factories.end();
+    }
+
+    // Instantiates a fresh ScriptBase-derived object for `name`, or
+    // returns nullptr if nothing is registered under that name (e.g. a
+    // typo in script_attached, or a script class that forgot to
+    // REGISTER_SCRIPT itself).
+    std::unique_ptr<ScriptBase> create(const std::string& name) const {
+        auto it = factories.find(name);
+        if (it == factories.end()) return nullptr;
+        return it->second();
+    }
+
+    // Mostly useful for editor tooling/diagnostics (e.g. populating a
+    // dropdown of known script classes when authoring a scene).
+    std::vector<std::string> names() const {
+        std::vector<std::string> out;
+        out.reserve(factories.size());
+        for (const auto& kv : factories) out.push_back(kv.first);
+        return out;
+    }
+
+private:
+    std::unordered_map<std::string, ScriptFactory> factories;
+};
+
+// Self-registers `ClassName` under `nameStr` the first time this
+// translation unit is loaded, via a static initializer. Place at
+// namespace (file) scope in the .cpp that implements the script:
+//
+//     REGISTER_SCRIPT(GameScript, "GameScript")
+//
+// `nameStr` is the key SceneParser looks scripts up by; by convention
+// this is the stem of the script_attached path stored in the scene's
+// JSON (e.g. script_attached = "OpenWorld/scripts/GameScript.cpp" ->
+// key "GameScript"), so no extra per-scene registry wiring is needed —
+// dropping a new "Foo.cpp" into a scene's script_attached field just
+// works as long as some translation unit did REGISTER_SCRIPT(Foo, "Foo").
+#define REGISTER_SCRIPT(ClassName, nameStr)                                  \
+    namespace {                                                              \
+        struct ClassName##_ScriptRegistrar {                                 \
+            ClassName##_ScriptRegistrar() {                                  \
+                ScriptRegistry::instance().registerScript(                   \
+                    (nameStr),                                               \
+                    []() -> std::unique_ptr<ScriptBase> {                    \
+                        return std::make_unique<ClassName>();                \
+                    });                                                      \
+            }                                                                \
+        };                                                                   \
+        static ClassName##_ScriptRegistrar ClassName##_scriptRegistrarInstance; \
+    }
 
 // ============================================================
 // Scene and SceneParser — defined here so all Gui types are
@@ -9123,7 +9192,53 @@ struct Scene {
     // duplicate the work (e.g. re-spawning decorations on top of the ones
     // already saved in the scene).
     bool areBiomesAndEntitiesGenerated = false;
+
+    // --- Real multi-script support ---
+    // The registry key resolved from scriptAttached (by convention, the
+    // filename stem — see resolveScriptClassName() below), and the actual
+    // polymorphic script instance created for it via ScriptRegistry. Each
+    // Scene owns and drives its own script instance, so different scenes
+    // in the same project can run entirely different ScriptBase
+    // subclasses without the runtime knowing or caring which one it is.
+    std::string scriptClassName;
+    std::unique_ptr<ScriptBase> script;
 };
+
+// By convention, the registry key for a scene's script is the filename
+// stem of its script_attached path (e.g. "OpenWorld/scripts/GameScript.cpp"
+// -> "GameScript"), matching REGISTER_SCRIPT(GameScript, "GameScript").
+inline std::string resolveScriptClassName(const std::string& scriptAttached) {
+    if (scriptAttached.empty()) return "";
+    return std::filesystem::path(scriptAttached).stem().string();
+}
+
+// Shared by both SceneParser::loadFromFile() and
+// SceneParser::ProjectScript_loadFromFile(): once scene.scriptAttached has
+// been read and validated, resolve its registry key and instantiate the
+// matching ScriptBase subclass polymorphically. Leaves scene.script null
+// (with a diagnostic) if the scene has no valid script attachment, or if
+// script_attached doesn't match anything a translation unit registered via
+// REGISTER_SCRIPT — callers (main(), change_scene()) are expected to check
+// for null and degrade gracefully rather than assume a script exists.
+inline void instantiateScriptForScene(Scene& scene) {
+    if (!scene.scriptValid || scene.scriptAttached.empty()) return;
+
+    scene.scriptClassName = resolveScriptClassName(scene.scriptAttached);
+    scene.script = ScriptRegistry::instance().create(scene.scriptClassName);
+
+    if (!scene.script) {
+        std::cerr << "[SceneParser] WARNING: no script registered under '"
+                   << scene.scriptClassName << "' (from script_attached '"
+                   << scene.scriptAttached
+                   << "') — did you forget REGISTER_SCRIPT(" 
+                   << (scene.scriptClassName.empty() ? "YourClass" : scene.scriptClassName)
+                   << ", \"" << scene.scriptClassName << "\")? Scene '"
+                   << scene.name << "' will run with no active script.\n";
+    } else {
+        std::cout << "[SceneParser] Scene '" << scene.name << "' — instantiated script '"
+                   << scene.scriptClassName << "'.\n";
+    }
+}
 
 
 
@@ -9181,7 +9296,7 @@ inline void ProjectScript_MIXER_Clear()
 }
 
 
-Entity findEntityByName(Scene* scene, const std::string& name) {
+inline Entity findEntityByName(Scene* scene, const std::string& name) {
     if (!scene) return (Entity)-1;
     ECSWorld& world = scene->world;
     for (Entity i = 0; i < world.entity_count; ++i) {
@@ -9278,6 +9393,7 @@ public:
                 std::cout << "[Editor] Scene '" << scene.name
                         << "' — script '" << scene.scriptAttached << "' OK.\n";
         }
+        instantiateScriptForScene(scene);
 
         // --- 1. Parse ECS Entities ---
         if (j.contains("entities")) {
@@ -9475,6 +9591,7 @@ public:
                         << "' — script '" << scene.scriptAttached << "' OK.\n";
     #endif
         }
+        instantiateScriptForScene(scene);
 
         // --- 1. Parse ECS Entities ---
         if (j.contains("entities")) {
@@ -9816,9 +9933,128 @@ private:
             }
             j["children"] = childArr;
         }
-        return j;
+
+        return j; 
+
     }
+        
 };
+
+// ============================================================
+// change_scene — swap the currently-running Scene for one loaded from
+// `newScenePath`, callable directly from project scripts.
+//
+// With the real multi-script system, each Scene owns its own polymorphic
+// ScriptBase instance (resolved from its own script_attached via
+// ScriptRegistry — see instantiateScriptForScene()). So "changing scene"
+// here means both replacing the *data* (ECSWorld, GUI elements, etc.)
+// behind GameContext::scene in place, AND retiring the outgoing script
+// instance (onEnd()) in favor of whatever script the new scene's JSON
+// actually names — which may be a completely different ScriptBase
+// subclass than the one that was just running, e.g. swapping from a
+// GameScript-driven world into a LosingScreenScript-driven menu.
+//
+// Path resolution for `newScenePath` is identical to
+// SceneParser::ProjectScript_loadFromFile() (the function every scene,
+// including the very first one loaded in main(), already goes through):
+// on native builds it's resolved relative to getProjectsRootForScripts(),
+// on Emscripten it's used as-is (virtual FS). So pass it the same way you
+// passed the initial scene path, e.g. "OpenWorld/scenes/losing_screen.json".
+//
+// `parser`           - the SceneParser already owned by GameContext
+//                       (ctx->sceneParser), reused so no second parser /
+//                       renderer/font state needs to be constructed.
+// `targetScene`       - the Scene to overwrite in place. Pass *ctx->scene
+//                       so every existing pointer into it (ctx->scene
+//                       itself) keeps pointing at valid data with zero
+//                       extra wiring.
+// `sceneFilePathRef`  - updated to `newScenePath` on success (pass
+//                       ctx->sceneFilePath) so anything derived from it
+//                       later, such as a script's ".world" sibling-file
+//                       path built from ctx->sceneFilePath in its own
+//                       onStart()/onEnd(), tracks the new scene rather
+//                       than the old one.
+// `context`           - the project's GameContext*, passed through as
+//                       void* (engine.h doesn't know that type — see
+//                       ScriptBase::setContext) and handed to the new
+//                       scene's script via setContext() before onStart()
+//                       is invoked on it, so it's fully wired before it
+//                       runs its first frame. Pass e.g.
+//                       `static_cast<void*>(ctx)`.
+//
+// Returns false (leaving targetScene/sceneFilePathRef/scripts untouched)
+// if newScenePath couldn't be opened, mirroring the "file didn't open"
+// case in ProjectScript_loadFromFile() (identifiable by the returned
+// Scene's projectRoot being left empty, since that's only ever set after
+// the file is confirmed open).
+//
+// NOTE: entity handles a script cached from the old scene (player,
+// background, named decoration templates, decorationEntities, etc.) are
+// indices into the *old* ECSWorld and are no longer meaningful once
+// targetScene is replaced. That's no longer this function's caller's
+// problem for the *next* scene's script (it's a fresh instance with
+// fresh members), but if you keep a raw ScriptBase*/derived-type pointer
+// of your own pointing at the old script instance, drop it here — the
+// unique_ptr swap below destroys the old script instance after onEnd().
+inline bool change_scene(SceneParser& parser, Scene& targetScene,
+                          std::string& sceneFilePathRef,
+                          const std::string& newScenePath,
+                          void* context) {
+    Scene newScene = parser.ProjectScript_loadFromFile(newScenePath);
+
+    if (newScene.projectRoot.empty()) {
+        std::cerr << "[change_scene] Failed to load scene: " << newScenePath << "\n";
+        return false;
+    }
+
+    // Retire the outgoing script (if any) before the Scene it belongs to
+    // is overwritten/destroyed.
+    if (targetScene.script) {
+        targetScene.script->onEnd();
+    }
+
+    targetScene = std::move(newScene);
+    sceneFilePathRef = newScenePath;
+
+    // Wire up and start whichever script the new scene actually resolved
+    // via ScriptRegistry — polymorphically, with no assumption that it's
+    // the same concrete type (or even the same *kind* of script) as
+    // whatever was running before.
+    if (targetScene.script) {
+        targetScene.script->setContext(context);
+        targetScene.script->onStart();
+    } else {
+        std::cerr << "[change_scene] Scene '" << targetScene.name
+                   << "' loaded with no active script (script_attached='"
+                   << targetScene.scriptAttached << "').\n";
+    }
+
+    return true;
+}
+
+// Overload for projects using Physics::PhysicsWorld (as this one does).
+// Every Box2D body owned by the old scene lives in `physicsWorld`, not in
+// Scene itself, so swapping `targetScene` alone would leave the old
+// scene's bodies alive and simulating with nothing left pointing at them.
+// This destroys the old PhysicsWorld and replaces it with a fresh one (via
+// the exact same constructor call main() uses to create it initially,
+// `new Physics::PhysicsWorld(gravity)`), so physics_sync_system() rebuilds
+// bodies from scratch for the new scene's entities on the next call.
+// Pass ctx->physicsWorld (by reference-to-pointer, since it must be
+// reseated) as `physicsWorld`.
+inline bool change_scene(SceneParser& parser, Scene& targetScene,
+                          std::string& sceneFilePathRef,
+                          const std::string& newScenePath,
+                          void* context,
+                          Physics::PhysicsWorld*& physicsWorld,
+                          float gravity = 0.0f) {
+    if (!change_scene(parser, targetScene, sceneFilePathRef, newScenePath, context))
+        return false;
+
+    delete physicsWorld;
+    physicsWorld = new Physics::PhysicsWorld(gravity);
+    return true;
+}
 
 // ============================================================
 // WorldBinary — Fast binary serialization for generated entities
