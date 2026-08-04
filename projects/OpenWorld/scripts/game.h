@@ -15,7 +15,10 @@ struct GameContext {
     SDL_Gamepad*        gamepad         = nullptr;
     Physics::PhysicsWorld* physicsWorld = nullptr;  
     SceneParser*        sceneParser     = nullptr;   
-    std::string         sceneFilePath;          
+    std::string         sceneFilePath;   
+    float gamepadCursorX = 0.0f;
+    float gamepadCursorY = 0.0f;
+    bool confirmDownLastFrame = false;  
 };
 
 

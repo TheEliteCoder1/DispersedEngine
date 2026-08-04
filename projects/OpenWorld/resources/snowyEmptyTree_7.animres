@@ -8,6 +8,7 @@
                 "assets\\textures\\snowyEmptyTree.svg"
             ],
             "isPlaying": false,
+            "loop": true,
             "name": "default",
             "speed": 1.0
         }

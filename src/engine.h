@@ -1885,18 +1885,48 @@ namespace Gui {
             }
 
             void handleGamepad(float cursorX, float cursorY, float offsetX, float offsetY, SDL_Window* window, bool confirmDown, bool confirmDownLastFrame) override {
-                // Simplified gamepad support for dropdown
-                if (confirmDown && !confirmDownLastFrame) {
-                    SDL_FRect shiftedMain = { optionRect.x - offsetX, optionRect.y - offsetY, optionRect.w, optionRect.h };
-                    if (inRect(cursorX, cursorY, shiftedMain)) {
-                        isDropdownOpen = !isDropdownOpen;
-                    } else if (isDropdownOpen) {
-                        // Navigate list with gamepad could be added here
+                SDL_FRect shiftedMain = { optionRect.x - offsetX, optionRect.y - offsetY,
+                                        optionRect.w, optionRect.h };
+
+                if (isDropdownOpen) {
+                    float totalH = options.size() * 28.0f;
+                    float visH = std::min(totalH, maxDropdownHeight);
+                    SDL_FRect dropRect = { shiftedMain.x, shiftedMain.y + shiftedMain.h,
+                                        shiftedMain.w, visH };
+
+                    // Check if cursor is over the dropdown area
+                    if (cursorX >= dropRect.x && cursorX <= dropRect.x + dropRect.w &&
+                        cursorY >= dropRect.y && cursorY <= dropRect.y + dropRect.h) {
+                        int idx = (int)((cursorY - dropRect.y + dropdownScrollOffset) / 28.0f);
+                        if (idx >= 0 && idx < (int)options.size()) {
+                            if (confirmDown && !confirmDownLastFrame) {
+                                currentOption = idx;
+                                isDropdownOpen = false;
+                                if (onChange) onChange(currentOption);
+                                return;
+                            }
+                            // Prevent toggling the main box while hovering the dropdown
+                            return;
+                        }
+                    }
+
+                    // Close dropdown if confirm is pressed and cursor is outside it
+                    if (confirmDown && !confirmDownLastFrame) {
                         isDropdownOpen = false;
+                        return;
+                    }
+                }
+
+                // Main box toggling
+                if (confirmDown && !confirmDownLastFrame) {
+                    if (cursorX >= shiftedMain.x && cursorX <= shiftedMain.x + shiftedMain.w &&
+                        cursorY >= shiftedMain.y && cursorY <= shiftedMain.y + shiftedMain.h) {
+                        isDropdownOpen = !isDropdownOpen;
+                        dropdownScrollOffset = 0.0f;
                     }
                 }
             }
-
+            
             void render(float offsetX, float offsetY) override {
                 SDL_FRect shiftedMain = { optionRect.x - offsetX, optionRect.y - offsetY, optionRect.w, optionRect.h };
 
@@ -9940,119 +9970,41 @@ private:
         
 };
 
-// ============================================================
-// change_scene — swap the currently-running Scene for one loaded from
-// `newScenePath`, callable directly from project scripts.
-//
-// With the real multi-script system, each Scene owns its own polymorphic
-// ScriptBase instance (resolved from its own script_attached via
-// ScriptRegistry — see instantiateScriptForScene()). So "changing scene"
-// here means both replacing the *data* (ECSWorld, GUI elements, etc.)
-// behind GameContext::scene in place, AND retiring the outgoing script
-// instance (onEnd()) in favor of whatever script the new scene's JSON
-// actually names — which may be a completely different ScriptBase
-// subclass than the one that was just running, e.g. swapping from a
-// GameScript-driven world into a LosingScreenScript-driven menu.
-//
-// Path resolution for `newScenePath` is identical to
-// SceneParser::ProjectScript_loadFromFile() (the function every scene,
-// including the very first one loaded in main(), already goes through):
-// on native builds it's resolved relative to getProjectsRootForScripts(),
-// on Emscripten it's used as-is (virtual FS). So pass it the same way you
-// passed the initial scene path, e.g. "OpenWorld/scenes/losing_screen.json".
-//
-// `parser`           - the SceneParser already owned by GameContext
-//                       (ctx->sceneParser), reused so no second parser /
-//                       renderer/font state needs to be constructed.
-// `targetScene`       - the Scene to overwrite in place. Pass *ctx->scene
-//                       so every existing pointer into it (ctx->scene
-//                       itself) keeps pointing at valid data with zero
-//                       extra wiring.
-// `sceneFilePathRef`  - updated to `newScenePath` on success (pass
-//                       ctx->sceneFilePath) so anything derived from it
-//                       later, such as a script's ".world" sibling-file
-//                       path built from ctx->sceneFilePath in its own
-//                       onStart()/onEnd(), tracks the new scene rather
-//                       than the old one.
-// `context`           - the project's GameContext*, passed through as
-//                       void* (engine.h doesn't know that type — see
-//                       ScriptBase::setContext) and handed to the new
-//                       scene's script via setContext() before onStart()
-//                       is invoked on it, so it's fully wired before it
-//                       runs its first frame. Pass e.g.
-//                       `static_cast<void*>(ctx)`.
-//
-// Returns false (leaving targetScene/sceneFilePathRef/scripts untouched)
-// if newScenePath couldn't be opened, mirroring the "file didn't open"
-// case in ProjectScript_loadFromFile() (identifiable by the returned
-// Scene's projectRoot being left empty, since that's only ever set after
-// the file is confirmed open).
-//
-// NOTE: entity handles a script cached from the old scene (player,
-// background, named decoration templates, decorationEntities, etc.) are
-// indices into the *old* ECSWorld and are no longer meaningful once
-// targetScene is replaced. That's no longer this function's caller's
-// problem for the *next* scene's script (it's a fresh instance with
-// fresh members), but if you keep a raw ScriptBase*/derived-type pointer
-// of your own pointing at the old script instance, drop it here — the
-// unique_ptr swap below destroys the old script instance after onEnd().
-inline bool change_scene(SceneParser& parser, Scene& targetScene,
-                          std::string& sceneFilePathRef,
-                          const std::string& newScenePath,
-                          void* context) {
-    Scene newScene = parser.ProjectScript_loadFromFile(newScenePath);
-
-    if (newScene.projectRoot.empty()) {
-        std::cerr << "[change_scene] Failed to load scene: " << newScenePath << "\n";
-        return false;
-    }
-
-    // Retire the outgoing script (if any) before the Scene it belongs to
-    // is overwritten/destroyed.
-    if (targetScene.script) {
-        targetScene.script->onEnd();
-    }
-
-    targetScene = std::move(newScene);
-    sceneFilePathRef = newScenePath;
-
-    // Wire up and start whichever script the new scene actually resolved
-    // via ScriptRegistry — polymorphically, with no assumption that it's
-    // the same concrete type (or even the same *kind* of script) as
-    // whatever was running before.
-    if (targetScene.script) {
-        targetScene.script->setContext(context);
-        targetScene.script->onStart();
-    } else {
-        std::cerr << "[change_scene] Scene '" << targetScene.name
-                   << "' loaded with no active script (script_attached='"
-                   << targetScene.scriptAttached << "').\n";
-    }
-
-    return true;
-}
-
-// Overload for projects using Physics::PhysicsWorld (as this one does).
-// Every Box2D body owned by the old scene lives in `physicsWorld`, not in
-// Scene itself, so swapping `targetScene` alone would leave the old
-// scene's bodies alive and simulating with nothing left pointing at them.
-// This destroys the old PhysicsWorld and replaces it with a fresh one (via
-// the exact same constructor call main() uses to create it initially,
-// `new Physics::PhysicsWorld(gravity)`), so physics_sync_system() rebuilds
-// bodies from scratch for the new scene's entities on the next call.
-// Pass ctx->physicsWorld (by reference-to-pointer, since it must be
-// reseated) as `physicsWorld`.
 inline bool change_scene(SceneParser& parser, Scene& targetScene,
                           std::string& sceneFilePathRef,
                           const std::string& newScenePath,
                           void* context,
                           Physics::PhysicsWorld*& physicsWorld,
                           float gravity = 0.0f) {
-    if (!change_scene(parser, targetScene, sceneFilePathRef, newScenePath, context))
+    // 1. Load the new scene data (but do NOT assign it yet)
+    Scene newScene = parser.ProjectScript_loadFromFile(newScenePath);
+    if (newScene.projectRoot.empty()) {
+        std::cerr << "[change_scene] Failed to load scene: " << newScenePath << "\n";
         return false;
+    }
 
+    // 2. End the old script (it may need the old physics world – keep it alive)
+    if (targetScene.script) {
+        targetScene.script->onEnd();
+    }
+
+    // 3. Replace the physics world (old one is now unused)
     delete physicsWorld;
     physicsWorld = new Physics::PhysicsWorld(gravity);
+
+    // 4. Move the new scene into place and start its script (with the fresh world)
+    targetScene = std::move(newScene);
+    sceneFilePathRef = newScenePath;
+
+    if (targetScene.script) {
+        targetScene.script->setContext(context);
+        targetScene.script->onStart();
+    } else {
+        std::cerr << "[change_scene] Scene '" << targetScene.name
+                  << "' loaded with no active script (script_attached='"
+                  << targetScene.scriptAttached << "').\n";
+    }
+
     return true;
 }
 

@@ -8,6 +8,7 @@
                 "assets\\textures\\emptyTree.svg"
             ],
             "isPlaying": false,
+            "loop": true,
             "name": "default",
             "speed": 1.0
         }

@@ -21,6 +21,15 @@ static Uint64 g_lastTime = 0;
 static constexpr float dtStep = 1000.0f;
 static constexpr float minDt = 0.1f;
 
+static void drawCrosshair(SDL_Renderer* renderer, float x, float y) {
+    const int size = 12;
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+    SDL_RenderLine(renderer, x - size, y, x + size, y);
+    SDL_RenderLine(renderer, x, y - size, x, y + size);
+    // Optional small circle
+    // SDL_RenderPoint(renderer, x, y);
+}
+
 // The active scene's script is polymorphic (ScriptBase*, owned by
 // GameContext::scene->script) so that different scenes can run entirely
 // different ScriptBase subclasses. Generic dispatch (onStart/onUpdate/
@@ -106,7 +115,7 @@ static void RenderFrame(SDL_Renderer* renderer, SDL_Window* window, GameContext&
     SDL_RenderClear(renderer);
  
     int winW, winH;
-    SDL_GetWindowSize(window, &winW, &winH);
+    SDL_GetWindowSize(ctx.window, &winW, &winH);
  
     // 1. Compute visible world rect for culling
     SDL_FRect visibleWorld = Tools::computeVisibleWorldRect(ctx.camera, winW, winH);
@@ -159,6 +168,10 @@ static void RenderFrame(SDL_Renderer* renderer, SDL_Window* window, GameContext&
     if (ctx.scene->script) {
         ctx.scene->script->onDraw();
     }
+
+    for (auto& elem : ctx.scene->guiElements) {
+        elem->render(0.0f, 0.0f);
+    }
  
     if (script && script->drawPhysicsDebug) {
         draw_physics_debug_overlay(renderer, ctx.scene->world, ctx.camera);
@@ -188,6 +201,11 @@ static void RenderFrame(SDL_Renderer* renderer, SDL_Window* window, GameContext&
                 playerScreen.y + barOffsetY
             );
         }
+    }
+
+    
+    if (ctx.gamepad && !ActiveGameScript(ctx)) {
+        drawCrosshair(renderer, ctx.gamepadCursorX, ctx.gamepadCursorY);
     }
 
     SDL_RenderPresent(renderer);
@@ -228,7 +246,37 @@ void main_loop_callback() {
     StepPhysicsAndSync(*g_context, dt);
  
     animation_system(g_context->scene->world, dt);
- 
+    if (g_context->gamepad) {
+        GameScript* gs = ActiveGameScript(*g_context);
+        if (!gs) {
+            float deadzone = 0.2f;
+            float ax = SDL_GetGamepadAxis(g_context->gamepad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0f;
+            float ay = SDL_GetGamepadAxis(g_context->gamepad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
+            if (std::fabs(ax) < deadzone) ax = 0.0f;
+            if (std::fabs(ay) < deadzone) ay = 0.0f;
+
+            const float cursorSpeed = 500.0f;
+            g_context->gamepadCursorX += ax * cursorSpeed * dt;
+            g_context->gamepadCursorY += ay * cursorSpeed * dt;
+
+            int winW, winH;
+            SDL_GetWindowSize(g_window, &winW, &winH);
+            g_context->gamepadCursorX = std::clamp(g_context->gamepadCursorX, 0.0f, (float)winW);
+            g_context->gamepadCursorY = std::clamp(g_context->gamepadCursorY, 0.0f, (float)winH);
+
+            bool confirmDown = SDL_GetGamepadButton(g_context->gamepad, SDL_GAMEPAD_BUTTON_SOUTH) != 0;
+            for (auto& elem : g_context->scene->guiElements) {
+                elem->handleGamepad(g_context->gamepadCursorX, g_context->gamepadCursorY,
+                                    0.0f, 0.0f, g_window,
+                                    confirmDown, g_context->confirmDownLastFrame);
+            }
+            g_context->confirmDownLastFrame = confirmDown;
+        } else {
+            g_context->confirmDownLastFrame = false;
+        }
+    } else {
+        g_context->confirmDownLastFrame = false;
+    }
     RenderFrame(g_renderer, g_window, *g_context);
 }
 #endif
@@ -311,6 +359,7 @@ void GameScript::spawnRandomDecorations() {
  
 void GameScript::onStart() {
     if (!(ctx && ctx->scene)) return;
+    deathState = false;
     elapsed = 0.0f;
     ctx->camera.zoom = 1.45f;
  
@@ -320,7 +369,6 @@ void GameScript::onStart() {
     player     = findEntityByName(ctx->scene, "Player");
     background = findEntityByName(ctx->scene, "Background");
     if (player == (Entity)-1 || background == (Entity)-1) return;
-
     healthbar = Healthbar(100.0f, 100.0f, 12.0f); 
  
     ctx->scene->world.add_texture_ref(background);
@@ -525,7 +573,6 @@ void GameScript::onUpdate(float dt) {
         if (vanishEffects.activeCount() == 0)
             change_scene(*ctx->sceneParser,*ctx->scene,ctx->sceneFilePath,"OpenWorld/scenes/losing_screen.json",static_cast<void*>(ctx),ctx->physicsWorld);
     } else {
- 
         // Detect cactus contact and, if not already sliding from a previous hit,
         // apply the knockback velocity + start the knockback timer.
         checkCollisions(dt);
@@ -757,6 +804,9 @@ int main(int argc, char *argv[])
             if (ctx.scene && ctx.scene->script) {
                 ctx.scene->script->onEvent(e);
             }
+            for (auto& elem : ctx.scene->guiElements) {
+                elem->handleEvent(e, window, 0.0f, 0.0f);
+            }
             if (e.type == SDL_EVENT_GAMEPAD_ADDED && !ctx.gamepad)
                 ctx.gamepad = SDL_OpenGamepad(e.gdevice.which);
             else if (e.type == SDL_EVENT_GAMEPAD_REMOVED && ctx.gamepad &&
@@ -772,7 +822,39 @@ int main(int argc, char *argv[])
         if (ctx.scene->script) ctx.scene->script->onUpdate(dt);
         StepPhysicsAndSync(ctx, dt);
         animation_system(ctx.scene->world, dt);
- 
+        if (ctx.gamepad) {
+            GameScript* gs = ActiveGameScript(ctx);
+            if (!gs) {
+                // Menu mode: update cursor and forward GUI events
+                float deadzone = 0.2f;
+                float ax = SDL_GetGamepadAxis(ctx.gamepad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0f;
+                float ay = SDL_GetGamepadAxis(ctx.gamepad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
+                if (std::fabs(ax) < deadzone) ax = 0.0f;
+                if (std::fabs(ay) < deadzone) ay = 0.0f;
+
+                const float cursorSpeed = 500.0f; // pixels per second
+                ctx.gamepadCursorX += ax * cursorSpeed * dt;
+                ctx.gamepadCursorY += ay * cursorSpeed * dt;
+
+                int winW, winH;
+                SDL_GetWindowSize(ctx.window, &winW, &winH);
+                ctx.gamepadCursorX = std::clamp(ctx.gamepadCursorX, 0.0f, (float)winW);
+                ctx.gamepadCursorY = std::clamp(ctx.gamepadCursorY, 0.0f, (float)winH);
+
+                bool confirmDown = SDL_GetGamepadButton(ctx.gamepad, SDL_GAMEPAD_BUTTON_SOUTH) != 0;
+                for (auto& elem : ctx.scene->guiElements) {
+                    elem->handleGamepad(ctx.gamepadCursorX, ctx.gamepadCursorY,
+                                        0.0f, 0.0f, ctx.window,
+                                        confirmDown, ctx.confirmDownLastFrame);
+                }
+                ctx.confirmDownLastFrame = confirmDown;
+            } else {
+                // Gameplay mode: do nothing with cursor/GUI
+                ctx.confirmDownLastFrame = false;
+            }
+        } else {
+            ctx.confirmDownLastFrame = false;
+        }
         RenderFrame(renderer, window, ctx);
     }
  
