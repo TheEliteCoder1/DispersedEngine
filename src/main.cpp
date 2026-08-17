@@ -1,8 +1,8 @@
 #include "engine.h"
-#include "visual_logic.h"
+
+
 
 bool showCanvas = true;
-bool showVisualEditor = false; // when true (and showCanvas==false), the node-graph editor is shown instead of the text editor
 
 
 void create_entity_with_user_input(ECSWorld& world, const std::string& name, float w, float h) {
@@ -38,6 +38,23 @@ void create_gui_element_with_user_input(
     else if (type == "SpinBox") {
         auto sb = std::make_unique<Gui::SpinBox>(renderer, textEngine, font, SDL_FRect{0,0,200,36}, 0.0f, 100.0f, 50.0f, 1.0f);
         guiElements.push_back(std::move(sb));
+    }
+    else if (type == "Panel") {
+        auto pl = std::make_unique<Gui::Panel>(renderer, textEngine, font, SDL_FRect{0,0,200,500});
+        guiElements.push_back(std::move(pl));
+    }
+    else if (type == "OptionSpinBox") {
+        std::vector<std::string> options = {"option1", "option2", "option3"};
+        auto osb = std::make_unique<Gui::OptionSpinBox>(renderer, textEngine, font, SDL_FRect{0,0,200,36}, options);
+        guiElements.push_back(std::move(osb));
+    }
+    else if (type == "TextArea") {
+        auto ta = std::make_unique<Gui::TextArea>(renderer, textEngine, font, SDL_FRect{0,0,200,500});
+        guiElements.push_back(std::move(ta));
+    }
+    else if (type == "CheckBox") {
+        auto cb = std::make_unique<Gui::CheckBox>(renderer, textEngine, font, SDL_FRect{0,0,200,500});
+        guiElements.push_back(std::move(cb));
     }
 }
 
@@ -113,7 +130,11 @@ public:
     std::vector<std::string> options = {
         "LineEdit",
         "SpinBox",
-        "Button"
+        "Button",
+        "Panel",
+        "OptionSpinBox",
+        "TextArea",
+        "CheckBox"
     };
     Gui::OptionBox guiElemType;
     AddGuiElemDialog(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font, SDL_Window* window)
@@ -210,6 +231,119 @@ std::string get_system_output(const char* cmd) {
     return result;
 }
 
+
+ECSWorld            g_worldOverlay;
+std::vector<Entity> g_worldOverlayEntities;
+bool                g_showWorldOverlay = true;
+std::string         g_worldOverlayPath;
+
+std::string deriveWorldFilePath(const std::string& sceneFilePath) {
+    std::string p = sceneFilePath;
+    size_t dot = p.rfind('.');
+    if (dot != std::string::npos) p = p.substr(0, dot) + ".world";
+    else p += ".world";
+    return p;
+}
+
+// Deletes a single entity out of the .world overlay and keeps
+// g_worldOverlayEntities in sync. ECSWorld::delete_entity() swaps the last
+// entity into the deleted slot and shrinks the array, which silently
+// reassigns whatever handle equaled `last` to now mean the entity that used
+// to live at `id` -- so any other handle in our list still holding the old
+// `last` value would go stale. Rewrite those immediately, same pattern
+// cleanupOutOfBoundsDecorations() uses in engine.h.
+void deleteWorldOverlayEntity(Entity id) {
+    if (id >= g_worldOverlay.entity_count) return;
+    Entity last = g_worldOverlay.entity_count - 1;
+
+    // Drop this entity's own handle first, before the swap below can give
+    // `id` a new meaning -- otherwise the erase-by-value further down would
+    // also catch (and wrongly drop) the entity that gets moved into `id`'s
+    // slot.
+    g_worldOverlayEntities.erase(
+        std::remove(g_worldOverlayEntities.begin(), g_worldOverlayEntities.end(), id),
+        g_worldOverlayEntities.end());
+
+    g_worldOverlay.delete_entity(id);
+
+    if (id != last) {
+        for (Entity& other : g_worldOverlayEntities) if (other == last) other = id;
+    }
+}
+
+void reloadWorldOverlay(const std::string& sceneFilePath, const std::string& projectRoot) {
+    // Reset to a clean world every scene switch so stale entities from a
+    // previously-loaded scene never bleed into the one you just opened.
+    g_worldOverlay = ECSWorld();
+    g_worldOverlayEntities.clear();
+    g_worldOverlayPath = deriveWorldFilePath(sceneFilePath);
+
+    bool generatedFlag = false; // unused here, WorldBinary::load requires it
+    WorldBinary::load(g_worldOverlayPath, g_worldOverlay, g_worldOverlayEntities,
+                       generatedFlag, projectRoot);
+    // A missing file just leaves the overlay empty - that scene simply
+    // hasn't been generated/run yet, which is fine.
+}
+
+void draw_world_overlay(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font,
+                         Tools::Camera& camera) {
+    if (!g_showWorldOverlay || g_worldOverlayEntities.empty()) return;
+
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+    for (Entity e : g_worldOverlayEntities) {
+        if (!g_worldOverlay.has_position[e]) continue;
+
+        // Get entity dimensions
+        float w = g_worldOverlay.has_rectangle_shape[e]
+                      ? g_worldOverlay.rectangle_shape_pool[e].w
+                      : 16.0f;
+        float h = g_worldOverlay.has_rectangle_shape[e]
+                      ? g_worldOverlay.rectangle_shape_pool[e].h
+                      : 16.0f;
+        float scaledW = w * camera.zoom;
+        float scaledH = h * camera.zoom;
+
+        SDL_FPoint screenPos = camera.worldToScreen(
+            g_worldOverlay.position_pool[e].x,
+            g_worldOverlay.position_pool[e].y
+        );
+        float screenX = screenPos.x;
+        float screenY = screenPos.y;
+
+        // Try to render texture or animation
+        bool rendered = false;
+        if (g_worldOverlay.has_texture_ref[e]) {
+            rendered = render_entity_texture(renderer, g_worldOverlay, e,
+                                             screenX, screenY, camera.zoom);
+        }
+        if (!rendered && g_worldOverlay.has_animation_state[e]) {
+            rendered = render_entity_animation(renderer, g_worldOverlay, e,
+                                               screenX, screenY, camera.zoom);
+        }
+
+        // Fallback: draw a semi‑transparent rectangle
+        if (!rendered) {
+            SDL_FRect rect = { screenX, screenY, scaledW, scaledH };
+            SDL_SetRenderDrawColor(renderer, 90, 170, 255, 55);
+            SDL_RenderFillRect(renderer, &rect);
+            SDL_SetRenderDrawColor(renderer, 90, 170, 255, 150);
+            SDL_RenderRect(renderer, &rect);
+        }
+
+        // Metadata label (only if zoomed in enough)
+        if (scaledW > 28.0f && g_worldOverlay.has_metadata[e]) {
+            TTF_Text* t = TTF_CreateText(textEngine, font,
+                                         g_worldOverlay.metadata_pool[e].name.c_str(), 0);
+            if (t) {
+                TTF_SetTextColor(t, 150, 210, 255, 200);
+                TTF_DrawRendererText(t, screenX + 2.0f, screenY - 14.0f);
+                TTF_DestroyText(t);
+            }
+        }
+    }
+}
+
 int main(int argc, char* argv[]) {
     const float windowWidth  = 1600.0f;
     const float windowHeight = 900.0f;
@@ -233,14 +367,10 @@ int main(int argc, char* argv[]) {
 
     TTF_TextEngine* textEngine = TTF_CreateRendererTextEngine(renderer);
     g_resources.FontManager.Load("regularFont", getAssetsPath() + "fredoka.ttf", 20);
-    g_resources.FontManager.Load("visualFont", getAssetsPath() + "fira.ttf", 18);
     g_resources.FontManager.Load("largeFont", getAssetsPath() + "fira.ttf", 23);
 
     Gui::TextEditor textEditor(renderer, textEngine, g_resources.FontManager.Get("largeFont"), {0, 0, 100, 100});
     textEditor.setVisible(false);
-
-    VisualLogic::VisualScriptEditor visualEditor(renderer, textEngine, g_resources.FontManager.Get("visualFont"), window, {0, 0, 100, 100});
-    visualEditor.setVisible(false);
 
     std::filesystem::path projectsAbsPath = std::filesystem::absolute(getProjectsPath());
     Gui::FileExplorer fileExplorer(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window, projectsAbsPath.string(), "*.json");
@@ -317,63 +447,22 @@ int main(int argc, char* argv[]) {
         fileExplorer.setCallback([&](const std::string& path) {
             scene = sceneParser.loadFromFile(path); currentSceneFilePath = path;
             entityInspector.setProjectRoot(scene.projectRoot);
+            reloadWorldOverlay(currentSceneFilePath, scene.projectRoot);
             fileExplorer.reset();
         });
         fileExplorer.open();
     });
 
+    
     auto openScriptBtn = makeButton("O-Script", [&]() {
-        fileExplorer.setNewTitle("File Explorer - [*.cpp;*.h;*.txt;*.*]"); fileExplorer.setFilter("*.cpp;*.h;*.txt;*.*;*.json");
+        fileExplorer.setNewTitle("File Explorer - [*.cpp;*.h;*.ls;*.lh;*.txt;*.*]");
+        fileExplorer.setFilter("*.cpp;*.h;*.ls;*.txt;*.*;*.json");
         fileExplorer.setSaveMode(false, "");
         fileExplorer.setCallback([&](const std::string& path) {
             textEditor.loadFile(path);
-            showCanvas = false; showVisualEditor = false;
-            textEditor.setVisible(true); visualEditor.setVisible(false);
+            showCanvas = false;
+            textEditor.setVisible(true);
             SDL_StartTextInput(window); fileExplorer.reset();
-        });
-        fileExplorer.open();
-    });
-
-    auto openVisualBtn = makeButton("O-Visual", [&]() {
-        fileExplorer.setNewTitle("File Explorer - [*.cpp]"); fileExplorer.setFilter("*.cpp;*.*");
-        fileExplorer.setSaveMode(false, "");
-        fileExplorer.setCallback([&](const std::string& path) {
-            visualEditor.loadFromFile(path);
-            showCanvas = false; showVisualEditor = true;
-            textEditor.setVisible(false); visualEditor.setVisible(true);
-            SDL_StopTextInput(window); fileExplorer.reset();
-        });
-        fileExplorer.open();
-    });
-
-    auto saveVisualBtn = makeButton("S-Visual", [&]() {
-        if (visualEditor.isFileLoaded()) {
-            visualEditor.saveFile();
-            SDL_Log("[Editor] Visual script saved to %s", visualEditor.getFilePath().c_str());
-        } else {
-            fileExplorer.setNewTitle("Save Visual Script");
-            fileExplorer.setFilter("*.cpp");
-            fileExplorer.setSaveMode(true, ".cpp");
-            fileExplorer.setCallback([&](const std::string& path) {
-                visualEditor.setSaveTargetIfEmpty(path);
-                visualEditor.saveFile();
-                SDL_Log("[Editor] Visual script saved to %s", path.c_str());
-                fileExplorer.reset();
-            });
-            fileExplorer.open();
-        }
-    });
-
-    auto loadVisualBtn = makeButton("Load Visual", [&]() {
-        fileExplorer.setNewTitle("Load Visual Script");
-        fileExplorer.setFilter("*.cpp;*.*");
-        fileExplorer.setSaveMode(false, "");
-        fileExplorer.setCallback([&](const std::string& path) {
-            visualEditor.loadFromFile(path);
-            showCanvas = false; showVisualEditor = true;
-            textEditor.setVisible(false); visualEditor.setVisible(true);
-            SDL_StopTextInput(window);
-            fileExplorer.reset();
         });
         fileExplorer.open();
     });
@@ -386,14 +475,13 @@ int main(int argc, char* argv[]) {
             SDL_Log("[Editor] Scene saved to %s", currentSceneFilePath.c_str());
         }
         textEditor.saveFile();
-        if (visualEditor.isFileLoaded()) visualEditor.saveFile();
     });
 
     auto addEntBtn = makeButton("+ Entity", [dialog](){ modeBeforeDialog = currentEditMode; currentEditMode = EditMode::Dialog; dialog->open(); });
     auto addGuiElemBtn = makeButton("+ GuiElem", [dialog2]() { modeBeforeDialog = currentEditMode; currentEditMode = EditMode::Dialog; dialog2->open(); });
 
-    textEditor.onClose = [&]() { showCanvas = true; showVisualEditor = false; textEditor.setVisible(false); visualEditor.setVisible(false); SDL_StopTextInput(window); };
-    visualEditor.onClose = [&]() { showCanvas = true; showVisualEditor = false; textEditor.setVisible(false); visualEditor.setVisible(false); };
+    textEditor.onClose = [&]() { showCanvas = true; textEditor.setVisible(false);  SDL_StopTextInput(window); };
+   
 
     auto selectModeBtn = makeButton("Select", [](){ currentEditMode = EditMode::Select; });
     auto moveBtn = makeButton("Move", [](){ currentEditMode = EditMode::MoveWithMouse; });
@@ -405,13 +493,40 @@ int main(int argc, char* argv[]) {
         if (selectedGuiElem) { selectedGuiElem->editorSelected = false; selectedGuiElem = nullptr; }
     });
     auto inspectorToggleBtn = makeButton("Inspector", [](){ inspectorVisible = !inspectorVisible; });
-    auto canvasBtn = makeButton("Editor", [&textEditor, &visualEditor, window](){
+    auto canvasBtn = makeButton("Editor", [&textEditor, window](){
         showCanvas = !showCanvas;
-        if (showCanvas) { showVisualEditor = false; textEditor.setVisible(false); visualEditor.setVisible(false); SDL_StopTextInput(window); }
+        if (showCanvas) { textEditor.setVisible(false); SDL_StopTextInput(window); }
     });
-    auto visualBtn = makeButton("Visual", [&textEditor, &visualEditor](){
-        showCanvas = false; showVisualEditor = true;
-        textEditor.setVisible(false); visualEditor.setVisible(true);
+
+    auto worldOverlayBtn = makeButton("World Ref", [](){ g_showWorldOverlay = !g_showWorldOverlay; });
+
+
+    auto transpileLsBtn = makeButton("Ls To C++", [&textEditor]() {
+        if (!textEditor.isLogicScript) {
+            SDL_Log("[Editor] Transpile .ls: no .ls file is currently open.");
+            return;
+        }
+        textEditor.saveFile(); // transpile whatever's on disk == whatever's on screen
+        std::string err;
+        if (textEditor.transpileLogicScript(err)) {
+            SDL_Log("[Editor] LogicScript transpiled successfully.");
+        } else {
+            SDL_Log("[Editor] LogicScript transpile failed:\n%s", err.c_str());
+        }
+    });
+
+    auto transpileCppBtn = makeButton("C++ To LS", [&textEditor]() {
+        if (textEditor.isLogicScript) {
+            SDL_Log("[Editor] Transpile .cpp: no .cpp file is currently open.");
+            return;
+        }
+        textEditor.saveFile(); // transpile whatever's on disk == whatever's on screen
+        std::string err;
+        if (textEditor.transpileCPlusPlusScript(err)) {
+            SDL_Log("[Editor] C++ Script transpiled successfully.");
+        } else {
+            SDL_Log("[Editor] C++ Script transpile failed:\n%s", err.c_str());
+        }
     });
 
     auto toolbarContainer = std::make_unique<Gui::ScrollableContainer>(
@@ -423,13 +538,20 @@ int main(int argc, char* argv[]) {
     toolbarBox->setPadding(5); toolbarBox->setSpacing(5);
     toolbarBox->addChild(std::move(loadBtn));
     toolbarBox->addChild(std::move(openScriptBtn));
-    toolbarBox->addChild(std::move(openVisualBtn));
-    toolbarBox->addChild(std::move(saveVisualBtn));
     toolbarBox->addChild(std::move(saveBtn));
-    toolbarBox->addChild(std::move(addEntBtn)); toolbarBox->addChild(std::move(addGuiElemBtn));
-    toolbarBox->addChild(std::move(selectModeBtn)); toolbarBox->addChild(std::move(moveBtn)); toolbarBox->addChild(std::move(deleteBtn));
-    toolbarBox->addChild(std::move(selectSingleBtn)); toolbarBox->addChild(std::move(selectMultiBtn)); toolbarBox->addChild(std::move(deselectBtn));
-    toolbarBox->addChild(std::move(inspectorToggleBtn)); toolbarBox->addChild(std::move(canvasBtn)); toolbarBox->addChild(std::move(visualBtn));
+    toolbarBox->addChild(std::move(addEntBtn)); 
+    toolbarBox->addChild(std::move(addGuiElemBtn));
+    toolbarBox->addChild(std::move(selectModeBtn)); 
+    toolbarBox->addChild(std::move(moveBtn)); 
+    toolbarBox->addChild(std::move(deleteBtn));
+    toolbarBox->addChild(std::move(selectSingleBtn)); 
+    toolbarBox->addChild(std::move(selectMultiBtn)); 
+    toolbarBox->addChild(std::move(deselectBtn));
+    toolbarBox->addChild(std::move(inspectorToggleBtn)); 
+    toolbarBox->addChild(std::move(canvasBtn)); 
+    toolbarBox->addChild(std::move(transpileLsBtn));
+    toolbarBox->addChild(std::move(transpileCppBtn));
+    toolbarBox->addChild(std::move(worldOverlayBtn));
     toolbarBox->setRect({0, 0, windowWidth, 60});
 
     float totalW = toolbarBox->getPadding() * 2.0f;
@@ -486,7 +608,6 @@ int main(int argc, char* argv[]) {
                     inspector.commitAllFields();
                     if (!currentSceneFilePath.empty()) sceneParser.saveToFile(scene, currentSceneFilePath);
                     textEditor.saveFile();
-                    if (visualEditor.isFileLoaded()) visualEditor.saveFile();
                 }
                 // Camera: P + LMB = pan
                 if (e.key.key == SDLK_P) {
@@ -595,14 +716,46 @@ int main(int argc, char* argv[]) {
             }
 
             if (!showCanvas) {
-                if (showVisualEditor) { if (visualEditor.handleEvent(e, window, 0.0f, 0.0f)) continue; }
-                else { if (textEditor.handleEvent(e, window, 0.0f, 0.0f)) continue; }
+                if (textEditor.handleEvent(e, window, 0.0f, 0.0f)) continue;
             }
 
             bool consumedByScrollbar = false;
             if (showCanvas) {
                 if (verticalScrollbar.handleEvent(e)) consumedByScrollbar = true;
                 if (horizontalScrollbar.handleEvent(e)) consumedByScrollbar = true;
+            }
+
+            // ── World Ref: D + LMB = delete an entity from the .world overlay ──
+            // Only takes effect while the overlay is actually visible (the
+            // "World Ref" button is toggled on) -- when it's hidden there's
+            // nothing on screen belonging to it to click, so D+click isn't
+            // processed here at all and falls through to whatever normal
+            // Select/Move/Delete handling would otherwise do with it.
+            if (g_showWorldOverlay && e.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+                e.button.button == SDL_BUTTON_LEFT && isInsideCanvas((float)e.button.x, (float)e.button.y)) {
+                const bool* keys = SDL_GetKeyboardState(nullptr);
+                bool dHeld = keys && keys[SDL_SCANCODE_D];
+                if (dHeld) {
+                    SDL_FPoint worldPt = g_editorCamera.screenToWorld((float)e.button.x, (float)e.button.y);
+                    Entity topmostOverlayEntity = (Entity)-1;
+                    int maxZ = 0; bool found = false;
+                    for (Entity oe : g_worldOverlayEntities) {
+                        if (!g_worldOverlay.has_position[oe]) continue;
+                        float w = g_worldOverlay.has_rectangle_shape[oe] ? g_worldOverlay.rectangle_shape_pool[oe].w : 16.0f;
+                        float h = g_worldOverlay.has_rectangle_shape[oe] ? g_worldOverlay.rectangle_shape_pool[oe].h : 16.0f;
+                        if (worldPt.x >= g_worldOverlay.position_pool[oe].x && worldPt.x <= g_worldOverlay.position_pool[oe].x + w &&
+                            worldPt.y >= g_worldOverlay.position_pool[oe].y && worldPt.y <= g_worldOverlay.position_pool[oe].y + h) {
+                            int z = g_worldOverlay.has_z_index[oe] ? g_worldOverlay.z_index_pool[oe].z : 0;
+                            if (!found || z > maxZ) { maxZ = z; topmostOverlayEntity = oe; found = true; }
+                        }
+                    }
+                    if (topmostOverlayEntity != (Entity)-1) deleteWorldOverlayEntity(topmostOverlayEntity);
+                    // Swallow the click either way while D is held and the
+                    // overlay is showing, so it can't also fall through to
+                    // select/move/delete something in the real scene
+                    // underneath the overlay.
+                    continue;
+                }
             }
 
             // ── Camera: P + LMB = pan ───────────────────────────────────────
@@ -701,8 +854,7 @@ int main(int argc, char* argv[]) {
                 showVirtualKeyboard = false;
                 toolbarContainer->handleGamepad(cursorX, cursorY, 0.0f, 0.0f, window, confirmNow, confirmLastFrame);
                 if (!showCanvas) {
-                    if (showVisualEditor) visualEditor.handleGamepad(cursorX, cursorY, 0.0f, 0.0f, window, confirmNow, confirmLastFrame);
-                    else textEditor.handleGamepad(cursorX, cursorY, 0.0f, 0.0f, window, confirmNow, confirmLastFrame);
+                    textEditor.handleGamepad(cursorX, cursorY, 0.0f, 0.0f, window, confirmNow, confirmLastFrame);
                 }
                 edit_object_with_editor_gamepad(world, scene.guiElements, selectedGuiElem, cursorX, cursorY, confirmNow, confirmLastFrame);
 
@@ -788,6 +940,7 @@ int main(int argc, char* argv[]) {
 
         if (showCanvas) {
             render_editor_canvas(renderer);
+            draw_world_overlay(renderer, textEngine, g_resources.FontManager.Get("regularFont"), g_editorCamera);
             render_system_and_scene_gui_in_editor(
                 renderer, textEngine, g_resources.FontManager.Get("regularFont"),
                 world, canvasViewX, canvasViewY,
@@ -803,8 +956,6 @@ int main(int argc, char* argv[]) {
             float containerWidth = 140;
             canvasTools->setRect({ toolsX - containerWidth, toolsY, containerWidth, 40 });
             canvasTools->render(0.0f, 0.0f);
-        } else if (showVisualEditor) {
-            visualEditor.setRect({canvasViewX, canvasViewY, canvasViewW, canvasViewH}); visualEditor.render(0.0f, 0.0f);
         } else {
             textEditor.setRect({canvasViewX, canvasViewY, canvasViewW, canvasViewH}); textEditor.render(0.0f, 0.0f);
         }

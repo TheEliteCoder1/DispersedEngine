@@ -3,14 +3,14 @@
     "entities": [
         {
             "components": {
-                "AnimationState": "resources/player.animres",
+                "AnimationState": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\player.animres",
                 "Metadata": {
                     "name": "Player"
                 },
-                "PhysicsBody": "resources/Player_0.physicsres",
+                "PhysicsBody": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\Player_0.physicsres",
                 "Position": {
-                    "x": 420.0,
-                    "y": 246.5
+                    "x": 7470.0,
+                    "y": 7435.5
                 },
                 "RectangleShape": {
                     "h": 128.0,
@@ -44,13 +44,13 @@
         },
         {
             "components": {
-                "AnimationState": "resources/flower_2.animres",
+                "AnimationState": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\flower_2.animres",
                 "Metadata": {
                     "name": "flower"
                 },
                 "Position": {
-                    "x": 600.0,
-                    "y": 144.5
+                    "x": 7992.60009765625,
+                    "y": 6502.60009765625
                 },
                 "RectangleShape": {
                     "h": 45.0,
@@ -63,13 +63,13 @@
         },
         {
             "components": {
-                "AnimationState": "resources/grass_3.animres",
+                "AnimationState": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\grass_3.animres",
                 "Metadata": {
                     "name": "grass"
                 },
                 "Position": {
-                    "x": 599.5999755859375,
-                    "y": 302.6000061035156
+                    "x": 7062.7998046875,
+                    "y": 7466.7998046875
                 },
                 "RectangleShape": {
                     "h": 60.0,
@@ -82,14 +82,14 @@
         },
         {
             "components": {
-                "AnimationState": "resources/catcus_4.animres",
+                "AnimationState": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\catcus_4.animres",
                 "Metadata": {
                     "name": "catcus"
                 },
-                "PhysicsBody": "resources/Catcus.physicsres",
+                "PhysicsBody": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\Catcus.physicsres",
                 "Position": {
-                    "x": 526.0,
-                    "y": 262.0
+                    "x": 9997.2001953125,
+                    "y": 9999.0
                 },
                 "RectangleShape": {
                     "h": 128.0,
@@ -102,14 +102,14 @@
         },
         {
             "components": {
-                "AnimationState": "resources/emptyTree_5.animres",
+                "AnimationState": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\emptyTree_5.animres",
                 "Metadata": {
                     "name": "emptyTree"
                 },
-                "PhysicsBody": "resources/Tree.physicsres",
+                "PhysicsBody": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\Tree.physicsres",
                 "Position": {
-                    "x": 780.0,
-                    "y": 238.5
+                    "x": 6934.39990234375,
+                    "y": 9735.400390625
                 },
                 "RectangleShape": {
                     "h": 128.0,
@@ -122,13 +122,13 @@
         },
         {
             "components": {
-                "AnimationState": "resources/iceCrystal_6.animres",
+                "AnimationState": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\iceCrystal_6.animres",
                 "Metadata": {
                     "name": "iceCrystal"
                 },
                 "Position": {
-                    "x": 650.0,
-                    "y": 206.5
+                    "x": 631.2999877929688,
+                    "y": 29.700000762939453
                 },
                 "RectangleShape": {
                     "h": 90.0,
@@ -141,14 +141,14 @@
         },
         {
             "components": {
-                "AnimationState": "resources/snowyEmptyTree_7.animres",
+                "AnimationState": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\snowyEmptyTree_7.animres",
                 "Metadata": {
                     "name": "snowyEmptyTree"
                 },
-                "PhysicsBody": "resources/Tree.physicsres",
+                "PhysicsBody": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\Tree.physicsres",
                 "Position": {
-                    "x": 665.0,
-                    "y": 397.5
+                    "x": 92.80000305175781,
+                    "y": 654.0999755859375
                 },
                 "RectangleShape": {
                     "h": 128.0,
@@ -156,6 +156,174 @@
                 },
                 "ZIndex": {
                     "z": 4
+                }
+            }
+        },
+        {
+            "components": {
+                "AnimationState": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\water.animres",
+                "Metadata": {
+                    "name": "puddle"
+                },
+                "PhysicsBody": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\water.physicsres",
+                "Position": {
+                    "x": 9388.099609375,
+                    "y": 6592.2998046875
+                },
+                "RectangleShape": {
+                    "h": 192.0,
+                    "w": 192.0
+                },
+                "ZIndex": {
+                    "z": 5
+                }
+            }
+        },
+        {
+            "components": {
+                "AnimationState": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\fruitTree.animres",
+                "Metadata": {
+                    "name": "fruitTree"
+                },
+                "PhysicsBody": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\resources\\Tree.physicsres",
+                "Position": {
+                    "x": 9303.2001953125,
+                    "y": 6872.2998046875
+                },
+                "RectangleShape": {
+                    "h": 128.0,
+                    "w": 128.0
+                },
+                "ZIndex": {
+                    "z": 5
+                }
+            }
+        },
+        {
+            "components": {
+                "Metadata": {
+                    "name": "path"
+                },
+                "Position": {
+                    "x": 7642.60009765625,
+                    "y": 7426.89990234375
+                },
+                "RectangleShape": {
+                    "h": 50.0,
+                    "w": 50.0
+                },
+                "TileMap": {
+                    "cellHeight": 105.0,
+                    "cellOffsets": [
+                        [
+                            0.0,
+                            0.0
+                        ],
+                        [
+                            0.0,
+                            0.0
+                        ],
+                        [
+                            0.0,
+                            0.0
+                        ],
+                        [
+                            0.3876953125,
+                            97.91845703125
+                        ],
+                        [
+                            326.7841796875,
+                            97.7705078125
+                        ],
+                        [
+                            325.8896484375,
+                            97.77001953125
+                        ]
+                    ],
+                    "cellWidth": 328.0,
+                    "cells": [
+                        [
+                            0,
+                            -1
+                        ],
+                        [
+                            1,
+                            -1
+                        ],
+                        [
+                            2,
+                            -1
+                        ],
+                        [
+                            3,
+                            -5
+                        ],
+                        [
+                            3,
+                            -5
+                        ],
+                        [
+                            4,
+                            -5
+                        ]
+                    ],
+                    "snapEnabled": false,
+                    "textureName": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\assets\\textures\\path.svg"
+                },
+                "ZIndex": {
+                    "z": 6
+                }
+            }
+        },
+        {
+            "components": {
+                "Metadata": {
+                    "name": "path2"
+                },
+                "Position": {
+                    "x": 7648.2001953125,
+                    "y": 7269.2001953125
+                },
+                "RectangleShape": {
+                    "h": 50.0,
+                    "w": 50.0
+                },
+                "TileMap": {
+                    "cellHeight": 329.0,
+                    "cellOffsets": [
+                        [
+                            23.6552734375,
+                            157.70947265625
+                        ],
+                        [
+                            51.931640625,
+                            60.96337890625
+                        ],
+                        [
+                            51.810546875,
+                            54.189453125
+                        ]
+                    ],
+                    "cellWidth": 106.0,
+                    "cells": [
+                        [
+                            9,
+                            -1
+                        ],
+                        [
+                            18,
+                            -1
+                        ],
+                        [
+                            18,
+                            0
+                        ]
+                    ],
+                    "snapEnabled": false,
+                    "textureName": "C:\\Users\\daeli\\Documents\\DispersedEngine\\projects\\OpenWorld\\assets\\textures\\path90deg.svg"
+                },
+                "ZIndex": {
+                    "z": 7
                 }
             }
         }

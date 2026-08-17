@@ -3,11 +3,12 @@ cmake_minimum_required(VERSION 3.20)
 set(PROJECT_SOURCES
     scripts/game.cpp
     scripts/losing_screen.cpp
+    scripts/main_menu.cpp
 )
 
 add_executable(OpenWorld ${PROJECT_SOURCES})
 
-target_compile_definitions(OpenWorld PRIVATE PROJECT_SCRIPT_BUILD=1 LOSING_SCREEN_STANDALONE=1)
+target_compile_definitions(OpenWorld PRIVATE PROJECT_SCRIPT_BUILD=1 LOSING_SCREEN_STANDALONE=1 MAIN_MENU_STANDALONE=1)
 
 target_link_libraries(OpenWorld PRIVATE DispersedEngine)
 
@@ -37,4 +38,4 @@ if(EMSCRIPTEN)
     )
 else()
     set_target_properties(OpenWorld PROPERTIES SUFFIX ".exe")
-endif() 
+endif()

@@ -1,0 +1,13 @@
+{
+    "are_biomes_and_entities_generated": false,
+    "entities": [],
+    "gui_elements": [
+        {
+            "type": "Button",
+            "x": 700, "y": 480, "w": 200, "h": 60,
+            "text": "Campaign"
+        }
+    ],
+    "scene_name": "MainMenu",
+    "script_attached": "OpenWorld/scripts/main_menu.cpp"
+}

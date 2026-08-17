@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="26"
+   height="26"
+   viewBox="0 0 6.8791665 6.8791665"
+   version="1.1"
+   id="svg1"
+   inkscape:version="1.4.2 (f4327f4, 2025-05-13)"
+   sodipodi:docname="healthbarIcon.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:document-units="px"
+     inkscape:zoom="8.0126864"
+     inkscape:cx="31.138121"
+     inkscape:cy="29.016486"
+     inkscape:window-width="1920"
+     inkscape:window-height="997"
+     inkscape:window-x="-8"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1" />
+  <defs
+     id="defs1" />
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1">
+    <path
+       style="fill:#ff2a2d;fill-opacity:1;stroke:#000000;stroke-width:0;stroke-opacity:0.595349"
+       d="m 3.5353364,6.8682748 c 0,0 -2.78244841,-2.1720664 -3.24329088,-3.7630696 C 0.04715185,2.2597391 0.04689831,1.1044574 0.67968985,0.49303985 1.0944224,0.09231585 2.249486,-0.03607452 2.6881021,0.33869704 3.380365,0.93019488 3.0824819,0.93193538 3.4927652,1.8265015 3.7621168,0.90627473 3.6908958,0.88917335 4.2024313,0.30018093 4.604472,-0.16273682 5.8084959,0.20925201 6.2488468,0.63528649 6.7820974,1.151201 6.949191,2.0695377 6.7915486,2.7948489 6.4222563,4.4939625 3.5353364,6.8682748 3.5353364,6.8682748 Z"
+       id="path1"
+       sodipodi:nodetypes="cssscsssc" />
+  </g>
+</svg>

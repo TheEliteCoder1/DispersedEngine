@@ -69,6 +69,53 @@ namespace MusicAndSfx {
                 SDL_DestroyProperties(props);
             }
 
+            void PlayLoopingSfx(const std::string& name, float volume = 1.0f, float pitch = 1.0f)
+            {
+                auto sample = m_samples.find(name);
+                if(sample == m_samples.end()) return;
+
+                auto existing = m_activeSfx.find(name);
+                if(existing != m_activeSfx.end()) return;
+
+                MIX_Track* track = MIX_CreateTrack(m_mixer);
+                if(!track) return;
+
+                MIX_SetTrackAudio(track, sample->second);
+                MIX_SetTrackGain(track, std::clamp(volume, 0.0f, 1.0f));
+
+                SDL_PropertiesID props = SDL_CreateProperties();
+                SDL_SetNumberProperty(props, "sdl3.mixer.frequency_ratio", (Sint64)(pitch * 1000.0f));
+                SDL_SetNumberProperty(props, MIX_PROP_PLAY_LOOPS_NUMBER, -1);   // infinite loops
+
+                MIX_SetTrackLoops(track, -1);   // keep for safety
+                m_activeSfx[name] = track;
+                MIX_PlayTrack(track, props);
+                SDL_DestroyProperties(props);
+            }
+
+            void StopSfx(const std::string& name)
+            {
+                auto it = m_activeSfx.find(name);
+
+                if(it == m_activeSfx.end())
+                    return;
+
+
+                MIX_Track* track = it->second;
+
+
+                if(track)
+                {
+                    MIX_StopTrack(
+                        track,
+                        0
+                    );
+                }
+
+
+                m_activeSfx.erase(it);
+            }
+
             // Plays a song with an option to loop indefinitely
             void PlaySong(const std::string& name, bool loop = true, float volume = 0.5f) {
                 auto it = m_samples.find(name);
@@ -118,6 +165,7 @@ namespace MusicAndSfx {
             MIX_Mixer* m_mixer = nullptr;
             std::unordered_map<std::string, MIX_Audio*> m_samples;
             std::unordered_map<std::string, MIX_Audio*> m_pathToAudio;
+            std::unordered_map<std::string, MIX_Track*> m_activeSfx;
     };
 
 };

@@ -1,10 +1,15 @@
 #pragma once
 #include "engine.h"
 #include "particles.h"
-#include <vector>
-#include <string>
-#include <functional>
-#include <random>
+
+constexpr float healthbarOffsetY = -30.0f;
+constexpr float waterbarOffsetY = -60.0f;
+constexpr float foodbarOffsetY = -90.0f;
+constexpr SDL_FRect barIconsrcRect = {0,0,26,26};
+constexpr float barOffsetX = -30.0f;
+constexpr float WaterNFoodMaxValue = 200.0f;
+constexpr float WaterNFoodBarHeight = 12.0f;
+constexpr float WaterNFoodBarWidth = 100.0f;
 
 struct GameContext {
     SDL_Renderer*       renderer        = nullptr;
@@ -19,6 +24,9 @@ struct GameContext {
     float gamepadCursorX = 0.0f;
     float gamepadCursorY = 0.0f;
     bool confirmDownLastFrame = false;  
+    SDL_Texture* healthbarIcon;
+    SDL_Texture* waterbarIcon;
+    SDL_Texture* foodbarIcon;
 };
 
 
@@ -29,45 +37,32 @@ struct Biome {
     int id = 0;
 };
 
-class Healthbar {
+class WaterBar {
 public:
-    Healthbar(float maxHealth = 100.0f, float barWidth = 100.0f, float barHeight = 12.0f)
-        : maxHealth(maxHealth), currentHealth(maxHealth), barWidth(barWidth), barHeight(barHeight) {}
+    WaterBar(float max = 100.0f, float width = 100.0f, float height = 12.0f);
+    // Virtual destructor ensures proper cleanup of derived classes
+    virtual ~WaterBar() = default; 
+    void damage(float amount);
+    void heal(float amount);
+    float getCurrentVal() const;
+    float getPercentage() const;
+    virtual void render(SDL_Renderer* renderer, float screenX, float screenY);
 
-    void damage(float amount) { currentHealth = std::max(0.0f, currentHealth - amount); }
-    void heal(float amount)   { currentHealth = std::min(maxHealth, currentHealth + amount); }
-    float getCurrentVal() const { return currentHealth; }
-
-    void render(SDL_Renderer* renderer, float screenX, float screenY) {
-        if (currentHealth <= 0.0f) return; // optional
-
-        // Background (grey outline)
-        SDL_FRect bgRect = { screenX, screenY, barWidth, barHeight };
-        SDL_SetRenderDrawColor(renderer, 40, 40, 40, 255);
-        SDL_RenderRect(renderer, &bgRect); // optional border
-
-        // Fill (colored portion)
-        float fillWidth = (currentHealth / maxHealth) * barWidth;
-        SDL_FRect fillRect = { screenX, screenY, fillWidth, barHeight };
-        SDL_Color color = getHealthColor(currentHealth / maxHealth);
-        SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
-        SDL_RenderFillRect(renderer, &fillRect);
-    }
-
-private:
-    float maxHealth;
-    float currentHealth;
-    float barWidth;
-    float barHeight;
-
-    SDL_Color getHealthColor(float ratio) const {
-        if (ratio >= 0.6f)  return { 0, 200, 0, 255 };       // green
-        if (ratio >= 0.4f)  return { 200, 200, 0, 255 };     // yellow
-        if (ratio >= 0.2f)  return { 255, 165, 0, 255 };     // orange
-        return { 200, 0, 0, 255 };                           // red
-    }
+protected:
+    float maxValue, currentValue;
+    float barWidth, barHeight;
 };
- 
+
+class FoodBar : public WaterBar {
+    public:
+        using WaterBar::WaterBar; // inherits constructor
+        // virtual destructor is already used behind the scenes
+        // render method is overrided
+        void render(SDL_Renderer* renderer, float screenX, float screenY) override;
+};
+
+// Forward declaration for MathDialog (defined in game.cpp)
+class MathDialog;
 
 class GameScript : public ScriptBase {
 public:
@@ -82,7 +77,16 @@ public:
     // for a newly-loaded scene.
     void setContext(void* context) override { ctx = static_cast<GameContext*>(context); }
 
+    float normalSpeed = 300.0f;   // your default speed
     float moveSpeed = 300.0f;
+    float slowSpeed = 150.0f;
+
+    int puddleContactCount = 0;
+    bool isInPuddle = false;
+
+
+
+    void handleSensorTouch(b2ShapeId sensorShape, b2ShapeId visitorShape, bool isBegin);
 
     // Biome grid configuration
     std::vector<Biome> biomes;
@@ -91,10 +95,42 @@ public:
     int biomeTileCountX = 5;
     int biomeTileCountY = 5;
 
+    // Water
+    WaterBar waterbar;
+    float waterDepletionRate = 0.3f;        // units per second
+    bool isDrinking = false;
+    float drinkTimer = 0.0f;
+    float drinkDuration = 2.0f;             // seconds
+
+    // Food
+    FoodBar foodbar;
+    float foodDepletionRate = 0.1f;
+    bool isEating = false;
+    float eatTimer = 0.0f;
+    float eatDuration = 2.0f;
+
+
+
+    bool movementLocked = false;            // blocks player input
+
+    // Math dialog
+    std::unique_ptr<MathDialog> mathDialog;
+    bool isMathDialogActive = false;
+
+    // Methods
+    void showMathDialog();
+    void onMathAnswer(bool correct);
+
+    void startDrinking();
+    void finishDrinking();
+
+    void startEating();
+    void finishEating();
+
     Entity lastHitEntity = (Entity)-1;
     float hitCooldown = 0.0f;
 
-    Healthbar healthbar;
+    Tools::Healthbar healthbar;
 
     // Drives the black-particle "vanish" effect (see particles.h). Started
     // once when the player dies (see checkCollisions), ticked every frame
@@ -110,7 +146,7 @@ public:
     bool deathState = false;
 
     // Engine APIs
-    Tools::TileMap tileMap;
+    Tools::BackgroundMap bgMap;
     Tools::Minimap minimap;
 
     bool drawPhysicsDebug = false;
@@ -129,8 +165,11 @@ public:
     Entity emptyTree = (Entity)-1;
     Entity iceCrystal = (Entity)-1;
     Entity snowyEmptyTree = (Entity)-1;
+    Entity fruitTree = (Entity)-1;
+    Entity puddle = (Entity)-1;
 
     std::vector<Entity> decorationEntities;
+    std::vector<Entity> importantEntities;
 
     // Controls whether the one-time biome/decoration generation guard
     // (Scene::areBiomesAndEntitiesGenerated) is honored:
@@ -142,8 +181,10 @@ public:
     bool shouldStopRegeneration = true;
 
     void buildBiomeGrid();
-    void rebuildTileMap();
+    void rebuildBgMap();
     void spawnRandomDecorations();
+    void checkContacts(float dt);
+    float puddleCooldown = 0.0f;   // prevents multiple triggers per frame
 
     Entity player = (Entity)-1;
     Entity background = (Entity)-1;
@@ -152,6 +193,7 @@ public:
     void onUpdate(float dt) override;
     void onDraw() override;
     void onEnd() override;
+    void onEvent(const SDL_Event& e) override;
 
 private:
     float elapsed = 0.0f;

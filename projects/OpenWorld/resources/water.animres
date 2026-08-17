@@ -1,0 +1,23 @@
+{
+    "activeClipIndex": 0,
+    "clips": [
+        {
+            "frameHeight": 192.0,
+            "frameWidth": 192.0,
+            "imageFrames": [
+                "assets\\textures\\puddle.svg",
+                "assets\\textures\\puddle-2.svg",
+                "assets\\textures\\puddle-3.svg",
+                "assets\\textures\\puddle-4.svg",
+                "assets\\textures\\puddle-5.svg",
+                "assets\\textures\\puddle-6.svg",
+                "assets\\textures\\puddle-7.svg",
+                "assets\\textures\\puddle-8.svg"
+            ],
+            "isPlaying": true,
+            "loop": true,
+            "name": "default",
+            "speed": 10.0
+        }
+    ]
+}

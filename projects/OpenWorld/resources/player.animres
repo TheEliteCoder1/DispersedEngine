@@ -32,6 +32,32 @@
             "frameHeight": 128.0,
             "frameWidth": 64.0,
             "imageFrames": [
+                "assets\\textures\\player-walk-down-1-flip.svg",
+                "assets\\textures\\player-walk-down-2-flip.svg",
+                "assets\\textures\\player-walk-down-3-flip.svg"
+            ],
+            "isPlaying": false,
+            "loop": true,
+            "name": "walk-flip",
+            "speed": 6.0
+        },
+        {
+            "frameHeight": 128.0,
+            "frameWidth": 64.0,
+            "imageFrames": [
+                "assets\\textures\\player-walk-up-1.svg",
+                "assets\\textures\\player-walk-up-2.svg",
+                "assets\\textures\\player-walk-up-3.svg"
+            ],
+            "isPlaying": false,
+            "loop": true,
+            "name": "walk-up",
+            "speed": 6.0
+        },
+        {
+            "frameHeight": 128.0,
+            "frameWidth": 64.0,
+            "imageFrames": [
                 "assets\\textures\\player-dying-1.svg",
                 "assets\\textures\\player-dying-2.svg",
                 "assets\\textures\\player-dying-3.svg",
@@ -41,6 +67,41 @@
             "loop": true,
             "name": "death",
             "speed": 6.0
+        },
+        {
+            "frameHeight": 128.0,
+            "frameWidth": 64.0,
+            "imageFrames": [
+                "assets\\textures\\player-drink-1.svg",
+                "assets\\textures\\player-drink-2.svg",
+                "assets\\textures\\player-drink-3.svg",
+                "assets\\textures\\player-drink-4.svg",
+                "assets\\textures\\player-drink-5.svg",
+                "assets\\textures\\player-drink-6.svg",
+                "assets\\textures\\player-drink-7.svg",
+                "assets\\textures\\player-drink-8.svg"
+            ],
+            "isPlaying": false,
+            "loop": true,
+            "name": "drink",
+            "speed": 8.0
+        },
+        {
+            "frameHeight": 128.0,
+            "frameWidth": 64.0,
+            "imageFrames": [
+                "assets\\textures\\player-eat-1.svg",
+                "assets\\textures\\player-eat-1pt5.svg",
+                "assets\\textures\\player-eat-2.svg",
+                "assets\\textures\\player-eat-3.svg",
+                "assets\\textures\\player-eat-4.svg",
+                "assets\\textures\\player-eat-5.svg",
+                "assets\\textures\\player-eat-6.svg"
+            ],
+            "isPlaying": false,
+            "loop": true,
+            "name": "eat",
+            "speed": 8.0
         }
     ]
 }

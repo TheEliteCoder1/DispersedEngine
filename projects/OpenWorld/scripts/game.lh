@@ -1,0 +1,201 @@
+// Auto-generated from C:\Users\daeli\Documents\DispersedEngine\projects\OpenWorld\scripts\game.h
+#pragma once
+@import "engine.h"
+@import "particles.h"
+
+stayexpr spnum healthbarOffsetY ~ -30.0f
+stayexpr spnum waterbarOffsetY ~ -60.0f
+stayexpr spnum foodbarOffsetY ~ -90.0f
+stayexpr FRect barIconsrcRect ~ {0,0,26,26}
+stayexpr spnum barOffsetX ~ -30.0f
+stayexpr spnum WaterNFoodMaxValue ~ 200.0f
+stayexpr spnum WaterNFoodBarHeight ~ 12.0f
+stayexpr spnum WaterNFoodBarWidth ~ 100.0f
+
+struct GameCtx {
+    Rnd*       renderer        ~ noptr
+    TTF_TxtEng*     textEngine      ~ noptr
+    Window*         window          ~ noptr
+    Scene*              scene           ~ noptr
+    Tools:Camera       camera
+    SDL_Gamepad*        gamepad         ~ noptr
+    Physics:PhysicsWorld* physicsWorld ~ noptr  
+    SceneParser*        sceneParser     ~ noptr   
+    std:string         sceneFilePath   
+    spnum gamepadCursorX ~ 0.0f
+    spnum gamepadCursorY ~ 0.0f
+    flip confirmDownLastFrame ~ false  
+    SDL_Texture* healthbarIcon
+    SDL_Texture* waterbarIcon
+    SDL_Texture* foodbarIcon
+}
+
+
+struct Biome {
+    std:string textureName
+    num gridX ~ 0
+    num gridY ~ 0
+    num id ~ 0
+}
+
+class WaterBar {
+public:
+    WaterBar(spnum max ~ 100.0f, spnum width ~ 100.0f, spnum height ~ 12.0f)
+    // Virtual destructor ensures proper cleanup of derived classes
+    virtual ~WaterBar() ~ default 
+    none damage(spnum amount)
+    none heal(spnum amount)
+    spnum getCurrentVal() stay
+    spnum getPercentage() stay
+    virtual none render(Rnd* renderer, spnum screenX, spnum screenY)
+
+protected:
+    spnum maxValue, currentValue
+    spnum barWidth, barHeight
+}
+
+class FoodBar : public WaterBar {
+    public:
+        using WaterBar:WaterBar // inherits constructor
+        // virtual destructor is already used behind the scenes
+        // render method is overrided
+        none render(Rnd* renderer, spnum screenX, spnum screenY) override
+}
+
+// Forward declaration for MathDialog (defined in game.cpp)
+class MathDialog
+
+class GameScript : public ScriptBase {
+public:
+    std:string getName() stay override { ret "GameScript" }
+    GameCtx* ctx ~ noptr
+
+    // engine.h's ScriptRegistry/SceneParser/change_scene machinery only
+    // knows ScriptBase, not GameContext (a project-defined type), so the
+    // context is handed over as void* and cast back here. Called once
+    // right after ScriptRegistry creates this instance for a scene, and
+    // again by change_scene() whenever this script becomes the active one
+    // for a newly-loaded scene.
+    none setContext(none* context) override { ctx ~ static_cast<GameCtx*>(context) }
+
+    spnum normalSpeed ~ 300.0f   // your default speed
+    spnum moveSpeed ~ 300.0f
+    spnum slowSpeed ~ 150.0f
+
+    num puddleContactCount ~ 0
+    flip isInPuddle ~ false
+
+
+
+    none handleSensorTouch(b2ShapeId sensorShape, b2ShapeId visitorShape, flip isBegin)
+
+    // Biome grid configuration
+    std:vector<Biome> biomes
+    num biomeGridW ~ 3
+    num biomeGridH ~ 5
+    num biomeTileCountX ~ 5
+    num biomeTileCountY ~ 5
+
+    // Water
+    WaterBar waterbar
+    spnum waterDepletionRate ~ 0.3f        // units per second
+    flip isDrinking ~ false
+    spnum drinkTimer ~ 0.0f
+    spnum drinkDuration ~ 2.0f             // seconds
+
+    // Food
+    FoodBar foodbar
+    spnum foodDepletionRate ~ 0.1f
+    flip isEating ~ false
+    spnum eatTimer ~ 0.0f
+    spnum eatDuration ~ 2.0f
+
+
+
+    flip movementLocked ~ false            // blocks player input
+
+    // Math dialog
+    std:unique_ptr<MathDialog> mathDialog
+    flip isMathDialogActive ~ false
+
+    // Methods
+    none showMathDialog()
+    none onMathAnswer(flip correct)
+
+    none startDrinking()
+    none finishDrinking()
+
+    none startEating()
+    none finishEating()
+
+    Entity lastHitEntity ~ (Entity)-1
+    spnum hitCooldown ~ 0.0f
+
+    Tools:Healthbar healthbar
+
+    // Drives the black-particle "vanish" effect (see particles.h). Started
+    // once when the player dies (see checkCollisions), ticked every frame
+    // from onUpdate(), and drawn from onDraw(). A vanish's own progress and
+    // particles live entirely inside this object, so nothing else on
+    // GameScript needs to track fade state by hand.
+    Particles:VanishSystem vanishEffects
+
+    none checkCollisions(spnum dt)
+    
+    spnum knockbackTimer ~ 0.0f
+    spnum knockbackSpeed ~ 500.0f
+    flip deathState ~ false
+
+    // Engine APIs
+    Tools:BackgroundMap bgMap
+    Tools:Minimap minimap
+
+    flip drawPhysicsDebug ~ false
+
+    // --- Y-Sorting ---
+    flip ySortEnabled ~ true
+
+    // Which point of each entity's rect is used for depth sorting.
+    // Bottom = feet-based sorting (recommended for top-down games with
+    // mixed-height entities like a tall player and short grass).
+    Tools:YSortAnchor ySortAnchor ~ Tools:YSortAnchor:Bottom
+
+    Entity flower ~ (Entity)-1
+    Entity grass  ~ (Entity)-1
+    Entity catcus ~ (Entity)-1
+    Entity emptyTree ~ (Entity)-1
+    Entity iceCrystal ~ (Entity)-1
+    Entity snowyEmptyTree ~ (Entity)-1
+    Entity fruitTree ~ (Entity)-1
+    Entity puddle ~ (Entity)-1
+
+    std:vector<Entity> decorationEntities
+    std:vector<Entity> importantEntities
+
+    // Controls whether the one-time biome/decoration generation guard
+    // (Scene::areBiomesAndEntitiesGenerated) is honored:
+    //   true  -> once biomes/decorations are generated for a scene, later
+    //            onStart() calls (e.g. after a reload) skip generation.
+    //   false -> ignore the saved flag and always (re)generate biomes and
+    //            decoration entities on every onStart(), useful for
+    //            iterating on generation logic during development.
+    flip shouldStopRegeneration ~ true
+
+    none buildBiomeGrid()
+    none rebuildBgMap()
+    none spawnRandomDecorations()
+    none checkContacts(spnum dt)
+    spnum puddleCooldown ~ 0.0f   // prevents multiple triggers per frame
+
+    Entity player ~ (Entity)-1
+    Entity background ~ (Entity)-1
+
+    none onStart() override
+    none onUpdate(spnum dt) override
+    none onDraw() override
+    none onEnd() override
+    none onEvent(stay Event& e) override
+
+private:
+    spnum elapsed ~ 0.0f
+}

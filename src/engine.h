@@ -25,6 +25,7 @@
 #include "music.h"
 #include "texture.h"
 #include "font.h"
+#include "transpile.h"
 
 // ============================================================
 // Platform Detection and Path Helpers
@@ -240,6 +241,18 @@ struct VertexDragState {
 inline VertexDragState vertexDrag;
 inline bool isDraggingVertex = false;
 
+// --- Tilemap cell move (hold S + right-click drag on a painted cell) ---
+struct TileCellDragState {
+    bool active = false;
+    Entity target = (Entity)-1;
+    int cellIndex = -1;       // index into tm.cells / tm.cellOffsets being moved
+    float grabDX = 0.0f;      // cursor position relative to the cell's top-left
+    float grabDY = 0.0f;      // at the moment the drag started, in world units
+};
+inline TileCellDragState tileCellDrag;
+
+static constexpr float LOW_HEALTH_THRESHOLD = 0.3f;
+
 namespace Components {
     struct Metadata { std::string name; };
     struct Position { float x = 0.0f, y = 0.0f; };
@@ -374,6 +387,22 @@ namespace Components {
         float alpha = 1.0f;          // 0.0 .. 1.0
         SDL_Color tint = {255,255,255,255};   // (not used yet)
     };
+
+    struct TileMap {
+        std::string textureName;
+        float cellWidth = 32.0f;
+        float cellHeight = 32.0f;
+        std::vector<std::pair<int,int>> cells; // anchor grid coordinates (col, row)
+        // Per-cell pixel offset from the anchor cell's snapped position.
+        // Always kept the same size/order as `cells` (index i of one
+        // corresponds to index i of the other). {0,0} means "sits exactly
+        // on the grid cell". Non-zero values are how a cell can be moved
+        // freely when snapEnabled is false -- the anchor (col,row) is still
+        // used for storage/lookup, but the offset shifts the drawn/hit
+        // position away from that grid cell.
+        std::vector<SDL_FPoint> cellOffsets;
+        bool snapEnabled = true; // whether painted tiles snap to the grid
+    };
 }
 
 // The "Shape" spinbox in the inspector uses a fixed UI order (0=Rectangle,
@@ -495,7 +524,7 @@ inline void relativizeAnimationFramePaths(Components::AnimationState& anim, cons
 // A note on pointer type: multiple entities sharing one object cannot be
 // modeled with std::unique_ptr — by definition only one unique_ptr can own
 // an object at a time, so handing the "same" unique_ptr to a second entity
-// would either fail to compile (it's move-only) or leave the first entity
+// would either fail to transpile (it's move-only) or leave the first entity
 // holding a null pointer. std::shared_ptr is the smart pointer built for
 // "N owners, one object, freed automatically once the last owner lets go"
 // — exactly this situation — so that's what load*() returns below.
@@ -746,6 +775,8 @@ struct ECSWorld {
     std::vector<Components::Rotation> rotation_pool;
     std::vector<uint8_t> has_scale;
     std::vector<Components::Scale> scale_pool;
+    std::vector<uint8_t> has_tilemap;
+    std::vector<Components::TileMap> tilemap_pool;
 
 
     size_t entity_count = 0;
@@ -775,6 +806,8 @@ struct ECSWorld {
         rotation_pool.reserve(MAX_ENTITIES);
         has_scale.reserve(MAX_ENTITIES);
         scale_pool.reserve(MAX_ENTITIES);
+        has_tilemap.reserve(MAX_ENTITIES);
+        tilemap_pool.reserve(MAX_ENTITIES);
     }
 
     Entity create_entity() {
@@ -803,6 +836,8 @@ struct ECSWorld {
         rotation_pool.emplace_back();
         has_scale.push_back(0);
         scale_pool.emplace_back();
+        has_tilemap.push_back(0);
+        tilemap_pool.emplace_back();
         return id;
     }
 
@@ -834,6 +869,8 @@ struct ECSWorld {
             rotation_pool[id] = rotation_pool[last];
             has_scale[id] = has_scale[last];
             scale_pool[id] = scale_pool[last];
+            has_tilemap[id] = has_tilemap[last];
+            tilemap_pool[id] = tilemap_pool[last];
         }
         has_metadata.pop_back();
         metadata_pool.pop_back();
@@ -859,6 +896,8 @@ struct ECSWorld {
         rotation_pool.pop_back();
         has_scale.pop_back();
         scale_pool.pop_back();
+        has_tilemap.pop_back();
+        tilemap_pool.pop_back();
         entity_count--;
     }
 
@@ -873,6 +912,7 @@ struct ECSWorld {
     void add_physics_body(Entity id) { if (id < entity_count) has_physics_body[id] = 1; }
     void add_rotation(Entity id) { if (id < entity_count) has_rotation[id] = 1; }
     void add_scale(Entity id)   { if (id < entity_count) has_scale[id] = 1; }
+    void add_tilemap(Entity id) { if (id < entity_count) has_tilemap[id] = 1; }
 
     // Points this entity's AnimationState at the resource loaded from
     // `filepath`. If some other entity already loaded that exact file, the
@@ -900,42 +940,391 @@ struct ECSWorld {
     }
 };
 
-inline void physics_sync_system(ECSWorld& world, Physics::PhysicsWorld& physWorld) {
-    for (Entity i = 0; i < world.entity_count; ++i) {
-        if (world.has_physics_body[i] && world.has_position[i]) {
-            auto& def = world.physics_body_pool[i];
-            if (!b2Body_IsValid(def.bodyId)) {
-                float cx = world.position_pool[i].x + (world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 50.0f) * 0.5f;
-                float cy = world.position_pool[i].y + (world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 50.0f) * 0.5f;
-                auto body = std::make_unique<Physics::PhysicsBody>(physWorld.GetHandle(), def.bodyType, cx, cy);
-                if (def.shapeType == Physics::ShapeType::Rectangle) {
-                    body->AddRectangle(def.width, def.height, def.density, def.category, def.mask, def.isSensor);
-                } else if (def.shapeType == Physics::ShapeType::Circle) {
-                    body->AddCircle(def.radius, def.density, def.category, def.mask, def.isSensor);
-                } else if (def.shapeType == Physics::ShapeType::Polygon && !def.polygonPoints.empty()) {
-                    // Convert top-left relative points to center-relative for Box2D
-                    float hw = def.width * 0.5f;
-                    float hh = def.height * 0.5f;
-                    std::vector<b2Vec2> centerRelativePoints;
-                    for (const auto& pt : def.polygonPoints) {
-                        centerRelativePoints.push_back({pt.x - hw, pt.y - hh});
-                    }
-                    body->AddConvexPolygon(centerRelativePoints, def.density, def.category, def.mask, def.isSensor);
-                }
-                def.bodyId = body->GetHandle();
-                physWorld.AddOwned(std::move(body));
-            }
-        }
-    }
-}
-
-
-
 namespace Tools {
 
     inline bool contains(std::string_view haystack, std::string_view needle) {
         return haystack.find(needle) != std::string_view::npos;
     }
+
+    class Timer {
+    public:
+
+        Timer(float duration = 1.0f, bool loop = false)
+            :
+            duration(duration),
+            elapsed(0.0f),
+            running(false),
+            loop(loop)
+        {}
+
+
+
+        void start(float newDuration = -1.0f)
+        {
+            if(running)
+                return;
+
+
+            if(newDuration > 0)
+                duration = newDuration;
+
+
+            elapsed = 0.0f;
+            running = true;
+        }
+
+
+
+        void stop()
+        {
+            elapsed = 0.0f;
+            running = false;
+        }
+
+
+
+        void update(float delta)
+        {
+            if(!running)
+                return;
+
+
+            elapsed += delta;
+
+
+            if(elapsed >= duration)
+            {
+                if(loop)
+                {
+                    elapsed = 0.0f;
+                    loopTriggered = true;
+                }
+                else
+                {
+                    elapsed = duration;
+                    running = false;
+                }
+            }
+        }
+
+
+
+        void setLoop(bool value)
+        {
+            loop = value;
+        }
+
+
+
+        bool isRunning() const
+        {
+            return running;
+        }
+
+
+
+        float progress() const
+        {
+            if(duration <= 0)
+                return 1.0f;
+
+            return elapsed / duration;
+        }
+
+
+
+        // 0 -> 1 -> 0
+        float pulse() const
+        {
+            return sin(progress() * 3.14159265f);
+        }
+
+        bool consumeLoop()
+        {
+            if(loopTriggered)
+            {
+                loopTriggered = false;
+                return true;
+            }
+
+            return false;
+        }
+
+
+    private:
+
+        float duration;
+        float elapsed;
+        bool running;
+        bool loop;
+        bool loopTriggered = false;
+
+    };
+
+    class Healthbar {
+
+    public:
+
+        Healthbar(
+            float maxHealth = 100.0f,
+            float barWidth = 100.0f,
+            float barHeight = 12.0f
+        )
+            :
+            maxHealth(maxHealth),
+            currentHealth(maxHealth),
+            barWidth(barWidth),
+            barHeight(barHeight),
+            pulseTimer(1.0f, true),
+            heartbeatTimer(1.0f, true)
+        {}
+
+
+
+        void damage(float amount)
+        {
+            currentHealth =
+                std::max(0.0f, currentHealth - amount);
+        }
+
+
+
+        void heal(float amount)
+        {
+            currentHealth =
+                std::min(maxHealth, currentHealth + amount);
+        }
+
+
+
+        void update(
+            float delta,
+            std::function<void()> startHeartbeat = nullptr,
+            std::function<void()> stopHeartbeat = nullptr
+        )
+        {
+            float ratio = currentHealth / maxHealth;
+
+
+            bool shouldHeartbeat =
+                ratio <= LOW_HEALTH_THRESHOLD &&
+                currentHealth > 0;
+
+
+
+            if(shouldHeartbeat && !lowHealthActive)
+            {
+                lowHealthActive = true;
+
+
+                pulseTimer.start();
+
+
+                if(startHeartbeat)
+                    startHeartbeat();
+            }
+
+
+
+            if(!shouldHeartbeat && lowHealthActive)
+            {
+                lowHealthActive = false;
+
+
+                pulseTimer.stop();
+
+
+                if(stopHeartbeat)
+                    stopHeartbeat();
+            }
+
+
+            pulseTimer.update(delta);
+        }
+
+
+        float getCurrentVal() const
+        {
+            return currentHealth;
+        }
+
+
+
+        float getPercentage() const
+        {
+            return currentHealth / maxHealth;
+        }
+
+
+
+        void render(
+            SDL_Renderer* renderer,
+            float screenX,
+            float screenY
+        )
+        {
+
+            if(currentHealth <= 0)
+                return;
+
+
+
+            SDL_FRect bgRect =
+            {
+                screenX,
+                screenY,
+                barWidth,
+                barHeight
+            };
+
+
+            SDL_SetRenderDrawColor(
+                renderer,
+                40,
+                40,
+                40,
+                255
+            );
+
+
+            SDL_RenderRect(
+                renderer,
+                &bgRect
+            );
+
+
+
+            float fillWidth =
+                getPercentage() * barWidth;
+
+
+
+            SDL_FRect fillRect =
+            {
+                screenX,
+                screenY,
+                fillWidth,
+                barHeight
+            };
+
+
+
+            SDL_Color color =
+                getHealthColor(
+                    getPercentage()
+                );
+
+
+
+            // Low health red pulse
+            if(
+                pulseTimer.isRunning() &&
+                getPercentage() <= LOW_HEALTH_THRESHOLD
+            )
+            {
+
+                float pulse =
+                    pulseTimer.pulse();
+
+
+
+                SDL_Color darkRed =
+                {
+                    120,
+                    0,
+                    0,
+                    255
+                };
+
+
+                SDL_Color lightRed =
+                {
+                    255,
+                    70,
+                    70,
+                    255
+                };
+
+
+
+                color.r =
+                    darkRed.r +
+                    (lightRed.r - darkRed.r) * pulse;
+
+
+                color.g =
+                    darkRed.g +
+                    (lightRed.g - darkRed.g) * pulse;
+
+
+                color.b =
+                    darkRed.b +
+                    (lightRed.b - darkRed.b) * pulse;
+            }
+
+
+
+            SDL_SetRenderDrawColor(
+                renderer,
+                color.r,
+                color.g,
+                color.b,
+                255
+            );
+
+
+            SDL_RenderFillRect(
+                renderer,
+                &fillRect
+            );
+        }
+
+
+
+    private:
+
+
+        static constexpr float LOW_HEALTH_THRESHOLD = 0.30f;
+        bool lowHealthActive = false; 
+
+
+        float maxHealth;
+        float currentHealth;
+
+
+        float barWidth;
+        float barHeight;
+
+
+
+        Tools::Timer pulseTimer;
+
+        // controls heartbeat timing
+        Tools::Timer heartbeatTimer;
+
+
+
+        SDL_Color getHealthColor(
+            float ratio
+        ) const
+        {
+
+            if(ratio >= 0.6f)
+                return {0,200,0,255};
+
+
+            if(ratio >= 0.4f)
+                return {200,200,0,255};
+
+
+            if(ratio >= 0.2f)
+                return {255,165,0,255};
+
+
+            return {200,0,0,255};
+        }
+
+    };
 
     struct Camera {
         float targetX  = 0.0f;
@@ -1093,7 +1482,7 @@ namespace Tools {
             return { (float)windowW - mapSize - margin, (float)windowH - mapSize - margin, mapSize, mapSize };
         }
         
-        void render(SDL_Renderer* renderer, const ECSWorld& world, Entity playerEntity, int windowW, int windowH) {
+        void render(SDL_Renderer* renderer, const ECSWorld& world, Entity playerEntity, const std::vector<Entity>& importantEntities, int windowW, int windowH) {
             if (!show) return;
             SDL_FRect map = getMapRect(windowW, windowH);
             float worldW = worldMaxX - worldMinX;
@@ -1150,7 +1539,22 @@ namespace Tools {
                 SDL_FRect dot = { mpx - 4.0f, mpy - 4.0f, 8.0f, 8.0f };
                 SDL_RenderFillRect(renderer, &dot);
             }
-            
+
+            // Draw important entities as grey dots
+            for (Entity e : importantEntities) {
+                float px = world.position_pool[e].x;
+                float py = world.position_pool[e].y;
+                float pw = world.has_rectangle_shape[e] ? world.rectangle_shape_pool[e].w : 0.0f;
+                float ph = world.has_rectangle_shape[e] ? world.rectangle_shape_pool[e].h : 0.0f;
+                float pcx = px + pw * 0.5f;
+                float pcy = py + ph * 0.5f;
+                float mpx = map.x + (pcx - worldMinX) * scale;
+                float mpy = map.y + (pcy - worldMinY) * scale;
+                SDL_SetRenderDrawColor(renderer, 150, 150, 150, 255);
+                SDL_FRect dot = { mpx - 2.0f, mpy - 2.0f, 4.0f, 4.0f };
+                SDL_RenderFillRect(renderer, &dot);
+            }
+
             // --- Outer border ---
             SDL_SetRenderDrawColor(renderer, 200, 200, 220, 255);
             SDL_RenderRect(renderer, &map);
@@ -1169,7 +1573,7 @@ namespace Tools {
             a.y < b.y + b.h && a.y + a.h > b.y;
     }
 
-    class TileMap {
+    class BackgroundMap {
     public:
         std::vector<BackgroundTile> tiles;
         float tileWidth = 0.0f;
@@ -1248,6 +1652,7 @@ namespace Tools {
 
             float w = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 0.0f;
             float h = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 0.0f;
+            
             SDL_FRect box{ world.position_pool[i].x, world.position_pool[i].y, w, h };
             if (!aabbOverlap(box, visibleWorld)) continue;
             renderOrder.push_back(i);
@@ -1302,7 +1707,7 @@ namespace Tools {
 
         // Track positions of entities spawned in this batch to enforce minimum distance
         std::vector<SDL_FPoint> spawnedPositions;
-        const float minDistance = w*3;
+        const float minDistance = w*6;
         const int maxAttempts = 100; // Prevent infinite loops in crowded areas
 
         for (int n = 0; n < count; ++n) {
@@ -1410,6 +1815,145 @@ namespace Tools {
         entities = std::move(remaining);
     }
 }
+
+
+inline void physics_sync_system(ECSWorld& world, Physics::PhysicsWorld& physWorld, Entity player) {
+    for (Entity i = 0; i < world.entity_count; ++i) {
+
+        if (world.has_physics_body[i] && world.has_position[i]) {
+
+            auto& def = world.physics_body_pool[i];
+
+            // Detect puddle before creating physics shape
+            bool isPuddle = false;
+
+            if (world.has_metadata[i]) {
+                isPuddle = Tools::contains(
+                    world.metadata_pool[i].name,
+                    "puddle"
+                );
+            }
+
+            // Force sensor flag for puddles
+            if (isPuddle) {
+                def.isSensor = true;
+            }
+
+
+            if (!b2Body_IsValid(def.bodyId)) {
+
+                float cx = world.position_pool[i].x +
+                    (world.has_rectangle_shape[i] ?
+                        world.rectangle_shape_pool[i].w :
+                        50.0f) * 0.5f;
+
+                float cy = world.position_pool[i].y +
+                    (world.has_rectangle_shape[i] ?
+                        world.rectangle_shape_pool[i].h :
+                        50.0f) * 0.5f;
+
+
+                auto body = std::make_unique<Physics::PhysicsBody>(
+                    physWorld.GetHandle(),
+                    def.bodyType,
+                    cx,
+                    cy
+                );
+
+
+                if (def.shapeType == Physics::ShapeType::Rectangle) {
+
+                    body->AddRectangle(
+                        def.width,
+                        def.height,
+                        def.density,
+                        def.category,
+                        def.mask,
+                        def.isSensor
+                    );
+
+                }
+                else if (def.shapeType == Physics::ShapeType::Circle) {
+
+                    body->AddCircle(
+                        def.radius,
+                        def.density,
+                        def.category,
+                        def.mask,
+                        def.isSensor
+                    );
+
+                }
+                else if (def.shapeType == Physics::ShapeType::Polygon &&
+                         !def.polygonPoints.empty()) {
+
+
+                    float hw = def.width * 0.5f;
+                    float hh = def.height * 0.5f;
+
+
+                    std::vector<b2Vec2> centerRelativePoints;
+
+                    for (const auto& pt : def.polygonPoints) {
+
+                        centerRelativePoints.push_back({
+                            pt.x - hw,
+                            pt.y - hh
+                        });
+
+                    }
+
+
+                    body->AddConvexPolygon(
+                        centerRelativePoints,
+                        def.density,
+                        def.category,
+                        def.mask,
+                        def.isSensor
+                    );
+                }
+
+
+                def.bodyId = body->GetHandle();
+
+                physWorld.AddOwned(std::move(body));
+
+
+                //
+                // Enable sensor events and attach ECS entity IDs
+                //
+                b2ShapeId shapes[8];
+
+                int count = b2Body_GetShapes(
+                    def.bodyId,
+                    shapes,
+                    8
+                );
+
+
+                for (int j = 0; j < count; j++) {
+
+                    // Give shape identity for sensor callbacks
+                    b2Shape_SetUserData(
+                        shapes[j],
+                        (void*)(intptr_t)i
+                    );
+
+
+                    // Enable events for sensors
+                    if (def.isSensor || i == player) {
+
+                        b2Shape_EnableSensorEvents(
+                            shapes[j],
+                            true
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 inline Tools::Camera g_editorCamera;
 
@@ -3284,9 +3828,9 @@ namespace Gui {
     public:
         Button(SDL_Renderer* renderer, TTF_Font* font, const std::string& text, SDL_FPoint pos, float w, float h)
             : renderer(renderer), font(font), textStr(text), position(pos), width(w), height(h) {
-            idleColor = {100,100,200,255};
-            hoverColor = {150,150,250,255};
-            pressColor = {50,50,150,255};
+            idleColor  = {0, 200, 255, 255};
+            hoverColor = {100, 255, 255, 255};
+            pressColor = {0, 120, 220, 255};
             textColor = {255,255,255,255};
             currentColor = idleColor;
             updateTextTexture();
@@ -3879,6 +4423,11 @@ namespace Gui {
 
         void setConfirmButtonText(const std::string& text) { confirmLabel = text; }
 
+        // When false, the built-in close (X), Confirm and Cancel buttons are
+        // neither drawn nor hit-tested. Set this from a derived dialog's
+        // constructor if it supplies its own buttons via onRender().
+        void setShowDefaultButtons(bool show) { showDefaultButtons = show; }
+
 
         Action handleEvent(const SDL_Event& ev) {
             if (state != DialogState::Opened) return Action::None;
@@ -3889,13 +4438,15 @@ namespace Gui {
             };
             if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN && ev.button.button == SDL_BUTTON_LEFT) {
                 float mx = ev.button.x, my = ev.button.y;
-                if (hit(mx, my, closeBtnRect(win)) || hit(mx, my, cancelBtnRect(win)))
-                    return Action::Cancel;
-                if (hit(mx, my, confirmBtnRect(win)))
-                    return Action::Confirm;
+                if (showDefaultButtons) {
+                    if (hit(mx, my, closeBtnRect(win)) || hit(mx, my, cancelBtnRect(win)))
+                        return Action::Cancel;
+                    if (hit(mx, my, confirmBtnRect(win)))
+                        return Action::Confirm;
+                }
                 if (hit(mx, my, win)) return Action::None;
             }
-            if (ev.type == SDL_EVENT_KEY_DOWN) {
+            if (showDefaultButtons && ev.type == SDL_EVENT_KEY_DOWN) {
                 if (ev.key.key == SDLK_RETURN) return Action::Confirm;
                 if (ev.key.key == SDLK_ESCAPE) return Action::Cancel;
             }
@@ -3908,7 +4459,7 @@ namespace Gui {
             if (state != DialogState::Opened) return Action::None;
             SDL_FRect win = animRect();
             if (onHandleGamepad(cursorX, cursorY, confirmDown, confirmDownLastFrame)) return Action::None;
-            if (confirmDown && !confirmDownLastFrame) {
+            if (showDefaultButtons && confirmDown && !confirmDownLastFrame) {
                 if (hit(cursorX, cursorY, closeBtnRect(win)) || hit(cursorX, cursorY, cancelBtnRect(win)))
                     return Action::Cancel;
                 if (hit(cursorX, cursorY, confirmBtnRect(win)))
@@ -3928,20 +4479,24 @@ namespace Gui {
             if (!fullOpen || !font) return;
             float mx, my; SDL_GetMouseState(&mx, &my);
             drawText(title.c_str(), win.x + 8.0f, win.y + 9.0f, {255,255,255,255});
-            SDL_FRect cb = closeBtnRect(win);
-            bool hCb = hit(mx, my, cb);
-            fillRect(cb, hCb ? SDL_Color{220,60,60,255} : SDL_Color{170,40,40,255});
-            drawRect(cb, hCb ? SDL_Color{255,255,255,255} : SDL_Color{200,200,200,255});
-            drawText("X", cb.x + 11.0f, cb.y + 8.0f, {255,255,255,255});
+            if (showDefaultButtons) {
+                SDL_FRect cb = closeBtnRect(win);
+                bool hCb = hit(mx, my, cb);
+                fillRect(cb, hCb ? SDL_Color{220,60,60,255} : SDL_Color{170,40,40,255});
+                drawRect(cb, hCb ? SDL_Color{255,255,255,255} : SDL_Color{200,200,200,255});
+                drawText("X", cb.x + 11.0f, cb.y + 8.0f, {255,255,255,255});
+            }
             onRender(win);
-            SDL_FRect conf = confirmBtnRect(win);
-            bool hConf = hit(mx, my, conf);
-            fillRect(conf, hConf ? SDL_Color{80,200,100,255} : SDL_Color{52,160,75,255});
-            drawText(confirmLabel.c_str(), conf.x + 10.0f, conf.y + 8.0f, {255,255,255,255});
-            SDL_FRect canc = cancelBtnRect(win);
-            bool hCanc = hit(mx, my, canc);
-            fillRect(canc, hCanc ? SDL_Color{180,60,60,255} : SDL_Color{140,40,40,255});
-            drawText(cancelLabel.c_str(), canc.x + 10.0f, canc.y + 8.0f, {255,255,255,255});
+            if (showDefaultButtons) {
+                SDL_FRect conf = confirmBtnRect(win);
+                bool hConf = hit(mx, my, conf);
+                fillRect(conf, hConf ? SDL_Color{80,200,100,255} : SDL_Color{52,160,75,255});
+                drawText(confirmLabel.c_str(), conf.x + 10.0f, conf.y + 8.0f, {255,255,255,255});
+                SDL_FRect canc = cancelBtnRect(win);
+                bool hCanc = hit(mx, my, canc);
+                fillRect(canc, hCanc ? SDL_Color{180,60,60,255} : SDL_Color{140,40,40,255});
+                drawText(cancelLabel.c_str(), canc.x + 10.0f, canc.y + 8.0f, {255,255,255,255});
+            }
         }
 
         void reset() {
@@ -4005,6 +4560,7 @@ namespace Gui {
 
     private:
         std::string title, confirmLabel, cancelLabel;
+        bool showDefaultButtons = true;
         static SDL_FRect closeBtnRect(SDL_FRect w) { return { w.x+w.w-20, w.y, 36, 36 }; }
         static SDL_FRect confirmBtnRect(SDL_FRect w) { return { w.x+w.w-120, w.y+w.h-50, 106, 36 }; }
         static SDL_FRect cancelBtnRect(SDL_FRect w) { return { w.x+14, w.y+w.h-50, 106, 36 }; }
@@ -5258,7 +5814,7 @@ namespace Gui {
                 "add_executable(" + projectName + " ${PROJECT_SOURCES})\n"
                 "\n"
                 "# Tell engine.h we are building a project script\n"
-                "target_compile_definitions(" + projectName + " PRIVATE PROJECT_SCRIPT_BUILD=1)\n"
+                "target_transpile_definitions(" + projectName + " PRIVATE PROJECT_SCRIPT_BUILD=1)\n"
                 "\n"
                 "target_link_libraries(" + projectName + " PRIVATE DispersedEngine)\n"
                 "\n"
@@ -6212,8 +6768,8 @@ namespace Gui {
             };
 
             // Common geometry: x, y, w, h as SpinBox
-            addSpinBox("X", "x", target->getX(), -9999.0f, 9999.0f);
-            addSpinBox("Y", "y", target->getY(), -9999.0f, 9999.0f);
+            addSpinBox("X", "x", target->getX(), -25000.0f, 25000.0f);
+            addSpinBox("Y", "y", target->getY(), -25000.0f, 25000.0f);
             addSpinBox("Width", "w", target->getWidth(), 1.0f, 9999.0f);
             addSpinBox("Height", "h", target->getHeight(), 1.0f, 9999.0f);
 
@@ -6643,6 +7199,25 @@ namespace Gui {
                                 world->texture_ref_pool[e].resourceName = text;
                             } else if (f.key == "sfx_name") {
                                 world->sfx_emitter_pool[e].sfxName = text;
+                            } else if (f.key == "tile_tex") {
+                                auto& tm = world->tilemap_pool[e];
+                                tm.textureName = text;
+                                // Cell size is never set manually -- it always
+                                // matches the loaded image's own pixel size, so
+                                // painted cells line up 1:1 with the art.
+                                if (!text.empty()) {
+                                    SDL_Texture* tmTex = g_resources.TextureManager.Get(text);
+                                    if (!tmTex) {
+                                        g_resources.TextureManager.Load(text, text);
+                                        tmTex = g_resources.TextureManager.Get(text);
+                                    }
+                                    if (tmTex) {
+                                        float tw = 0.0f, th = 0.0f;
+                                        SDL_GetTextureSize(tmTex, &tw, &th);
+                                        if (tw > 0.0f) tm.cellWidth = tw;
+                                        if (th > 0.0f) tm.cellHeight = th;
+                                    }
+                                }
                             }
                             f.lastSyncedText = text;
                         }
@@ -6651,6 +7226,7 @@ namespace Gui {
                         bool val = cb->getValue();
                         if (val != (f.lastSyncedValue > 0.5f)) {
                             if (f.key == "sfx_col") world->sfx_emitter_pool[e].playOnCollision = val;
+                            else if (f.key == "tile_snap") world->tilemap_pool[e].snapEnabled = val;
                             f.lastSyncedValue = val ? 1.0f : 0.0f;
                         }
                     }
@@ -6727,6 +7303,7 @@ namespace Gui {
                             else if (f.key == "scale_x") worldVal = world->scale_pool[e].x;
                             else if (f.key == "scale_y") worldVal = world->scale_pool[e].y;
                             if (worldVal != f.lastSyncedValue) { sb->setValue(worldVal); f.lastSyncedValue = worldVal; }
+
                         }
                     } else if (wgt->getType() == "LineEdit") {
                         auto* le = static_cast<Gui::LineEdit*>(wgt.get());
@@ -6735,6 +7312,7 @@ namespace Gui {
                             if (f.key == "metadata_name") worldText = world->metadata_pool[e].name;
                             else if (f.key == "tex_res") worldText = world->texture_ref_pool[e].resourceName;
                             else if (f.key == "sfx_name") worldText = world->sfx_emitter_pool[e].sfxName;
+                            else if (f.key == "tile_tex") worldText = world->tilemap_pool[e].textureName;
                             if (worldText != f.lastSyncedText) {
                                 le->clear(); for (char c : worldText) le->appendText(std::string(1, c)); f.lastSyncedText = worldText;
                             }
@@ -6743,6 +7321,7 @@ namespace Gui {
                         auto* cb = static_cast<Gui::CheckBox*>(wgt.get());
                         bool worldVal = false;
                         if (f.key == "sfx_col") worldVal = world->sfx_emitter_pool[e].playOnCollision;
+                        else if (f.key == "tile_snap") worldVal = world->tilemap_pool[e].snapEnabled;
                         if (worldVal != (f.lastSyncedValue > 0.5f)) {
                             cb->setValue(worldVal);
                             f.lastSyncedValue = worldVal ? 1.0f : 0.0f;
@@ -6790,7 +7369,7 @@ namespace Gui {
         std::string projectRoot;
 
         
-        std::vector<std::string> componentOptions = {"PhysicsBody", "TextureRef", "AnimationState", "SfxEmitter", "Rotation", "Scale"};
+        std::vector<std::string> componentOptions = {"PhysicsBody", "TextureRef", "AnimationState", "SfxEmitter", "Rotation", "Scale", "TileMap"};
         Gui::OptionBox componentSelector;
         Gui::Button addComponentBtn;
 
@@ -6812,7 +7391,7 @@ namespace Gui {
             if (!world->has_sfx_emitter[e]) availableComponents.push_back("SfxEmitter");
             if (!world->has_rotation[e]) availableComponents.push_back("Rotation");
             if (!world->has_scale[e]) availableComponents.push_back("Scale");
-            
+            if (!world->has_tilemap[e]) availableComponents.push_back("TileMap");
             componentSelector.setOptions(availableComponents);
 
             auto addSpinBox = [&](const std::string& label, const std::string& key, float val, float min=0.0f, float max=9999.0f, float step=0.5f) {
@@ -6971,8 +7550,8 @@ namespace Gui {
 
             if (world->has_metadata[e]) addLineEdit("Name", "metadata_name", world->metadata_pool[e].name);
             if (world->has_position[e]) {
-                addSpinBox("X", "pos_x", world->position_pool[e].x, -9999.0f, 9999.0f);
-                addSpinBox("Y", "pos_y", world->position_pool[e].y, -9999.0f, 9999.0f);
+                addSpinBox("X", "pos_x", world->position_pool[e].x, -25000.0f, 25000.0f);
+                addSpinBox("Y", "pos_y", world->position_pool[e].y, -25000.0f, 25000.0f);
             }
             if (world->has_rectangle_shape[e]) {
                 addSpinBox("Width", "rect_w", world->rectangle_shape_pool[e].w, 1.0f, 9999.0f);
@@ -7093,6 +7672,57 @@ namespace Gui {
                 addSpinBox("Speed", "sfx_speed", s.speed, 0.1f, 3.0f, 0.1f);
                 addCheckBox("Play On Col", "sfx_col", s.playOnCollision);
             }
+            if (world->has_tilemap[e]) {
+                auto& tm = world->tilemap_pool[e];
+
+                // Texture name (LineEdit + browse button)
+                Field texField;
+                texField.label = "Tile Texture";
+                texField.key = "tile_tex";
+                texField.lastSyncedText = tm.textureName;
+
+                auto le = std::make_unique<Gui::LineEdit>(renderer, textEngine, font,
+                    SDL_FRect{0,0,1,1}, "texture path...");
+                for (char c : tm.textureName) le->appendText(std::string(1, c));
+                auto btn = std::make_unique<Gui::Button>(renderer, font, "...", SDL_FPoint{0,0}, 30, 26);
+                btn->onClicked = [this, lePtr = le.get()]() {
+                    fileExplorer.setFilter("*.svg;*.png;*.jpg;*.jpeg");
+                    fileExplorer.setSaveMode(false, "");
+                    fileExplorer.setCallback([this, lePtr](const std::string& path) {
+                        lePtr->clear();
+                        for (char c : path) lePtr->appendText(std::string(1, c));
+                        lePtr->deactivate(nullptr);
+                        this->commitAllFields();
+                    });
+                    fileExplorer.open();
+                };
+                texField.widgets.push_back(std::move(le));
+                texField.widgets.push_back(std::move(btn));
+                fields.push_back(std::move(texField));
+
+                // Snap-to-grid toggle for tile painting
+                addCheckBox("Snap To Grid", "tile_snap", tm.snapEnabled);
+
+                // Cell size is derived automatically from the loaded image's
+                // pixel dimensions (see "tile_tex" handling in
+                // commitAllFields) -- there's no manual override, so no
+                // spinboxes here. Painted cells always line up with the art.
+
+                // Clear tiles button
+                Field clearField;
+                clearField.label = "Clear Tiles";
+                clearField.key = "tile_clear";
+                auto clearBtn = std::make_unique<Gui::Button>(renderer, font, "Clear All", SDL_FPoint{0,0}, 120, 26);
+                clearBtn->onClicked = [this, e]() {
+                    if (!world || e >= world->entity_count) return;
+                    world->tilemap_pool[e].cells.clear();
+                    world->tilemap_pool[e].cellOffsets.clear();
+                    // Force inspector refresh
+                    this->rebuildFields();
+                };
+                clearField.widgets.push_back(std::move(clearBtn));
+                fields.push_back(std::move(clearField));
+            }
 
             addComponentBtn.onClicked = [this]() {
                 if (!world || targetEntity == (Entity)-1) return;
@@ -7104,6 +7734,7 @@ namespace Gui {
                 else if (comp == "SfxEmitter") world->add_sfx_emitter(e);
                 else if (comp == "Rotation") world->add_rotation(e);
                 else if (comp == "Scale") world->add_scale(e);
+                else if (comp == "TileMap") world->add_tilemap(e);
                 
                 rebuildFields(); // Automatically updates the dropdown to remove the added component
             };
@@ -7434,6 +8065,13 @@ namespace Gui {
             horizontalScrollbar.render(renderer, offsetX, offsetY);
         }
 
+        bool isLogicScript = false;
+
+        static bool hasExtension(const std::string& path, const std::string& ext) {
+            if (path.size() < ext.size()) return false;
+            return path.compare(path.size() - ext.size(), ext.size(), ext) == 0;
+        }
+
         // File operations
         void loadFile(const std::string& path) {
             std::ifstream file(path);
@@ -7441,6 +8079,10 @@ namespace Gui {
                 SDL_Log("TextEditor: failed to open %s", path.c_str());
                 return;
             }
+            // LogicScript covers both regular source (.ls -> .cpp) and
+            // header source (.lh -> .h); same syntax/highlighting either
+            // way, see transpile.h.
+            isLogicScript = hasExtension(path, ".ls") || hasExtension(path, ".lh");
             lines.clear();
             std::string line;
             while (std::getline(file, line)) {
@@ -7466,6 +8108,8 @@ namespace Gui {
             updateScrollbars();
         }
 
+
+
         void saveFile() {
             if (filePath.empty()) return;
             std::ofstream file(filePath);
@@ -7479,6 +8123,35 @@ namespace Gui {
             }
             SDL_Log("TextEditor: saved to %s", filePath.c_str());
         }
+
+        bool transpileLogicScript(std::string& errOut) {
+            if (!isLogicScript || filePath.empty()) {
+                errOut = "Not a .ls or .lh file.";
+                return false;
+            }
+            // .ls -> .cpp, .lh -> .h — LSTranspile::siblingCppPath() picks
+            // the right target extension so a header never overwrites (or
+            // gets overwritten by) a same-stem .cpp/.ls.
+            std::string outPath = LSTranspile::siblingCppPath(filePath);
+            bool ok = LSTranspile::transpileFile(filePath, outPath, errOut);
+            if (ok) SDL_Log("LogicScript: transpiled %s -> %s", filePath.c_str(), outPath.c_str());
+            else    SDL_Log("LogicScript: transpile failed:\n%s", errOut.c_str());
+            return ok;
+        }
+
+        bool transpileCPlusPlusScript(std::string& errOut) {
+            if (isLogicScript || filePath.empty()) {
+                errOut = "Not a .cpp or .h file.";
+                return false;
+            }
+            // .cpp -> .ls, .h -> .lh — mirror of siblingCppPath() above.
+            std::string outPath = LSTranspile::siblingLsPath(filePath);
+            bool ok = LSTranspile::transpileCppFileToLs(filePath, outPath, errOut);
+            if (ok) SDL_Log("LogicScript: transpiled %s -> %s", filePath.c_str(), outPath.c_str());
+            else    SDL_Log("LogicScript: transpile failed:\n%s", errOut.c_str());
+            return ok;
+        }
+                        
 
         bool isFileLoaded() const { return !filePath.empty(); }
         const std::string& getFilePath() const { return filePath; }
@@ -7787,6 +8460,11 @@ namespace Gui {
                 "break","continue","switch","case","default","enum","unsigned","long","short","inline",
                 "std","string","vector","include","define","ifdef","ifndef","endif","pragma"
             };
+            static const std::vector<std::string> lsKeywords = {
+                "num","spnum","bin","chr","str","none","noptr","stay","still","stayexpr",
+                "ret","fl","nd","and","or","mod","elif","reg_script","JOIN"
+            };
+            
             std::vector<Token> tokens;
             const SDL_Color normalColor  = {220, 220, 240, 255};
             const SDL_Color keywordColor = {110, 160, 230, 255};
@@ -7794,12 +8472,20 @@ namespace Gui {
             const SDL_Color stringColor  = {210, 150, 90, 255};
             const SDL_Color numberColor  = {180, 210, 140, 255};
             const SDL_Color ppColor      = {190, 140, 220, 255};
+            const SDL_Color directiveColor = {230, 170, 90, 255};
+            const SDL_Color lsOperatorColor = {170, 120, 220, 255};
 
             size_t i = 0;
             while (i < line.size()) {
                 if (i + 1 < line.size() && line[i] == '/' && line[i+1] == '/') {
                     tokens.push_back({i, line.size() - i, commentColor});
                     break;
+                }
+                if (isLogicScript && line[i] == '@') {
+                    size_t j = i + 1;
+                    while (j < line.size() && (isalnum((unsigned char)line[j]) || line[j] == '_')) j++;
+                    tokens.push_back({i, j - i, directiveColor});
+                    i = j; continue;
                 }
                 if (line[i] == '#') {
                     size_t j = i + 1;
@@ -7830,6 +8516,17 @@ namespace Gui {
                     while (j < line.size() && (isalnum((unsigned char)line[j]) || line[j] == '.')) j++;
                     tokens.push_back({i, j - i, numberColor});
                     i = j; continue;
+                }
+                if (isLogicScript) {
+                    static const std::vector<std::string> lsOps = {"~~", "!~", "~", "%", "$"};
+                    bool matched = false;
+                    for (auto& op : lsOps) {
+                        if (line.compare(i, op.size(), op) == 0) {
+                            tokens.push_back({i, op.size(), lsOperatorColor});
+                            i += op.size(); matched = true; break;
+                        }
+                    }
+                    if (matched) continue;
                 }
                 tokens.push_back({i, 1, normalColor});
                 i++;
@@ -8505,6 +9202,147 @@ inline void render_system_and_scene_gui_in_editor(
             }
         }
 
+        if (world.has_tilemap[i]) {
+            auto& tm = world.tilemap_pool[i];
+            SDL_Texture* tex = g_resources.TextureManager.Get(tm.textureName);
+            if (!tex && !tm.textureName.empty()) {
+                g_resources.TextureManager.Load(tm.textureName, tm.textureName);
+                tex = g_resources.TextureManager.Get(tm.textureName);
+            }
+            if (tex && !tm.cells.empty()) {
+                float rotDeg = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
+                float scaleX = (world.has_scale[i] ? world.scale_pool[i].x : 1.0f) * camera.zoom;
+                float scaleY = (world.has_scale[i] ? world.scale_pool[i].y : 1.0f) * camera.zoom;
+                float rotRad = rotDeg * M_PI / 180.0f;
+                float cosA = cosf(rotRad), sinA = sinf(rotRad);
+
+                // Entity world position (top‑left), converted to screen space
+                // ONCE here. Every cell's offset from this point is computed
+                // directly in screen space below (local units * scale*zoom),
+                // rather than being added back into world space and run
+                // through worldToScreen a second time -- doing that latter
+                // thing was the bug: worldToScreen() already multiplies
+                // whatever it's given by camera.zoom, so an offset that
+                // already had zoom baked into it (via scaleX/scaleY) was
+                // being zoomed twice. That's invisible at zoom == 1 (since
+                // zoom*zoom == zoom there) but at any other zoom level every
+                // cell lands progressively farther from where it should be
+                // the farther it sits from the entity's origin -- which is
+                // exactly why offset/unsnapped cells (bigger local offsets)
+                // and painting/erasing/re-grabbing them looked "slightly
+                // off": the hit-testing below uses plain local coordinates
+                // (correct), while the old render math didn't (wrong), so
+                // the two disagreed.
+                SDL_FPoint entityScreen = camera.worldToScreen(world.position_pool[i].x, world.position_pool[i].y);
+
+                // Tile size in screen space (unrotated) -- same for every cell.
+                float tileW = tm.cellWidth * scaleX;
+                float tileH = tm.cellHeight * scaleY;
+
+                // Screen rect of the cell currently being drag-moved (if any),
+                // captured while we render it below so we can outline it in
+                // blue afterwards -- the outline has to be drawn on top of
+                // every tile, not just this one, so it can't happen inline.
+                bool haveDragRect = false;
+                SDL_FRect dragScreenRect{};
+                bool draggingThisEntity = tileCellDrag.active && tileCellDrag.target == i;
+
+                // Screen rects of every non-dragged cell, collected here and
+                // outlined in a second pass after all textures are drawn --
+                // same reasoning as the blue drag outline: it must sit on
+                // top of neighbouring tiles, not just the one it belongs to.
+                std::vector<SDL_FRect> cellOutlineRects;
+                cellOutlineRects.reserve(tm.cells.size());
+
+                // Skip drawing if tiles are too small (less than 0.5 pixels)
+                if (tileW >= 0.5f && tileH >= 0.5f) {
+                    for (size_t idx = 0; idx < tm.cells.size(); ++idx) {
+                        auto& cell = tm.cells[idx];
+                        float offX = (idx < tm.cellOffsets.size()) ? tm.cellOffsets[idx].x : 0.0f;
+                        float offY = (idx < tm.cellOffsets.size()) ? tm.cellOffsets[idx].y : 0.0f;
+
+                        // Tile top‑left in local space (no rotation/scale yet),
+                        // including the per-cell drag offset. This is the same
+                        // formula the hit-testing (paint/erase/grab) below
+                        // uses, so the two always agree on where a cell is.
+                        float lx = cell.first * tm.cellWidth + offX;
+                        float ly = cell.second * tm.cellHeight + offY;
+
+                        // Tile centre in local space
+                        float cx_l = lx + tm.cellWidth * 0.5f;
+                        float cy_l = ly + tm.cellHeight * 0.5f;
+
+                        // Apply scale*zoom -- this is already a screen-space
+                        // offset from the entity's screen position, so it
+                        // must NOT be passed through worldToScreen again.
+                        float sx = cx_l * scaleX;
+                        float sy = cy_l * scaleY;
+
+                        // Apply rotation (screen-space offset)
+                        float rx = sx * cosA - sy * sinA;
+                        float ry = sx * sinA + sy * cosA;
+
+                        SDL_FPoint screenCenter = { entityScreen.x + rx, entityScreen.y + ry };
+                        SDL_FRect dst = {
+                            screenCenter.x - tileW * 0.5f,
+                            screenCenter.y - tileH * 0.5f,
+                            tileW,
+                            tileH
+                        };
+                        SDL_FPoint center = { tileW * 0.5f, tileH * 0.5f };
+                        SDL_RenderTextureRotated(renderer, tex, nullptr, &dst, rotDeg, &center, SDL_FLIP_NONE);
+
+                        if (draggingThisEntity && (int)idx == tileCellDrag.cellIndex) {
+                            haveDragRect = true;
+                            dragScreenRect = dst;
+                        } else {
+                            cellOutlineRects.push_back(dst);
+                        }
+                    }
+                }
+
+                // Faint outline over every cell that ISN'T currently being
+                // dragged, so the actual selectable/paintable bounds of each
+                // placed texture are visible -- including cells sitting off
+                // the grid from an unsnapped offset, whose bounds otherwise
+                // aren't obvious from the texture alone. Drawn in its own
+                // pass, after every tile, so it isn't painted over by a
+                // neighbouring tile.
+                if (!cellOutlineRects.empty()) {
+                    // Save/restore blend mode so this translucent outline
+                    // never leaks an alpha blend state into whatever draws
+                    // after it (grid, GUI, ruler, etc.) -- same pattern used
+                    // by render_physics_shape_overlay above.
+                    SDL_BlendMode prevBlend = SDL_BLENDMODE_NONE;
+                    SDL_GetRenderDrawBlendMode(renderer, &prevBlend);
+                    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 90);
+                    for (auto& r : cellOutlineRects) {
+                        SDL_RenderRect(renderer, &r);
+                    }
+                    SDL_SetRenderDrawBlendMode(renderer, prevBlend);
+                }
+
+                // Blue outline over the cell currently being dragged, drawn
+                // last so it sits on top of every tile (including neighbours
+                // it may be passing over) and on top of the faint outlines
+                // above. Works the same whether snapping is on (tile jumps
+                // cell-to-cell) or off (tile follows the cursor freely)
+                // since it just outlines wherever the tile was actually
+                // drawn this frame -- which, now that the double-zoom is
+                // fixed, always matches where the cursor can actually grab
+                // and release it.
+                if (haveDragRect) {
+                    SDL_SetRenderDrawColor(renderer, 60, 140, 255, 255);
+                    SDL_FRect outline = dragScreenRect;
+                    SDL_RenderRect(renderer, &outline);
+                    outline.x -= 1.0f; outline.y -= 1.0f;
+                    outline.w += 2.0f; outline.h += 2.0f;
+                    SDL_RenderRect(renderer, &outline);
+                }
+            }
+        }
+
         // Metadata label
         if (world.has_metadata[i]) {
             TTF_Text* textObj = TTF_CreateText(textEngine, font, world.metadata_pool[i].name.c_str(), 0);
@@ -8527,14 +9365,77 @@ inline void render_system_and_scene_gui_in_editor(
 
     // ── Pass 4: Optional grid ────────────────────────────────────────────
     if (editor_showGrid) {
-        SDL_SetRenderDrawColor(renderer, 100, 100, 100, 100);
-        float startX = viewX - fmod(scrollX, editor_cellW);
-        float startY = viewY - fmod(scrollY, editor_cellH);
-        for (float x = startX; x < viewX + canvasViewW; x += editor_cellW) {
-            SDL_RenderLine(renderer, x, viewY, x, viewY + canvasViewH);
+        float gridW = editor_cellW, gridH = editor_cellH;
+
+        // The grid's own origin -- where cell (0,0) sits in world space.
+        // Defaults to the world origin, but when a tilemap entity is
+        // selected we anchor the grid to that entity's position instead,
+        // since that's the origin painting actually uses (see the
+        // right-click paint handler: localX/localY = worldPt - entity
+        // position, then floor(local / cellWidth)). Without this offset
+        // the overlay only lines up with painted tiles when the tilemap
+        // entity happens to sit at (0,0).
+        float gridOriginX = 0.0f, gridOriginY = 0.0f;
+        if (lastSelectedEntity != (Entity)-1 &&
+            world.has_tilemap[lastSelectedEntity]) {
+            auto& tm = world.tilemap_pool[lastSelectedEntity];
+            gridW = tm.cellWidth;
+            gridH = tm.cellHeight;
+            if (world.has_position[lastSelectedEntity]) {
+                gridOriginX = world.position_pool[lastSelectedEntity].x;
+                gridOriginY = world.position_pool[lastSelectedEntity].y;
+            }
         }
-        for (float y = startY; y < viewY + canvasViewH; y += editor_cellH) {
-            SDL_RenderLine(renderer, viewX, y, viewX + canvasViewW, y);
+        if (gridW <= 0.0f || gridH <= 0.0f) {
+            gridW = gridH = 32.0f;
+        }
+
+        // Compute visible world bounds
+        float wL, wT, wR, wB;
+        camera.getVisibleWorldBounds(viewX, viewY, canvasViewW, canvasViewH,
+                                    wL, wT, wR, wB);
+
+        // Check if grid lines would be at least 2 pixels apart on screen.
+        // Measured from the grid's own origin (not the world origin) so the
+        // zoom-density check is unaffected by how far the tilemap entity is
+        // from (0,0); it only cares about on-screen spacing of one cell.
+        SDL_FPoint p1 = camera.worldToScreen(gridOriginX, gridOriginY);
+        SDL_FPoint p2 = camera.worldToScreen(gridOriginX + gridW, gridOriginY);
+        float screenDistX = sqrtf((p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y));
+        p2 = camera.worldToScreen(gridOriginX, gridOriginY + gridH);
+        float screenDistY = sqrtf((p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y));
+
+        // If the distance is less than 2 pixels, skip drawing the grid (it's too dense)
+        const float MIN_GRID_PIXELS = 2.0f;
+        if (screenDistX < MIN_GRID_PIXELS || screenDistY < MIN_GRID_PIXELS) {
+            // Don't draw the grid – it would be a solid fill
+            // (You could optionally draw major lines only, but we simply skip)
+            // goto skip_grid; (we'll just not draw)
+        } else {
+            // Align to grid, relative to the grid's origin rather than world
+            // (0,0) -- this is what actually keeps the lines under the
+            // painted tiles regardless of where the tilemap entity lives or
+            // how far the camera has panned/zoomed.
+            float startX = gridOriginX + floorf((wL - gridOriginX) / gridW) * gridW;
+            float endX   = gridOriginX + ceilf((wR - gridOriginX) / gridW) * gridW;
+            float startY = gridOriginY + floorf((wT - gridOriginY) / gridH) * gridH;
+            float endY   = gridOriginY + ceilf((wB - gridOriginY) / gridH) * gridH;
+
+            SDL_SetRenderDrawColor(renderer, 100, 100, 100, 255); // opaque grey
+            // (use alpha 255 to avoid accumulation – user can adjust)
+
+            // Vertical lines
+            for (float x = startX; x <= endX; x += gridW) {
+                SDL_FPoint a = camera.worldToScreen(x, wT);
+                SDL_FPoint b = camera.worldToScreen(x, wB);
+                SDL_RenderLine(renderer, a.x, a.y, b.x, b.y);
+            }
+            // Horizontal lines
+            for (float y = startY; y <= endY; y += gridH) {
+                SDL_FPoint a = camera.worldToScreen(wL, y);
+                SDL_FPoint b = camera.worldToScreen(wR, y);
+                SDL_RenderLine(renderer, a.x, a.y, b.x, b.y);
+            }
         }
     }
 
@@ -8881,6 +9782,114 @@ inline void edit_object_with_editor_mouse(SDL_Renderer* renderer, ECSWorld& worl
                     gizmoDrag.startMouseX = e.motion.x; gizmoDrag.startMouseY = e.motion.y;
                 }
             }
+        }
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_RIGHT) {
+            Entity ent = lastSelectedEntity;
+            if (ent != (Entity)-1 && world.has_tilemap[ent] && world.has_position[ent]) {
+                auto& tm = world.tilemap_pool[ent];
+                float mx = (float)e.button.x, my = (float)e.button.y;
+                // Paint anywhere on the canvas -- painting no longer requires
+                // a RectangleShape component, and the cell is always
+                // computed by snapping to the entity's own cellWidth/
+                // cellHeight (which mirrors the loaded image's pixel size),
+                // regardless of whether editor_showGrid is currently on.
+                if (isInsideCanvas(mx, my) && tm.cellWidth > 0.0f && tm.cellHeight > 0.0f) {
+                    SDL_FPoint worldPt = g_editorCamera.screenToWorld(mx, my);
+                    float localX = worldPt.x - world.position_pool[ent].x;
+                    float localY = worldPt.y - world.position_pool[ent].y;
+                    if (tm.cellOffsets.size() != tm.cells.size()) tm.cellOffsets.resize(tm.cells.size(), SDL_FPoint{0.0f, 0.0f});
+
+                    // Hit-test against each painted cell's *actual* rect
+                    // (anchor cell shifted by its per-cell offset), topmost
+                    // first. Using the real rect -- rather than only
+                    // floor(local/cellSize) -- means this keeps working once
+                    // a cell has been dragged off its original grid slot.
+                    auto hitCellAt = [&](float lx, float ly) -> int {
+                        for (int idx = (int)tm.cells.size() - 1; idx >= 0; --idx) {
+                            float rx = tm.cells[idx].first  * tm.cellWidth  + tm.cellOffsets[idx].x;
+                            float ry = tm.cells[idx].second * tm.cellHeight + tm.cellOffsets[idx].y;
+                            if (lx >= rx && lx < rx + tm.cellWidth &&
+                                ly >= ry && ly < ry + tm.cellHeight) {
+                                return idx;
+                            }
+                        }
+                        return -1;
+                    };
+
+                    const bool* keys = SDL_GetKeyboardState(nullptr);
+                    bool sHeld = keys && keys[SDL_SCANCODE_S];
+
+                    if (sHeld) {
+                        // Hold S, then right-click-drag an existing cell to
+                        // move it. Nothing is painted/erased here -- this
+                        // just grabs the tile under the cursor (if any) and
+                        // hands off to the SDL_EVENT_MOUSE_MOTION handler
+                        // below for the actual drag.
+                        int idx = hitCellAt(localX, localY);
+                        if (idx != -1) {
+                            float rx = tm.cells[idx].first  * tm.cellWidth  + tm.cellOffsets[idx].x;
+                            float ry = tm.cells[idx].second * tm.cellHeight + tm.cellOffsets[idx].y;
+                            tileCellDrag.active = true;
+                            tileCellDrag.target = ent;
+                            tileCellDrag.cellIndex = idx;
+                            tileCellDrag.grabDX = localX - rx; // keep the tile
+                            tileCellDrag.grabDY = localY - ry; // under the cursor at the point it was grabbed
+                        }
+                    } else {
+                        // Plain right click paints. If the cell under the
+                        // cursor is already painted, right-clicking it again
+                        // erases it -- a single button that both places and
+                        // removes tiles.
+                        int idx = hitCellAt(localX, localY);
+                        if (idx != -1) {
+                            tm.cells.erase(tm.cells.begin() + idx);
+                            tm.cellOffsets.erase(tm.cellOffsets.begin() + idx);
+                        } else {
+                            int col = (int)std::floor(localX / tm.cellWidth);
+                            int row = (int)std::floor(localY / tm.cellHeight);
+                            tm.cells.push_back({col, row});
+                            tm.cellOffsets.push_back(SDL_FPoint{0.0f, 0.0f});
+                        }
+                    }
+                }
+            }
+        }
+        // --- Dragging a grabbed cell (hold S + right-drag) ---
+        if (e.type == SDL_EVENT_MOUSE_MOTION && tileCellDrag.active) {
+            Entity ent = tileCellDrag.target;
+            if (ent != (Entity)-1 && world.has_tilemap[ent] && world.has_position[ent] &&
+                tileCellDrag.cellIndex >= 0 &&
+                tileCellDrag.cellIndex < (int)world.tilemap_pool[ent].cells.size()) {
+                auto& tm = world.tilemap_pool[ent];
+                int idx = tileCellDrag.cellIndex;
+                SDL_FPoint worldPt = g_editorCamera.screenToWorld(e.motion.x, e.motion.y);
+                float localX = worldPt.x - world.position_pool[ent].x - tileCellDrag.grabDX;
+                float localY = worldPt.y - world.position_pool[ent].y - tileCellDrag.grabDY;
+                if (tm.snapEnabled) {
+                    // Snapped: the cell locks fully onto the grid (rounded to
+                    // the nearest cell, not floored, so it snaps to whichever
+                    // grid box the tile's top-left is closest to) and its
+                    // offset stays zero -- only the anchor (col,row) moves.
+                    int col = (int)std::floor((localX + tm.cellWidth * 0.5f) / tm.cellWidth);
+                    int row = (int)std::floor((localY + tm.cellHeight * 0.5f) / tm.cellHeight);
+                    tm.cells[idx] = { col, row };
+                    tm.cellOffsets[idx] = SDL_FPoint{0.0f, 0.0f};
+                } else {
+                    // Unsnapped: free pixel placement. The tile still tracks
+                    // an anchor cell (used for painting/erase hit-testing)
+                    // but carries a sub-cell offset so it can sit anywhere,
+                    // not just on grid lines.
+                    int col = (int)std::floor(localX / tm.cellWidth);
+                    int row = (int)std::floor(localY / tm.cellHeight);
+                    tm.cells[idx] = { col, row };
+                    tm.cellOffsets[idx] = { localX - col * tm.cellWidth, localY - row * tm.cellHeight };
+                }
+            }
+        }
+        if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_RIGHT && tileCellDrag.active) {
+            tileCellDrag.active = false;
+            tileCellDrag.target = (Entity)-1;
+            tileCellDrag.cellIndex = -1;
         }
     }
     // --- MoveWithMouse mode ---
@@ -9314,6 +10323,16 @@ inline void ProjectScript_MIXER_PlaySound(const std::string &name, float volume 
     return g_resources.AudioManager.PlaySfx(name, volume, pitch);
 }
 
+inline void ProjectScript_MIXER_PlayLoopingSound(const std::string &name, float volume = (1.0F), float pitch = (1.0F))
+{
+     return g_resources.AudioManager.PlayLoopingSfx(name, volume, pitch);
+}
+
+inline void ProjectScript_MIXER_StopSound(const std::string &name)
+{
+    return g_resources.AudioManager.StopSfx(name);
+}
+
 inline void ProjectScript_MIXER_PlayHit(const std::string& name, float impulse, float pitch = 1.0f)
 {
     return g_resources.AudioManager.PlayHit(name, impulse, pitch);
@@ -9551,6 +10570,35 @@ public:
                         resolveAnimationFramePaths(anim, scene.projectRoot);
                     }
                 }
+
+                if (comps.contains("TileMap")) {
+                    scene.world.add_tilemap(id);
+                    auto& tm = scene.world.tilemap_pool[id];
+                    const auto& jtm = comps["TileMap"];
+                    tm.textureName = jtm.value("textureName", "");
+                    tm.cellWidth = jtm.value("cellWidth", 32.0f);
+                    tm.cellHeight = jtm.value("cellHeight", 32.0f);
+                    tm.snapEnabled = jtm.value("snapEnabled", true);
+                    if (jtm.contains("cells") && jtm["cells"].is_array()) {
+                        for (const auto& c : jtm["cells"]) {
+                            int col = c[0].get<int>();
+                            int row = c[1].get<int>();
+                            tm.cells.push_back({col, row});
+                        }
+                    }
+                    // Per-cell drag offsets (added for moving individual
+                    // tiles off the grid). Optional/backwards-compatible --
+                    // older scenes without this key just get all-zero
+                    // offsets, i.e. every tile sits exactly on its cell.
+                    tm.cellOffsets.assign(tm.cells.size(), SDL_FPoint{0.0f, 0.0f});
+                    if (jtm.contains("cellOffsets") && jtm["cellOffsets"].is_array()) {
+                        const auto& offs = jtm["cellOffsets"];
+                        for (size_t k = 0; k < offs.size() && k < tm.cellOffsets.size(); ++k) {
+                            tm.cellOffsets[k].x = offs[k][0].get<float>();
+                            tm.cellOffsets[k].y = offs[k][1].get<float>();
+                        }
+                    }
+                }
             }
         }
 
@@ -9603,11 +10651,11 @@ public:
             scene.scriptValid = false;
         } else {
     #ifdef __EMSCRIPTEN__
-            // On Emscripten, we can't check for .cpp files at runtime since they're compiled in.
+            // On Emscripten, we can't check for .cpp files at runtime since they're transpiled in.
             // Just mark as valid if a script is attached.
             scene.scriptValid = true;
             std::cout << "[Editor] Scene '" << scene.name
-                    << "' — script '" << scene.scriptAttached << "' OK (compiled in).\n";
+                    << "' — script '" << scene.scriptAttached << "' OK (transpiled in).\n";
     #else
             // On native, check that the referenced script file actually exists
             std::string trueScriptAttached = (getProjectsRootForScripts() / std::filesystem::path(scene.scriptAttached)).string();
@@ -9678,7 +10726,7 @@ public:
                 }
                 // --- PhysicsBody ---
                 // New format: a plain string filename pointing at a shared
-                // .physicsres resource (resolved against the compiled
+                // .physicsres resource (resolved against the transpiled
                 // project's root, same convention used for scriptAttached
                 // above). assign_physics_resource() dedupes the load across
                 // entities via ComponentResourceManager.
@@ -9865,6 +10913,27 @@ public:
                 comps["PhysicsBody"] = resPath; // store the filename, not inline JSON
             }
 
+            if (scene.world.has_tilemap[i]) {
+                auto& tm = scene.world.tilemap_pool[i];
+                nlohmann::json jtm;
+                jtm["textureName"] = tm.textureName;
+                jtm["cellWidth"] = tm.cellWidth;
+                jtm["cellHeight"] = tm.cellHeight;
+                jtm["snapEnabled"] = tm.snapEnabled;
+                nlohmann::json cellsArr = nlohmann::json::array();
+                for (auto& cell : tm.cells) {
+                    cellsArr.push_back({cell.first, cell.second});
+                }
+                jtm["cells"] = cellsArr;
+                nlohmann::json offsetsArr = nlohmann::json::array();
+                for (size_t k = 0; k < tm.cells.size(); ++k) {
+                    SDL_FPoint off = (k < tm.cellOffsets.size()) ? tm.cellOffsets[k] : SDL_FPoint{0.0f, 0.0f};
+                    offsetsArr.push_back({off.x, off.y});
+                }
+                jtm["cellOffsets"] = offsetsArr;
+                comps["TileMap"] = jtm;
+            }
+
             entitiesJson.push_back({{"components", comps}});
         }
         j["entities"] = entitiesJson;
@@ -10013,12 +11082,13 @@ inline bool change_scene(SceneParser& parser, Scene& targetScene,
 // ============================================================
 namespace WorldBinary {
     constexpr uint32_t MAGIC = 0x444C5257; // "WRLD" in little-endian
-    constexpr uint32_t VERSION = 2;
+    constexpr uint32_t VERSION = 3;
 
     enum ComponentMask : uint32_t {
         POS = 1 << 0, RECT = 1 << 1, Z = 1 << 2, TEX = 1 << 3,
         ANIM = 1 << 4, PHYS = 1 << 5, ROT = 1 << 6, SCALE = 1 << 7,
-        META = 1 << 8 // <-- ADDED: Metadata component mask
+        META = 1 << 8, // for metadata
+        TILE = 1 << 9 // for tilemaps
     };
 
     inline std::string makeRelative(const std::string& path, const std::string& root) {
@@ -10053,7 +11123,8 @@ namespace WorldBinary {
             if (world.has_rotation[e]) mask |= ROT;
             if (world.has_scale[e]) mask |= SCALE;
             if (world.has_metadata[e]) mask |= META; // <-- ADDED
-            
+            if (world.has_tilemap[e])  mask |= TILE;
+
             out.write((char*)&mask, 4);
 
             if (mask & POS) {
@@ -10127,6 +11198,29 @@ namespace WorldBinary {
                 uint32_t len = (uint32_t)s.size();
                 out.write((char*)&len, 4);
                 out.write(s.data(), len);
+            }
+            if (mask & TILE) { // <-- ADDED: TileMap incl. per-cell offsets
+                const auto& tm = world.tilemap_pool[e];
+                std::string s = makeRelative(tm.textureName, projectRoot);
+                uint32_t len = (uint32_t)s.size();
+                out.write((char*)&len, 4);
+                out.write(s.data(), len);
+                out.write((char*)&tm.cellWidth, 4);
+                out.write((char*)&tm.cellHeight, 4);
+                uint8_t snap = tm.snapEnabled ? 1 : 0;
+                out.write((char*)&snap, 1);
+                uint32_t cellCount = (uint32_t)tm.cells.size();
+                out.write((char*)&cellCount, 4);
+                for (size_t k = 0; k < tm.cells.size(); ++k) {
+                    int32_t col = tm.cells[k].first;
+                    int32_t row = tm.cells[k].second;
+                    float offX = (k < tm.cellOffsets.size()) ? tm.cellOffsets[k].x : 0.0f;
+                    float offY = (k < tm.cellOffsets.size()) ? tm.cellOffsets[k].y : 0.0f;
+                    out.write((char*)&col, 4);
+                    out.write((char*)&row, 4);
+                    out.write((char*)&offX, 4);
+                    out.write((char*)&offY, 4);
+                }
             }
         }
         return true;
@@ -10250,6 +11344,36 @@ namespace WorldBinary {
                 std::string s(len, '\0');
                 if (len > 0) in.read(s.data(), len);
                 world.metadata_pool[e].name = s;
+            }
+            if (mask & TILE) { // <-- ADDED: TileMap incl. per-cell offsets
+                world.add_tilemap(e);
+                auto& tm = world.tilemap_pool[e];
+                uint32_t len;
+                in.read((char*)&len, 4);
+                std::string s(len, '\0');
+                if (len > 0) in.read(s.data(), len);
+                tm.textureName = resolveComponentResourcePath(projectRoot, s);
+                in.read((char*)&tm.cellWidth, 4);
+                in.read((char*)&tm.cellHeight, 4);
+                uint8_t snap;
+                in.read((char*)&snap, 1);
+                tm.snapEnabled = (snap != 0);
+                uint32_t cellCount = 0;
+                in.read((char*)&cellCount, 4);
+                tm.cells.clear();
+                tm.cellOffsets.clear();
+                tm.cells.reserve(cellCount);
+                tm.cellOffsets.reserve(cellCount);
+                for (uint32_t k = 0; k < cellCount; ++k) {
+                    int32_t col, row;
+                    float offX, offY;
+                    in.read((char*)&col, 4);
+                    in.read((char*)&row, 4);
+                    in.read((char*)&offX, 4);
+                    in.read((char*)&offY, 4);
+                    tm.cells.push_back({col, row});
+                    tm.cellOffsets.push_back({offX, offY});
+                }
             }
         }
         return true;
