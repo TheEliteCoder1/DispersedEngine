@@ -81,6 +81,14 @@
 //               @if_on_web / @else / @endif -> #ifdef __EMSCRIPTEN__ / #else
 //               / #endif. Unknown @directives are left as a commented
 //               marker plus a transpiler warning, never silently dropped.
+//   Statements: terminated with an explicit ';' — exactly like C++. It is
+//               always typed by the author, never inferred. Newlines
+//               carry no meaning at all: a statement may be wrapped
+//               across as many physical lines as you like, and multiple
+//               statements may sit on one line, with no line-continuation
+//               backslash required either way. The transpiler doesn't
+//               try to guess where a statement ends — it trusts the ';'
+//               you wrote, the same way a C++ compiler does.
 //
 // USAGE
 //   #include "lstranspile.h"
@@ -488,57 +496,37 @@ inline TranspileResult transpileSource(const std::string& lsSource, const std::s
     std::string out;
     out.reserve(lsSource.size() * 2);
 
-    // indent tracking so multi-line directive expansions read naturally
+    // indent tracking so multi-line directive expansions read naturally —
+    // purely cosmetic, unrelated to statement boundaries.
     std::string currentIndent;
+    std::string lastIdent;
 
-    // --- state for implicit '{' after if/elif/while/for headers ---
-    std::vector<bool> parenIsHeaderStack; // one entry per currently-open '('
-    std::string pendingHeaderKeyword;     // "if" | "while" | "for" | "" — armed just before a '('
+    // First identifier seen since the start of the current statement (reset
+    // at ';', '{', '}' — the only three tokens that can end a statement,
+    // since newlines carry no meaning). Unlike lastIdent — which is
+    // overwritten by every identifier, including a case label's value —
+    // this reliably answers "does this statement start with case/default/
+    // public/private/protected/class/struct?" for the ':' handling below.
+    bool firstColonInStatement = false;
+    std::string stmtLeadIdent;
 
-    // --- state for end-of-line semicolon insertion (ASI) ---
-    enum class LastSig { None, EndsStatement, OpensBlock, ClosesBlock, Continuation, NoSemi };
-    LastSig lastSig = LastSig::None;
-    bool lineHadDirective = false;
-    int parenDepth = 0, bracketDepth = 0; // '(' and '[' — mid-expression while > 0
-
-    // Tokens that, when they LEAD the next line, mean the previous line was
-    // not actually statement-final (e.g. a ternary's '?'/':' hanging on the
-    // next line). Mirrors how ASI-less languages like Go/Swift avoid forcing
-    // every wrapped expression onto one physical line.
-    auto nextLineStartsContinuation = [&](size_t fromIdx) -> bool {
-        for (size_t k = fromIdx + 1; k < toks.size(); ++k) {
-            const Tok& nt = toks[k];
-            if (nt.kind == TokKind::Whitespace || nt.kind == TokKind::Newline ||
-                nt.kind == TokKind::LineComment || nt.kind == TokKind::BlockComment) continue;
-            if (nt.kind == TokKind::Identifier && (nt.text == "and" || nt.text == "or")) return true;
-            if (nt.kind == TokKind::Punct) {
-                static const char* cont[] = {"?", ":", ".", "&&", "||", "+", "-", "*", "/",
-                                              "==", "!=", "<=", ">=", "~", "~~", "!~", "%", "$", ","};
-                for (const char* c : cont) if (nt.text == c) return true;
-            }
-            return false;
-        }
-        return false;
-    };
-
-    auto flushLineEnd = [&](size_t idxAtNewline) {
-        if (parenDepth == 0 && bracketDepth == 0 &&
-            lastSig == LastSig::EndsStatement &&
-            !nextLineStartsContinuation(idxAtNewline)) {
-            out += ';';
-        }
-        out += '\n';
-        currentIndent.clear();
-        lastSig = LastSig::None;
-        lineHadDirective = false;
-    };
+    // True at the start of a new statement: right after ';', '{', '}', a
+    // preprocessor/directive line, or the start of the file. Used only to
+    // disambiguate a leading '~' as a destructor rather than assignment.
+    // Every statement boundary here is something the *author* wrote
+    // explicitly (a real ';', '{', or '}') — there is no inference step.
+    bool atStmtStart = true;
 
     for (size_t idx = 0; idx < toks.size(); ++idx) {
         Tok& t = toks[idx];
 
         switch (t.kind) {
             case TokKind::Newline:
-                flushLineEnd(idx);
+                // Newlines are purely cosmetic in LogicScript: they don't
+                // end statements and they don't need escaping to continue
+                // one, so they just pass through unchanged.
+                out += '\n';
+                currentIndent.clear();
                 continue;
 
             case TokKind::Whitespace:
@@ -548,25 +536,23 @@ inline TranspileResult transpileSource(const std::string& lsSource, const std::s
 
             case TokKind::LineComment:
             case TokKind::BlockComment:
-                out += t.text; // verbatim; doesn't change lastSig
+                out += t.text; // verbatim; doesn't change statement state
                 continue;
 
             case TokKind::StringLit:
             case TokKind::CharLit:
                 out += t.text;
-                lastSig = LastSig::EndsStatement;
-                pendingHeaderKeyword.clear();
+                atStmtStart = false;
                 continue;
 
             case TokKind::Preprocessor:
                 out += t.text;
-                lastSig = LastSig::NoSemi;
+                atStmtStart = true; // a #include/#define/#pragma line is self-contained
                 continue;
 
             case TokKind::Number:
                 out += t.text;
-                lastSig = LastSig::EndsStatement;
-                pendingHeaderKeyword.clear();
+                atStmtStart = false;
                 continue;
 
             case TokKind::Identifier: {
@@ -574,13 +560,12 @@ inline TranspileResult transpileSource(const std::string& lsSource, const std::s
 
                 if (w == "elif") {
                     out += "else if";
-                    pendingHeaderKeyword = "if";
-                    lastSig = LastSig::Continuation;
+                    atStmtStart = false;
                     continue;
                 }
                 if (w == "else") {
                     out += "else";
-                    lastSig = LastSig::Continuation;
+                    atStmtStart = false;
                     continue;
                 }
 
@@ -593,25 +578,13 @@ inline TranspileResult transpileSource(const std::string& lsSource, const std::s
                     else if (w.rfind("PS_", 0) == 0) translated = "ProjectScript_" + w.substr(3);
                 }
                 out += translated;
-
-                // Arm brace-insertion for the '(' that should immediately follow.
-                // "if"/"while" are spelled the same in LogicScript as in C++
-                // (no abbreviation needed), "for" arrives here already
-                // translated from "fl" — either way we key off the final word.
-                if (translated == "if" || translated == "while" || translated == "for") {
-                    pendingHeaderKeyword = translated;
-                } else {
-                    pendingHeaderKeyword.clear();
-                }
-
-                if (translated == "}") lastSig = LastSig::ClosesBlock;
-                else if (translated == "{") lastSig = LastSig::OpensBlock;
-                else lastSig = LastSig::EndsStatement;
+                lastIdent = w;
+                if (stmtLeadIdent.empty()) stmtLeadIdent = w;
+                atStmtStart = false;
                 continue;
             }
 
             case TokKind::Directive: {
-                lineHadDirective = true;
                 const std::string& d = t.text;
 
                 if (d == "@import") {
@@ -624,12 +597,12 @@ inline TranspileResult transpileSource(const std::string& lsSource, const std::s
                         result.errors.push_back({t.line, "@import expects a following string, e.g. @import \"game.h\""});
                         out += "/* @import: missing header string */";
                     }
-                    lastSig = LastSig::NoSemi;
+                    atStmtStart = true;
                     continue;
                 }
-                if (d == "@if_on_web") { out += "#ifdef __EMSCRIPTEN__"; lastSig = LastSig::NoSemi; continue; }
-                if (d == "@else")      { out += "#else";                lastSig = LastSig::NoSemi; continue; }
-                if (d == "@endif")     { out += "#endif";               lastSig = LastSig::NoSemi; continue; }
+                if (d == "@if_on_web") { out += "#ifdef __EMSCRIPTEN__"; atStmtStart = true; continue; }
+                if (d == "@else")      { out += "#else";                atStmtStart = true; continue; }
+                if (d == "@endif")     { out += "#endif";               atStmtStart = true; continue; }
 
                 auto exp = DirectiveTable().find(d);
                 if (exp != DirectiveTable().end()) {
@@ -658,87 +631,98 @@ inline TranspileResult transpileSource(const std::string& lsSource, const std::s
                     result.warnings.push_back({t.line, "Unknown directive '" + d + "' — left as-is; add it to DirectiveTable() in lstranspile.h"});
                     out += "/* " + d + ": unknown LogicScript directive, not expanded */";
                 }
-                lastSig = LastSig::NoSemi; // expansions carry their own terminators
+                atStmtStart = true; // expansions carry their own terminators
                 continue;
             }
 
             case TokKind::Punct: {
                 const std::string& p = t.text;
 
-                if (p == "(") {
-                    bool isHeader = !pendingHeaderKeyword.empty();
-                    parenIsHeaderStack.push_back(isHeader);
-                    pendingHeaderKeyword.clear();
-                    parenDepth++;
-                    out += "(";
-                    lastSig = LastSig::Continuation;
+                if (p == "(") { out += "("; atStmtStart = false; continue; }
+                if (p == ")") { out += ")"; atStmtStart = false; continue; }
+                if (p == "[") { out += "["; atStmtStart = false; continue; }
+                if (p == "]") { out += "]"; atStmtStart = false; continue; }
+                if (p == "\\") { out += p; atStmtStart = false; continue; } // macro line-splice, passed through as-is
+                if (p == "~~") { out += "=="; atStmtStart = false; continue; }
+                if (p == "!~") { out += "!="; atStmtStart = false; continue; }
+                if (p == "%")  { out += "->"; atStmtStart = false; continue; }
+                if (p == "$")  { out += "<<"; atStmtStart = false; continue; }
+                if (p == "~") {
+                    // Skip whitespace to find the next token
+                    size_t nextNonWs = idx + 1;
+                    while (nextNonWs < toks.size() && (toks[nextNonWs].kind == TokKind::Whitespace || toks[nextNonWs].kind == TokKind::Newline))
+                        ++nextNonWs;
+                    bool followsIdentifier = (nextNonWs < toks.size() &&
+                                            toks[nextNonWs].kind == TokKind::Identifier);
+                    bool looksLikeDestructor = followsIdentifier && (lastIdent == "virtual" || atStmtStart);
+                    out += looksLikeDestructor ? "~" : "=";
+                    atStmtStart = false;
                     continue;
                 }
-                if (p == ")") {
-                    bool wasHeader = false;
-                    if (!parenIsHeaderStack.empty()) {
-                        wasHeader = parenIsHeaderStack.back();
-                        parenIsHeaderStack.pop_back();
-                    }
-
-                    if (parenDepth > 0) parenDepth--;
-                    out += ")";
-
-                    if (wasHeader) {
-                        lastSig = LastSig::Continuation;
-                    } else {
-                        lastSig = LastSig::EndsStatement;
-                    }
-
-                    continue;
-                }
-                if (p == "[") { bracketDepth++; out += p; lastSig = LastSig::Continuation; continue; }
-                if (p == "]") { if (bracketDepth > 0) bracketDepth--; out += p; lastSig = LastSig::EndsStatement; continue; }
-                if (p == "\\") { out += p; lastSig = LastSig::Continuation; continue; } // explicit line-splice
-                if (p == "~~") { out += "=="; lastSig = LastSig::Continuation; continue; }
-                if (p == "!~") { out += "!="; lastSig = LastSig::Continuation; continue; }
-                if (p == "%")  { out += "->"; lastSig = LastSig::Continuation; pendingHeaderKeyword.clear(); continue; }
-                if (p == "$")  { out += "<<"; lastSig = LastSig::Continuation; continue; }
-                if (p == "~")  { out += "=";  lastSig = LastSig::Continuation; continue; }
                 if (p == ":") {
                     bool tightBefore = !out.empty() && isIdentChar(out.back());
-                    bool tightAfter = false;
-                    for (size_t k = idx + 1; k < toks.size(); ++k) {
-                        if (toks[k].kind == TokKind::Whitespace) continue;
-                        tightAfter = (toks[k].kind == TokKind::Identifier);
-                        break;
+                    bool tightAfter = (idx + 1 < toks.size()) &&
+                                    (toks[idx + 1].kind == TokKind::Identifier || toks[idx + 1].kind == TokKind::Number);
+
+                    // Case 1: access specifier or label (case/default)
+                    if (stmtLeadIdent == "case" || stmtLeadIdent == "default" ||
+                        stmtLeadIdent == "public" || stmtLeadIdent == "private" || stmtLeadIdent == "protected") {
+                        out += ":";
+                        // Do NOT set firstColonInStatement because these are not inheritance colons.
+                        // The label is a complete construct on its own — clear stmtLeadIdent so it
+                        // doesn't leak into the next statement (otherwise a later 'std:function' on
+                        // the very next line would be misread as another label colon instead of '::').
+                        stmtLeadIdent.clear();
                     }
-                    out += (tightBefore && tightAfter) ? "::" : ":";
-                    lastSig = LastSig::Continuation;
+                    // Case 2: inheritance colon (first colon after class/struct keyword)
+                    else if ((stmtLeadIdent == "class" || stmtLeadIdent == "struct") && !firstColonInStatement) {
+                        out += ":";
+                        firstColonInStatement = true;  // mark that we've seen the inheritance colon
+                    }
+                    // Case 3: everything else → scope resolution or ternary/other
+                    else {
+                        // Only output '::' if both sides are tight (no spaces)
+                        out += (tightBefore && tightAfter) ? "::" : ":";
+                    }
+                    atStmtStart = false;
                     continue;
                 }
-                if (p == "{") { out += p; lastSig = LastSig::OpensBlock; continue; }
-                if (p == "}") { out += p; lastSig = LastSig::ClosesBlock; continue; }
+                if (p == "{") {
+                    out += p;
+                    atStmtStart = true;
+                    stmtLeadIdent.clear();
+                    firstColonInStatement = false;
+                    continue;
+                }
+                if (p == "}") {
+                    out += p;
+                    atStmtStart = true;
+                    stmtLeadIdent.clear();
+                    firstColonInStatement = false;
+                    continue;
+                }
                 if (p == ";") {
-                    if (parenDepth > 0) {
-                        out += ";"; // Keep semicolons inside for-loop headers
-                    } else {
-                        out += ";\n" + currentIndent; // Force newline for multi-statement lines
-                    }
-                    lastSig = LastSig::NoSemi;
+                    // The author's own explicit statement terminator — passed
+                    // through verbatim, exactly like C++, whether it closes an
+                    // ordinary statement or sits inside a for-loop header.
+                    out += ";";
+                    atStmtStart = true;
+                    stmtLeadIdent.clear();
+                    firstColonInStatement = false;
                     continue;
                 }
                 if (p == "," || p == "&&" || p == "||" || p == "==" || p == "!=" ||
                     p == "<=" || p == ">=" || p == "+" || p == "-" || p == "*" || p == "/" ||
                     p == "=" || p == "<" || p == ">" || p == "?" || p == "&" || p == "|" ||
                     p == "+=" || p == "-=" || p == "*=" || p == "/=") {
-                    out += p; lastSig = LastSig::Continuation; continue;
+                    out += p; atStmtStart = false; continue;
                 }
-                out += p; // '[' ']' '.' '++' '--' etc. — ordinary, ends a statement if trailing
-                lastSig = LastSig::EndsStatement;
+                out += p; // '.' '++' '--' etc. — ordinary, passed through as-is
+                atStmtStart = false;
                 continue;
             }
         }
     }
-
-    if (parenDepth == 0 && bracketDepth == 0 && lastSig == LastSig::EndsStatement)
-        out += ';'; // trailing line with no final newline
-    (void)lineHadDirective;
 
     result.cppSource = out;
     result.success = result.errors.empty();
@@ -928,7 +912,6 @@ inline TranspileResult transpileCppToLogicScript(
 
     auto& revKw = ReverseKeywordTable();
     auto& revRn = ReverseRenameTable();
-    int parenDepth = 0; // Track parentheses depth to distinguish for-loop semicolons
     for (size_t idx = 0; idx < toks.size(); ++idx) {
         Tok& t = toks[idx];
 
@@ -992,11 +975,11 @@ inline TranspileResult transpileCppToLogicScript(
                 if (p == "%")  { out += "mod"; continue; }
                 if (p == "|")  { out += "JOIN"; continue; }
                 if (p == ";") {
-                    if (parenDepth > 0) {
-                        out += ";"; // Keep semicolons inside for-loop headers
-                    } else {
-                        out += "\n"; // Replace statement semicolons with newlines
-                    }
+                    // LogicScript statements are terminated with an explicit
+                    // ';', the same as C++ — so a C++ ';' round-trips to a
+                    // LogicScript ';' verbatim, whether it's an ordinary
+                    // statement terminator or sits inside a for-loop header.
+                    out += ";";
                     continue;
                 }
                 // ... (other operators remain unchanged) ...
@@ -1009,12 +992,10 @@ inline TranspileResult transpileCppToLogicScript(
                     continue;
                 }
                 if (p == "(") {
-                    parenDepth++;
                     out += p;
                     continue;
                 }
                 if (p == ")") {
-                    if (parenDepth > 0) parenDepth--;
                     out += p;
                     continue;
                 }

@@ -3828,9 +3828,9 @@ namespace Gui {
     public:
         Button(SDL_Renderer* renderer, TTF_Font* font, const std::string& text, SDL_FPoint pos, float w, float h)
             : renderer(renderer), font(font), textStr(text), position(pos), width(w), height(h) {
-            idleColor  = {0, 200, 255, 255};
-            hoverColor = {100, 255, 255, 255};
-            pressColor = {0, 120, 220, 255};
+            idleColor = {100,100,200,255}; 
+            hoverColor = {150,150,250,255}; 
+            pressColor = {50,50,150,255};
             textColor = {255,255,255,255};
             currentColor = idleColor;
             updateTextTexture();
