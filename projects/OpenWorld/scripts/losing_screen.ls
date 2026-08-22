@@ -1,4 +1,3 @@
-// Auto-generated from C:\Users\daeli\Documents\DispersedEngine\projects\OpenWorld\scripts\losing_screen.cpp
 @import "losing_screen.h"
 
 reg_script(LosingMenuScript, "losing_screen")

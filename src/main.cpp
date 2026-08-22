@@ -1,7 +1,5 @@
 #include "engine.h"
 
-
-
 bool showCanvas = true;
 
 
@@ -371,6 +369,7 @@ int main(int argc, char* argv[]) {
 
     Gui::TextEditor textEditor(renderer, textEngine, g_resources.FontManager.Get("largeFont"), {0, 0, 100, 100});
     textEditor.setVisible(false);
+    
 
     std::filesystem::path projectsAbsPath = std::filesystem::absolute(getProjectsPath());
     Gui::FileExplorer fileExplorer(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window, projectsAbsPath.string(), "*.json");
@@ -719,6 +718,8 @@ int main(int argc, char* argv[]) {
                 if (textEditor.handleEvent(e, window, 0.0f, 0.0f)) continue;
             }
 
+            
+
             bool consumedByScrollbar = false;
             if (showCanvas) {
                 if (verticalScrollbar.handleEvent(e)) consumedByScrollbar = true;
@@ -958,6 +959,7 @@ int main(int argc, char* argv[]) {
             canvasTools->render(0.0f, 0.0f);
         } else {
             textEditor.setRect({canvasViewX, canvasViewY, canvasViewW, canvasViewH}); textEditor.render(0.0f, 0.0f);
+            textEditor.render(0.0f, 0.0f);
         }
 
         if (inspectorVisible) {

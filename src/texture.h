@@ -12,7 +12,7 @@ namespace Texture {
             bool SetRenderer(SDL_Renderer* renderer)
             {
                 if (!renderer) {
-                    std::printf("TextureManager Init failed: Renderer context is null.\n");
+                    SDL_Log("%s\n", "TextureManager Init failed: Renderer context is null.");
                     return false;
                 }
                 m_renderer = renderer;
@@ -33,7 +33,7 @@ namespace Texture {
                 // 2. Load the image file directly into an optimized hardware texture
                 SDL_Texture* texture = IMG_LoadTexture(m_renderer, path.c_str());
                 if (!texture) {
-                    std::printf("IMG_LoadTexture(%s) failed: %s\n", path.c_str(), SDL_GetError());
+                    SDL_Log("IMG_LoadTexture(%s) failed: %s\n", path.c_str(), SDL_GetError());
                     return false;
                 }
 

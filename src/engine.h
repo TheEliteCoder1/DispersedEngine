@@ -177,7 +177,7 @@ inline std::string resolveComponentResourcePath(const std::string& projectsRoot,
     if (p.is_absolute()) {
         return path;
     }
-    return (std::filesystem::path(projectsRoot) / p).lexically_normal().string();
+    return (std::filesystem::path(projectsRoot) / p).lexically_normal().generic_string();
 }
 
 using Entity = uint32_t;
@@ -1634,27 +1634,64 @@ namespace Tools {
     };
 
     inline std::vector<Entity> buildVisibleRenderOrder(
-    const ECSWorld& world,
-    const SDL_FRect& visibleWorld,
-    const std::vector<Entity>& excludeEntities = {},
-    bool ySortEnabled = false,
-    YSortAnchor ySortAnchor = YSortAnchor::Top)
+        const ECSWorld& world,
+        const SDL_FRect& visibleWorld,
+        const std::vector<Entity>& excludeEntities = {},
+        bool ySortEnabled = false,
+        YSortAnchor ySortAnchor = YSortAnchor::Top)
     {
         std::vector<Entity> renderOrder;
         renderOrder.reserve(world.entity_count);
+
         for (Entity i = 0; i < world.entity_count; ++i) {
             if (!world.has_position[i]) continue;
+
             bool excluded = false;
             for (Entity ex : excludeEntities) {
                 if (i == ex) { excluded = true; break; }
             }
             if (excluded) continue;
 
-            float w = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 0.0f;
-            float h = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 0.0f;
-            
-            SDL_FRect box{ world.position_pool[i].x, world.position_pool[i].y, w, h };
-            if (!aabbOverlap(box, visibleWorld)) continue;
+            // Compute the actual bounding box of the entity.
+            // For tilemaps, use the union of all tile cells; otherwise use the rectangle shape.
+            SDL_FRect box{0,0,0,0};
+
+            if (world.has_tilemap[i] && !world.tilemap_pool[i].cells.empty()) {
+                const auto& tm = world.tilemap_pool[i];
+                float minX = FLT_MAX, maxX = -FLT_MAX;
+                float minY = FLT_MAX, maxY = -FLT_MAX;
+
+                for (size_t idx = 0; idx < tm.cells.size(); ++idx) {
+                    float offX = (idx < tm.cellOffsets.size()) ? tm.cellOffsets[idx].x : 0.0f;
+                    float offY = (idx < tm.cellOffsets.size()) ? tm.cellOffsets[idx].y : 0.0f;
+
+                    float cellX = tm.cells[idx].first * tm.cellWidth + offX;
+                    float cellY = tm.cells[idx].second * tm.cellHeight + offY;
+                    float cellX2 = cellX + tm.cellWidth;
+                    float cellY2 = cellY + tm.cellHeight;
+
+                    minX = std::min(minX, cellX);
+                    maxX = std::max(maxX, cellX2);
+                    minY = std::min(minY, cellY);
+                    maxY = std::max(maxY, cellY2);
+                }
+
+                // Add entity position offset (tile coords are local to entity origin)
+                box.x = world.position_pool[i].x + minX;
+                box.y = world.position_pool[i].y + minY;
+                box.w = maxX - minX;
+                box.h = maxY - minY;
+            } else {
+                // Fallback to rectangle shape if present, otherwise use zero size (will be skipped)
+                float w = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].w : 0.0f;
+                float h = world.has_rectangle_shape[i] ? world.rectangle_shape_pool[i].h : 0.0f;
+                box = { world.position_pool[i].x, world.position_pool[i].y, w, h };
+            }
+
+            // Skip culling for zero‑sized boxes (rare, but include them to be safe)
+            if (box.w > 0.0f && box.h > 0.0f && !aabbOverlap(box, visibleWorld))
+                continue;
+
             renderOrder.push_back(i);
         }
 
@@ -1664,7 +1701,6 @@ namespace Tools {
                 int zb = world.has_z_index[b] ? world.z_index_pool[b].z : 0;
                 if (za != zb) return za < zb;
 
-                // Pick the Y anchor point based on the requested mode
                 auto getY = [&](Entity e) -> float {
                     float y = world.position_pool[e].y;
                     float h = world.has_rectangle_shape[e] ? world.rectangle_shape_pool[e].h : 0.0f;
@@ -1687,8 +1723,10 @@ namespace Tools {
                 return za < zb;
             });
         }
+
         return renderOrder;
     }
+
 
     // --- Decoration Spawner ---
         inline void scatterDecorations(ECSWorld& world, Entity sourceEntity, int count, 
@@ -8659,6 +8697,71 @@ inline bool render_entity_animation(SDL_Renderer* renderer, const ECSWorld& worl
     return true;
 }
 
+
+inline bool render_entity_tilemap(SDL_Renderer* renderer, const ECSWorld& world, Entity i, float screenX, float screenY, float cameraZoom = 1.0f)
+{
+    if (!world.has_tilemap[i]) return false;
+    auto& tm = world.tilemap_pool[i];
+    if (tm.cells.empty() || tm.textureName.empty()) return false;
+
+    SDL_Texture* tex = g_resources.TextureManager.Get(tm.textureName);
+
+    if (!tex) {
+        if (!g_resources.TextureManager.Load(tm.textureName, tm.textureName)) {
+            return false;
+        }
+        tex = g_resources.TextureManager.Get(tm.textureName);
+    }
+    if (!tex) return false;
+
+    float rotDeg = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
+    float scaleX = (world.has_scale[i] ? world.scale_pool[i].x : 1.0f) * cameraZoom;
+    float scaleY = (world.has_scale[i] ? world.scale_pool[i].y : 1.0f) * cameraZoom;
+    float rotRad = rotDeg * M_PI / 180.0f;
+    float cosA = cosf(rotRad), sinA = sinf(rotRad);
+
+    float tileW = tm.cellWidth * scaleX;
+    float tileH = tm.cellHeight * scaleY;
+
+    // Skip rendering if tiles are too small (less than 0.5 pixels)
+    if (tileW < 0.5f || tileH < 0.5f) return true; 
+
+    for (size_t idx = 0; idx < tm.cells.size(); ++idx) {
+        auto& cell = tm.cells[idx];
+        float offX = (idx < tm.cellOffsets.size()) ? tm.cellOffsets[idx].x : 0.0f;
+        float offY = (idx < tm.cellOffsets.size()) ? tm.cellOffsets[idx].y : 0.0f;
+
+        // Local position of the tile
+        float lx = cell.first * tm.cellWidth + offX;
+        float ly = cell.second * tm.cellHeight + offY;
+
+        // Center of the tile in local space
+        float cx_l = lx + tm.cellWidth * 0.5f;
+        float cy_l = ly + tm.cellHeight * 0.5f;
+
+        // Apply scale and zoom
+        float sx = cx_l * scaleX;
+        float sy = cy_l * scaleY;
+
+        // Apply rotation
+        float rx = sx * cosA - sy * sinA;
+        float ry = sx * sinA + sy * cosA;
+
+        SDL_FPoint screenCenter = { screenX + rx, screenY + ry };
+
+        SDL_FRect dst = {
+            screenCenter.x - tileW * 0.5f,
+            screenCenter.y - tileH * 0.5f,
+            tileW,
+            tileH
+        };
+
+        SDL_FPoint center = { tileW * 0.5f, tileH * 0.5f };
+        SDL_RenderTextureRotated(renderer, tex, nullptr, &dst, rotDeg, &center, SDL_FLIP_NONE);
+    }
+    return true;
+}
+
 inline void render_physics_shape_overlay(SDL_Renderer* renderer, const Components::PhysicsBodyDef& phys,
                                          float centerX, float centerY,
                                          float rotDeg = 0.0f, float scaleX = 1.0f, float scaleY = 1.0f)
@@ -10575,10 +10678,14 @@ public:
                     scene.world.add_tilemap(id);
                     auto& tm = scene.world.tilemap_pool[id];
                     const auto& jtm = comps["TileMap"];
-                    tm.textureName = jtm.value("textureName", "");
+                    
+                    // Resolve the path so the TextureManager can actually find it
+                    
+                    tm.textureName = resolveComponentResourcePath(scene.projectRoot, jtm.value("textureName", ""));
                     tm.cellWidth = jtm.value("cellWidth", 32.0f);
                     tm.cellHeight = jtm.value("cellHeight", 32.0f);
                     tm.snapEnabled = jtm.value("snapEnabled", true);
+                    
                     if (jtm.contains("cells") && jtm["cells"].is_array()) {
                         for (const auto& c : jtm["cells"]) {
                             int col = c[0].get<int>();
@@ -10586,10 +10693,6 @@ public:
                             tm.cells.push_back({col, row});
                         }
                     }
-                    // Per-cell drag offsets (added for moving individual
-                    // tiles off the grid). Optional/backwards-compatible --
-                    // older scenes without this key just get all-zero
-                    // offsets, i.e. every tile sits exactly on its cell.
                     tm.cellOffsets.assign(tm.cells.size(), SDL_FPoint{0.0f, 0.0f});
                     if (jtm.contains("cellOffsets") && jtm["cellOffsets"].is_array()) {
                         const auto& offs = jtm["cellOffsets"];
@@ -10796,6 +10899,36 @@ public:
                         resolveAnimationFramePaths(anim, scene.projectRoot);
                     }
                 }
+
+                if (comps.contains("TileMap")) {
+                    scene.world.add_tilemap(id);
+                    auto& tm = scene.world.tilemap_pool[id];
+                    const auto& jtm = comps["TileMap"];
+                    
+                    // Resolve the path so the TextureManager can actually find it
+                    
+                    tm.textureName = resolveComponentResourcePath(scene.projectRoot, jtm.value("textureName", ""));
+                    SDL_Log("%s", tm.textureName.c_str());
+                    tm.cellWidth = jtm.value("cellWidth", 32.0f);
+                    tm.cellHeight = jtm.value("cellHeight", 32.0f);
+                    tm.snapEnabled = jtm.value("snapEnabled", true);
+                    
+                    if (jtm.contains("cells") && jtm["cells"].is_array()) {
+                        for (const auto& c : jtm["cells"]) {
+                            int col = c[0].get<int>();
+                            int row = c[1].get<int>();
+                            tm.cells.push_back({col, row});
+                        }
+                    }
+                    tm.cellOffsets.assign(tm.cells.size(), SDL_FPoint{0.0f, 0.0f});
+                    if (jtm.contains("cellOffsets") && jtm["cellOffsets"].is_array()) {
+                        const auto& offs = jtm["cellOffsets"];
+                        for (size_t k = 0; k < offs.size() && k < tm.cellOffsets.size(); ++k) {
+                            tm.cellOffsets[k].x = offs[k][0].get<float>();
+                            tm.cellOffsets[k].y = offs[k][1].get<float>();
+                        }
+                    }
+                }
             }
         }
 
@@ -10916,7 +11049,16 @@ public:
             if (scene.world.has_tilemap[i]) {
                 auto& tm = scene.world.tilemap_pool[i];
                 nlohmann::json jtm;
-                jtm["textureName"] = tm.textureName;
+                // Same treatment as TextureRef.resourceName above: store the
+                // path relative to the project root, not whatever the file
+                // browser handed back (which is relative to the Projects
+                // folder and still has the project name on the front).
+                // Leaving this un-relative-ized is what makes tiles vanish
+                // after a save/reload — resolveComponentResourcePath() ends
+                // up doubling the project folder in the path on load.
+                std::string relTileTex = std::filesystem::relative(tm.textureName, scene.projectRoot).string();
+                if (relTileTex.empty()) relTileTex = tm.textureName; // fallback: keep as-is if relative() fails
+                jtm["textureName"] = relTileTex;
                 jtm["cellWidth"] = tm.cellWidth;
                 jtm["cellHeight"] = tm.cellHeight;
                 jtm["snapEnabled"] = tm.snapEnabled;

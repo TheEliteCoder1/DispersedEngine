@@ -1,4 +1,3 @@
-// Auto-generated from C:\Users\daeli\Documents\DispersedEngine\projects\OpenWorld\scripts\main_menu.cpp
 @import "main_menu.h"
 
 reg_script(MainMenuScript, "main_menu")
