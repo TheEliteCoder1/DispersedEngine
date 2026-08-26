@@ -1,11 +1,19 @@
 {
   "name": "dispersed-engine",
   "version": "1.0.0",
+  "builtin-baseline":"ddd0023b0eee70986e42ed49d9d4afb8098f212e",
   "dependencies": [
-    "sdl3",
+    {
+      "name": "sdl3",
+      "features": ["vulkan"]
+    },
     "sdl3-image",
     "sdl3-mixer",
     "sdl3-ttf",
-    "box2d"
+    "box2d",
+    "joltphysics",
+    "glm",
+    "tinyobjloader",
+    "zlib"
   ]
 }

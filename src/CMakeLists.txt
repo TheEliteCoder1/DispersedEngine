@@ -21,7 +21,10 @@ target_link_libraries(DispersedEngine INTERFACE
     SDL3_image::SDL3_image
     SDL3_mixer::SDL3_mixer
     SDL3_ttf::SDL3_ttf
-    box2d::box2d    
+    box2d::box2d  
+    Jolt::Jolt 
+    glm::glm 
+    tinyobjloader::tinyobjloader 
 )
 
 # ── Editor executable (only when BUILD_ENGINE is ON) ──────────────────────

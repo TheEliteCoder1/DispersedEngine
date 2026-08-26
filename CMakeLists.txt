@@ -9,11 +9,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(BUILD_ENGINE  "Build the Editor executable (src/main.cpp)" ON)
  
 # ── Dependencies (resolved by vcpkg) ──────────────────────────────────────
+find_package(ZLIB        REQUIRED)
 find_package(SDL3        REQUIRED CONFIG)
 find_package(SDL3_image  REQUIRED CONFIG)
 find_package(SDL3_mixer  REQUIRED CONFIG)
 find_package(SDL3_ttf    REQUIRED CONFIG)
 find_package(box2d       REQUIRED CONFIG)
+find_package(Jolt        REQUIRED CONFIG)
+find_package(glm         REQUIRED CONFIG)
+find_package(tinyobjloader     REQUIRED CONFIG)
  
 # ── Engine interface library + optional Editor ─────────────────────────────
 add_subdirectory(src)

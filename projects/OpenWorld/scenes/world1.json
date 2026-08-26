@@ -449,11 +449,11 @@
         },
         {
             "components": {
-                "AnimationState": "resources/MathHorseMen_12.animres",
+                "AnimationState": "resources\\MathHorseMen_12.animres",
                 "Metadata": {
                     "name": "MathHorseMen"
                 },
-                "PhysicsBody": "resources/MathHorseMen_12.physicsres",
+                "PhysicsBody": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/MathHorseMen_12.physicsres",
                 "Position": {
                     "x": 13268.5,
                     "y": 9577.0

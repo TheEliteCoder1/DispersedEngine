@@ -1,6 +1,20 @@
 #include "engine.h"
+#include "engine3d.h"
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+static constexpr uint32_t TRIANGLE_VERTEX_COUNT = 3;
+static constexpr uint32_t CANVAS_TEX_WIDTH  = 1390;   // match canvasViewW
+static constexpr uint32_t CANVAS_TEX_HEIGHT = 690;    // match canvasViewH
 
 bool showCanvas = true;
+
+// ── Canvas mode: decided here in code, not at runtime ───────────────────
+// There is no in-app toggle for this anymore. Change this line and
+// recompile to switch the editor between 2D (SDL_Renderer only, no raw
+// SDL_GPU calls) and 3D (raw SDL_GPU pipeline only, no 2D canvas drawing).
+constexpr Engine3D::CanvasMode g_canvasMode = Engine3D::CanvasMode::Mode2D;
 
 
 void create_entity_with_user_input(ECSWorld& world, const std::string& name, float w, float h) {
@@ -342,7 +356,46 @@ void draw_world_overlay(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_
     }
 }
 
+std::vector<unsigned char> loadFile(const std::string& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        SDL_Log("Could not open shader file: %s", path.c_str());
+        return {};
+    }
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::vector<unsigned char> buffer(size);
+    if (file.read(reinterpret_cast<char*>(buffer.data()), size)) {
+        return buffer;
+    }
+    SDL_Log("Failed to read shader file: %s", path.c_str());
+    return {};
+}
+
+static SDL_GPUShader* CreateShaderFromSPV(SDL_GPUDevice* device,
+                                          const unsigned char* bytecode,
+                                          size_t bytecode_len,
+                                          SDL_GPUShaderStage stage,
+                                          SDL_GPUShaderFormat format) {
+    SDL_GPUShaderCreateInfo info = {};
+    info.code = bytecode;
+    info.code_size = bytecode_len;
+    info.stage = stage;
+    info.format = format;
+    info.entrypoint = "main";
+    info.num_samplers = 0;
+
+    SDL_GPUShader* shader = SDL_CreateGPUShader(device, &info);
+    if (!shader) {
+        SDL_Log("Failed to create shader: %s", SDL_GetError());
+    }
+    return shader;
+}
+
+
 int main(int argc, char* argv[]) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     const float windowWidth  = 1600.0f;
     const float windowHeight = 900.0f;
 
@@ -352,14 +405,177 @@ int main(int argc, char* argv[]) {
 
     SDL_Window* window = SDL_CreateWindow("Dispersed Engine", (int)windowWidth, (int)windowHeight, SDL_WINDOW_RESIZABLE);
     if (!window) { std::cerr << "Window creation failed: " << SDL_GetError() << std::endl; TTF_Quit(); SDL_Quit(); return 1; }
-    SDL_SetWindowOpacity(window, 0.95f);
 
     SDL_Surface* iconSurface = IMG_Load((getAssetsPath() + "icon.svg").c_str());
     if (!iconSurface) SDL_Log("Failed to load icon: %s", SDL_GetError()); else SDL_SetWindowIcon(window, iconSurface);
 
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
-    if (!renderer) { std::cerr << "Renderer creation failed: " << SDL_GetError() << std::endl; SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1; }
+    
+    SDL_SetLogPriority(SDL_LOG_CATEGORY_GPU, SDL_LOG_PRIORITY_VERBOSE);
+    SDL_SetHint(SDL_HINT_VULKAN_LIBRARY, "C:/Windows/System32/vulkan-1.dll");
+    SDL_GPUDevice* gpuDevice = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV, true, "vulkan");
+    // use Editor.exe > log.txt 2>&1 to see actual errors
+    if (!gpuDevice) {
+        SDL_Log("GPU device creation failed: %s", SDL_GetError());
+    }
+
+
+    SDL_ClaimWindowForGPUDevice(gpuDevice, window);
+
+    SDL_Renderer* renderer = SDL_CreateGPURenderer(gpuDevice, window);
+    if (!renderer) { 
+        SDL_Log("Renderer creation failed: %s\n", SDL_GetError());
+        //SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1; 
+    }
     g_resources.TextureManager.SetRenderer(renderer);
+
+    // ──────────────────────────────────────────────────────────────
+    // GPU resources for the triangle — 3D mode ONLY.
+    // g_canvasMode is a compile-time constant now, so `if constexpr` here
+    // means none of this raw SDL_GPU device/shader/pipeline/buffer setup
+    // exists at all in a 2D build: the 2D canvas never touches the GPU API,
+    // it only ever draws through the SDL_Renderer.
+    // ──────────────────────────────────────────────────────────────
+    SDL_GPUShader* vertexShader = nullptr;
+    SDL_GPUShader* fragmentShader = nullptr;
+    SDL_GPUGraphicsPipeline* trianglePipeline = nullptr;
+    SDL_GPUBuffer* vertexBuffer = nullptr;
+    SDL_GPUTexture* canvasTexture = nullptr;
+
+    if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode3D) {
+        // 1. Create render‑target texture for the canvas
+        SDL_GPUTextureCreateInfo texInfo = {};
+        texInfo.type = SDL_GPU_TEXTURETYPE_2D;
+        texInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        texInfo.width = CANVAS_TEX_WIDTH;
+        texInfo.height = CANVAS_TEX_HEIGHT;
+        texInfo.layer_count_or_depth = 1;
+        texInfo.num_levels = 1;
+        texInfo.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        canvasTexture = SDL_CreateGPUTexture(gpuDevice, &texInfo);
+        if (!canvasTexture) {
+            SDL_Log("Failed to create canvas texture: %s", SDL_GetError());
+        }
+
+
+        auto vertData = loadFile(getAssetsPath() + "shaders/triangle.vert.spv");
+        auto fragData = loadFile(getAssetsPath() + "shaders/triangle.frag.spv");
+        if (vertData.empty() || fragData.empty()) {
+            SDL_Log("Failed to load shader binaries.");
+            // handle error appropriately
+        }
+        // 2. Compile shaders from embedded SPIR‑V
+        SDL_GPUShaderFormat shaderFormat = SDL_GPU_SHADERFORMAT_SPIRV;
+        vertexShader = CreateShaderFromSPV(gpuDevice,
+            vertData.data(), vertData.size(),
+            SDL_GPU_SHADERSTAGE_VERTEX, SDL_GPU_SHADERFORMAT_SPIRV);
+        fragmentShader = CreateShaderFromSPV(gpuDevice,
+            fragData.data(), fragData.size(),
+            SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV);
+
+        // 3. Create pipeline
+        SDL_GPUVertexBufferDescription vertexDesc = {};
+        vertexDesc.slot = 0;
+        vertexDesc.pitch = sizeof(float) * 6; // 2 position + 4 color
+        vertexDesc.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+
+        SDL_GPUVertexAttribute attributes[2] = {};
+        attributes[0].location = 0;
+        attributes[0].buffer_slot = 0;
+        attributes[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+        attributes[0].offset = 0;
+
+        attributes[1].location = 1;
+        attributes[1].buffer_slot = 0;
+        attributes[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+        attributes[1].offset = sizeof(float) * 2;
+
+        SDL_GPUGraphicsPipelineCreateInfo pipelineInfo = {};
+        pipelineInfo.vertex_shader = vertexShader;
+        pipelineInfo.fragment_shader = fragmentShader;
+        pipelineInfo.vertex_input_state.num_vertex_buffers = 1;
+        pipelineInfo.vertex_input_state.vertex_buffer_descriptions = &vertexDesc;
+        pipelineInfo.vertex_input_state.num_vertex_attributes = 2;
+        pipelineInfo.vertex_input_state.vertex_attributes = attributes;
+        pipelineInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        SDL_GPUColorTargetDescription colorTargetDesc = {};
+        colorTargetDesc.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        colorTargetDesc.blend_state.enable_blend = false;
+        pipelineInfo.target_info.num_color_targets = 1;
+        pipelineInfo.target_info.color_target_descriptions = &colorTargetDesc;
+        pipelineInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        pipelineInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        pipelineInfo.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+        pipelineInfo.rasterizer_state.enable_depth_clip = true;
+
+        if (!vertexShader || !fragmentShader) {
+           SDL_Log("Skipping pipeline creation: shader compilation failed");
+        } else {
+            trianglePipeline = SDL_CreateGPUGraphicsPipeline(gpuDevice, &pipelineInfo);
+            if (!trianglePipeline) {
+                SDL_Log("Failed to create triangle pipeline: %s", SDL_GetError());
+            }
+        }
+
+        // 4. Upload vertex data
+        std::vector<float> vertexData = {
+            // x, y, r, g, b, a
+            -0.5f, -0.5f,  1.0f, 0.0f, 0.0f, 1.0f,
+             0.5f, -0.5f,  0.0f, 1.0f, 0.0f, 1.0f,
+             0.0f,  0.5f,  0.0f, 0.0f, 1.0f, 1.0f
+        };
+
+        SDL_GPUBufferCreateInfo bufferInfo = {};
+        bufferInfo.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+        bufferInfo.size = vertexData.size() * sizeof(float);
+        vertexBuffer = SDL_CreateGPUBuffer(gpuDevice, &bufferInfo);
+        if (!vertexBuffer) {
+            SDL_Log("Failed to create vertex buffer: %s", SDL_GetError());
+        }
+
+        // Upload using a transfer buffer
+        SDL_GPUTransferBufferCreateInfo tbInfo = {};
+        tbInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        tbInfo.size = vertexData.size() * sizeof(float);
+        SDL_GPUTransferBuffer* transferBuf = SDL_CreateGPUTransferBuffer(gpuDevice, &tbInfo);
+        if (transferBuf) {
+            void* mapped = SDL_MapGPUTransferBuffer(gpuDevice, transferBuf, false);
+            if (mapped) {
+                memcpy(mapped, vertexData.data(), vertexData.size() * sizeof(float));
+                SDL_UnmapGPUTransferBuffer(gpuDevice, transferBuf);
+            }
+            SDL_GPUCommandBuffer* uploadCmd = SDL_AcquireGPUCommandBuffer(gpuDevice);
+            if (uploadCmd) {
+                SDL_GPUCopyPass* copyPass = SDL_BeginGPUCopyPass(uploadCmd);
+                SDL_GPUTransferBufferLocation src = {};
+                src.transfer_buffer = transferBuf;
+                src.offset = 0;
+                SDL_GPUBufferRegion dst = {};
+                dst.buffer = vertexBuffer;
+                dst.offset = 0;
+                dst.size = vertexData.size() * sizeof(float);
+                SDL_UploadToGPUBuffer(copyPass, &src, &dst, false);
+                SDL_EndGPUCopyPass(copyPass);
+                SDL_SubmitGPUCommandBuffer(uploadCmd);
+            }
+            SDL_ReleaseGPUTransferBuffer(gpuDevice, transferBuf);
+        }
+    }
+    // ──────────────────────────────────────────────────────────────
+
+
+    // SDL_Texture* uiTarget = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_BGRA32, SDL_TEXTUREACCESS_TARGET, windowWidth, windowHeight);
+    // SDL_SetRenderTarget(renderer, uiTarget);
+
+    // SDL_GPUTexture* uiGpuTexture = (SDL_GPUTexture*)SDL_GetPointerProperty(SDL_GetTextureProperties(uiTarget), SDL_PROP_TEXTURE_GPU_TEXTURE_POINTER, nullptr);
+
+    // SDL_RenderClear(renderer);
+
+    // SDL_RenderPresent(renderer);
+    
+    SDL_RenderClear(renderer);
+    SDL_SetRenderTarget(renderer, NULL);
+    SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
+
 
     if (!g_resources.AudioManager.CreateMixerDevice()) { SDL_Log("Audio mixer init failed"); }
 
@@ -416,6 +632,10 @@ int main(int argc, char* argv[]) {
             } else { entityInspector.clearTarget(); }
         }
     };
+
+    Engine3D::Transform3D testTransform;
+    Engine3D::Mesh3D testMesh;
+    bool meshLoaded = Engine3D::loadMesh("assets/models/cube.obj", testMesh);
 
     Gui::Scrollbar verticalScrollbar, horizontalScrollbar;
     verticalScrollbar.setOrientation(Gui::ScrollOrientation::Vertical);
@@ -552,7 +772,6 @@ int main(int argc, char* argv[]) {
     toolbarBox->addChild(std::move(transpileCppBtn));
     toolbarBox->addChild(std::move(worldOverlayBtn));
     toolbarBox->setRect({0, 0, windowWidth, 60});
-
     float totalW = toolbarBox->getPadding() * 2.0f;
     const auto& children = toolbarBox->getChildren();
     for (auto& child : children) {
@@ -593,12 +812,39 @@ int main(int argc, char* argv[]) {
     static bool cameraPanning = false;
     static float cameraLastMouseX = 0.0f, cameraLastMouseY = 0.0f;
 
+
+    SDL_Log("Entering main loop now");
+
     while (running) {
         Uint64 current_time = SDL_GetTicks();
         delta_time = (float)(current_time - last_time) / 1000.0f; last_time = current_time;
 
+        // ── Canvas viewport geometry, computed FIRST ─────────────────────
+        // This used to be computed later in the frame (right before drawing),
+        // which meant every screenToWorld()/worldToScreen() call made while
+        // handling THIS frame's input events (pan, zoom-toward-cursor, click
+        // picking) was still using last frame's viewport rect. It also meant
+        // camera.offsetX/offsetY were never initialized via setupForCanvas(),
+        // so the world<->screen mapping was pinned to the window's top-left
+        // corner instead of the canvas center - which is why content (like
+        // the .world overlay) can end up positioned off-canvas/behind the
+        // toolbar even though the math "looks" right.
+        {
+            int winW0, winH0; SDL_GetWindowSize(window, &winW0, &winH0);
+            const float toolbarHeight0 = 60.0f;
+            const float inspectorWidth0 = inspectorVisible ? Gui::SceneInspector::PANEL_W : 0.0f;
+            float cvX = 0.0f;
+            float cvY = toolbarHeight0;
+            float cvW = (float)winW0 - (inspectorVisible ? inspectorWidth0 : 0.0f);
+            float cvH = (float)winH0 - toolbarHeight0;
+            if (cvW < 200) cvW = 200;
+            if (cvH < 200) cvH = 200;
+            canvasViewX = cvX; canvasViewY = cvY; canvasViewW = cvW; canvasViewH = cvH;
+            g_editorCamera.setupForCanvas(canvasViewX, canvasViewY, canvasViewW, canvasViewH);
+        }
+
         while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_EVENT_QUIT) running = false;
+            if (e.type == SDL_EVENT_QUIT) { SDL_Log("QUIT event received - exiting"); running = false; }
 
             if (e.type == SDL_EVENT_KEY_DOWN) {
                 bool ctrlDown = (e.key.mod & (SDL_KMOD_LCTRL | SDL_KMOD_RCTRL));
@@ -905,17 +1151,21 @@ int main(int argc, char* argv[]) {
             prevSelectedGuiElem = selectedGuiElem;
         }
 
-        SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255); SDL_RenderClear(renderer);
+        // FIX: Clear the *entire* window every frame, not just the canvas
+        // rect. With the GPU-backed renderer the swapchain is multi-buffered
+        // (2-3 images rotating under Vulkan); any pixel that isn't explicitly
+        // repainted every single frame keeps whatever an *older* swapchain
+        // image had on it. That's what was showing up as: the top toolbar
+        // strip looking corrupted/torn (it only ever got individual button
+        // draws, never a full background fill), and the world axis appearing
+        // to "smear"/redraw at multiple positions while panning (you were
+        // actually seeing 2-3 different historical frames cycling through
+        // the swapchain, not the current frame drawn multiple times).
+        SDL_SetRenderDrawColor(renderer, 20, 20, 24, 255);
+        SDL_RenderClear(renderer);
 
         int winW, winH; SDL_GetWindowSize(window, &winW, &winH);
         const float toolbarHeight = 60.0f;
-        const float inspectorWidth = inspectorVisible ? Gui::SceneInspector::PANEL_W : 0.0f;
-        canvasViewX = 0.0f;
-        canvasViewY = toolbarHeight;
-        canvasViewW = (float)winW - (inspectorVisible ? inspectorWidth : 0.0f);
-        canvasViewH = (float)winH - toolbarHeight;
-        if (canvasViewW < 200) canvasViewW = 200;
-        if (canvasViewH < 200) canvasViewH = 200;
 
         const float minLogicalW = 1390.0f;
         const float minLogicalH = 690.0f;
@@ -940,15 +1190,75 @@ int main(int argc, char* argv[]) {
         toolbarContainer->render(0.0f, 0.0f);
 
         if (showCanvas) {
-            render_editor_canvas(renderer);
-            draw_world_overlay(renderer, textEngine, g_resources.FontManager.Get("regularFont"), g_editorCamera);
-            render_system_and_scene_gui_in_editor(
-                renderer, textEngine, g_resources.FontManager.Get("regularFont"),
-                world, canvasViewX, canvasViewY,
-                editorScrollX, editorScrollY,
-                guiElements,
-                g_editorCamera
-            );
+            // Canvas viewport target rectangle
+            SDL_FRect canvasRect = { canvasViewX, canvasViewY, canvasViewW, canvasViewH };
+
+            // ── 3D CANVAS MODE (GPU Triangle / 3D Scene Pipeline) ───────────
+            // if constexpr: since g_canvasMode is decided at compile time,
+            // a 2D build contains none of this raw SDL_GPU rendering code,
+            // and a 3D build contains none of the 2D SDL_Renderer canvas
+            // drawing below. The two paths can never run in the same binary.
+            if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode3D) {
+                // 1. Render the triangle to canvasTexture via GPU
+                SDL_GPUCommandBuffer* gpuCmd = SDL_AcquireGPUCommandBuffer(gpuDevice);
+                if (gpuCmd) {
+                    SDL_GPUColorTargetInfo colorInfo = {};
+                    colorInfo.texture = canvasTexture;
+                    colorInfo.load_op = SDL_GPU_LOADOP_CLEAR;
+                    colorInfo.store_op = SDL_GPU_STOREOP_STORE;
+                    colorInfo.clear_color = {0.08f, 0.08f, 0.12f, 1.0f}; // Dark 3D viewport clear color
+
+                    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmd, &colorInfo, 1, nullptr);
+                    if (pass) {
+                        SDL_BindGPUGraphicsPipeline(pass, trianglePipeline);
+
+                        SDL_GPUBufferBinding binding;
+                        binding.buffer = vertexBuffer;
+                        binding.offset = 0;
+                        SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
+
+                        SDL_DrawGPUPrimitives(pass, TRIANGLE_VERTEX_COUNT, 1, 0, 0);
+                        SDL_EndGPURenderPass(pass);
+                    }
+                    SDL_SubmitGPUCommandBuffer(gpuCmd);
+                    SDL_WaitForGPUIdle(gpuDevice);
+                }
+
+                // 2. Wrap the GPU texture into an SDL texture using properties
+                SDL_PropertiesID props = SDL_CreateProperties();
+                SDL_SetPointerProperty(props, SDL_PROP_TEXTURE_CREATE_GPU_TEXTURE_POINTER, canvasTexture);
+                SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, SDL_PIXELFORMAT_RGBA32);
+                SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER, SDL_TEXTUREACCESS_STATIC);
+                SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, CANVAS_TEX_WIDTH);
+                SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, CANVAS_TEX_HEIGHT);
+
+                SDL_Texture* sdlCanvasTex = SDL_CreateTextureWithProperties(renderer, props);
+                SDL_DestroyProperties(props);
+
+                if (sdlCanvasTex) {
+                    SDL_RenderTexture(renderer, sdlCanvasTex, nullptr, &canvasRect);
+                    SDL_DestroyTexture(sdlCanvasTex);
+                }
+            } 
+            // ── 2D CANVAS MODE (Grid, Entities, World Overlay, Scene GUI) ────
+            else if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode2D) {
+                // FIX: Explicitly clear/fill the 2D canvas area each frame to prevent pixel trails
+                SDL_SetRenderDrawColor(renderer, 30, 30, 35, 255); // Dark 2D viewport clear color
+                SDL_RenderFillRect(renderer, &canvasRect);
+
+                // Render 2D canvas contents
+                render_editor_canvas(renderer);
+                draw_world_overlay(renderer, textEngine, g_resources.FontManager.Get("regularFont"), g_editorCamera);
+                render_system_and_scene_gui_in_editor(
+                    renderer, textEngine, g_resources.FontManager.Get("regularFont"),
+                    world, canvasViewX, canvasViewY,
+                    editorScrollX, editorScrollY,
+                    guiElements,
+                    g_editorCamera
+                );
+            }
+
+            // ── SHARED CANVAS OVERLAYS & CONTROLS (Active in both 2D and 3D) ──
             verticalScrollbar.render(renderer);
             horizontalScrollbar.render(renderer);
 
@@ -957,9 +1267,6 @@ int main(int argc, char* argv[]) {
             float containerWidth = 140;
             canvasTools->setRect({ toolsX - containerWidth, toolsY, containerWidth, 40 });
             canvasTools->render(0.0f, 0.0f);
-        } else {
-            textEditor.setRect({canvasViewX, canvasViewY, canvasViewW, canvasViewH}); textEditor.render(0.0f, 0.0f);
-            textEditor.render(0.0f, 0.0f);
         }
 
         if (inspectorVisible) {
@@ -1002,6 +1309,13 @@ int main(int argc, char* argv[]) {
 
     // gamepad cleanup
     if (gamepad) SDL_CloseGamepad(gamepad);
+
+    // GPU resource cleanup
+    if (canvasTexture) SDL_ReleaseGPUTexture(gpuDevice, canvasTexture);
+    if (vertexBuffer) SDL_ReleaseGPUBuffer(gpuDevice, vertexBuffer);
+    if (trianglePipeline) SDL_ReleaseGPUGraphicsPipeline(gpuDevice, trianglePipeline);
+    if (vertexShader) SDL_ReleaseGPUShader(gpuDevice, vertexShader);
+    if (fragmentShader) SDL_ReleaseGPUShader(gpuDevice, fragmentShader);
 
     // clears all allocations and also calls library quit functions unless that is internal
     g_resources.FontManager.Clear();

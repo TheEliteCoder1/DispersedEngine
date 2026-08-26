@@ -1,0 +1,31 @@
+{
+    "activeClipIndex": 1,
+    "clips": [
+        {
+            "frameHeight": 256.0,
+            "frameWidth": 256.0,
+            "imageFrames": [
+                "assets\\textures\\HorsemathmenSleep1.svg",
+                "assets\\textures\\HorsemathmenSleep2.svg",
+                "assets\\textures\\HorsemathmenSleep3.svg"
+            ],
+            "isPlaying": true,
+            "loop": true,
+            "name": "sleep",
+            "speed": 5.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [
+                "assets\\textures\\HorsemathmenIdle1.svg",
+                "assets\\textures\\HorsemathmenIdle2.svg",
+                "assets\\textures\\HorsemathmenIdle3.svg"
+            ],
+            "isPlaying": true,
+            "loop": true,
+            "name": "idle",
+            "speed": 6.0
+        }
+    ]
+}

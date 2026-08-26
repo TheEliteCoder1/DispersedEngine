@@ -67,6 +67,10 @@ if exist src\assets (
 xcopy /E /I /Y src\assets build_windows\src\Release\assets >nul 2>&1
 echo - Copied Engine assets to src\Release
 )
+if exist src\shaders (
+xcopy /E /I /Y src\shaders build_windows\src\Release\shaders >nul 2>&1
+echo - Copied 3D shaders to src\Release
+)
 :: Project Assets -> Loop through all projects dynamically
 for /d %%p in (projects\*) do (
     if exist "%%p\assets" (
