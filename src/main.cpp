@@ -14,7 +14,7 @@ bool showCanvas = true;
 // There is no in-app toggle for this anymore. Change this line and
 // recompile to switch the editor between 2D (SDL_Renderer only, no raw
 // SDL_GPU calls) and 3D (raw SDL_GPU pipeline only, no 2D canvas drawing).
-constexpr Engine3D::CanvasMode g_canvasMode = Engine3D::CanvasMode::Mode2D;
+constexpr Engine3D::CanvasMode g_canvasMode = Engine3D::CanvasMode::Mode3D;
 
 
 void create_entity_with_user_input(ECSWorld& world, const std::string& name, float w, float h) {
@@ -409,23 +409,38 @@ int main(int argc, char* argv[]) {
     SDL_Surface* iconSurface = IMG_Load((getAssetsPath() + "icon.svg").c_str());
     if (!iconSurface) SDL_Log("Failed to load icon: %s", SDL_GetError()); else SDL_SetWindowIcon(window, iconSurface);
 
-    
-    SDL_SetLogPriority(SDL_LOG_CATEGORY_GPU, SDL_LOG_PRIORITY_VERBOSE);
-    SDL_SetHint(SDL_HINT_VULKAN_LIBRARY, "C:/Windows/System32/vulkan-1.dll");
-    SDL_GPUDevice* gpuDevice = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV, true, "vulkan");
-    // use Editor.exe > log.txt 2>&1 to see actual errors
-    if (!gpuDevice) {
-        SDL_Log("GPU device creation failed: %s", SDL_GetError());
+    // ── GPU device and renderer creation ──────────────────────────────────
+    // g_canvasMode is a compile-time constant, so only one of these two
+    // paths is ever included in the binary.
+    SDL_GPUDevice* gpuDevice = nullptr;
+    SDL_Renderer* renderer   = nullptr;
+
+    if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode3D) {
+        SDL_SetLogPriority(SDL_LOG_CATEGORY_GPU, SDL_LOG_PRIORITY_VERBOSE);
+        SDL_SetHint(SDL_HINT_VULKAN_LIBRARY, "C:/Windows/System32/vulkan-1.dll");
+        gpuDevice = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV, true, "vulkan");
+        if (!gpuDevice) {
+            SDL_Log("GPU device creation failed: %s", SDL_GetError());
+            // In a 3D build we cannot continue without a GPU device.
+            SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1;
+        }
+        SDL_ClaimWindowForGPUDevice(gpuDevice, window);
+        renderer = SDL_CreateGPURenderer(gpuDevice, window);
+        if (!renderer) {
+            SDL_Log("GPURenderer creation failed: %s", SDL_GetError());
+            SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1;
+        }
+    } else {
+        // 2D mode: use a classic SDL_Renderer (software or accelerated, but
+        // not tied to our own GPU device). This matches the pre‑3D-integration
+        // setup and avoids any raw SDL_GPU API calls.
+        renderer = SDL_CreateRenderer(window, nullptr);
+        if (!renderer) {
+            SDL_Log("Renderer creation failed: %s", SDL_GetError());
+            SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1;
+        }
     }
 
-
-    SDL_ClaimWindowForGPUDevice(gpuDevice, window);
-
-    SDL_Renderer* renderer = SDL_CreateGPURenderer(gpuDevice, window);
-    if (!renderer) { 
-        SDL_Log("Renderer creation failed: %s\n", SDL_GetError());
-        //SDL_DestroyWindow(window); TTF_Quit(); SDL_Quit(); return 1; 
-    }
     g_resources.TextureManager.SetRenderer(renderer);
 
     // ──────────────────────────────────────────────────────────────
@@ -456,12 +471,10 @@ int main(int argc, char* argv[]) {
             SDL_Log("Failed to create canvas texture: %s", SDL_GetError());
         }
 
-
         auto vertData = loadFile(getAssetsPath() + "shaders/triangle.vert.spv");
         auto fragData = loadFile(getAssetsPath() + "shaders/triangle.frag.spv");
         if (vertData.empty() || fragData.empty()) {
             SDL_Log("Failed to load shader binaries.");
-            // handle error appropriately
         }
         // 2. Compile shaders from embedded SPIR‑V
         SDL_GPUShaderFormat shaderFormat = SDL_GPU_SHADERFORMAT_SPIRV;
@@ -560,22 +573,10 @@ int main(int argc, char* argv[]) {
             SDL_ReleaseGPUTransferBuffer(gpuDevice, transferBuf);
         }
     }
-    // ──────────────────────────────────────────────────────────────
 
-
-    // SDL_Texture* uiTarget = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_BGRA32, SDL_TEXTUREACCESS_TARGET, windowWidth, windowHeight);
-    // SDL_SetRenderTarget(renderer, uiTarget);
-
-    // SDL_GPUTexture* uiGpuTexture = (SDL_GPUTexture*)SDL_GetPointerProperty(SDL_GetTextureProperties(uiTarget), SDL_PROP_TEXTURE_GPU_TEXTURE_POINTER, nullptr);
-
-    // SDL_RenderClear(renderer);
-
-    // SDL_RenderPresent(renderer);
-    
     SDL_RenderClear(renderer);
     SDL_SetRenderTarget(renderer, NULL);
     SDL_SetRenderDrawColor(renderer, 30, 30, 30, 255);
-
 
     if (!g_resources.AudioManager.CreateMixerDevice()) { SDL_Log("Audio mixer init failed"); }
 
@@ -585,7 +586,6 @@ int main(int argc, char* argv[]) {
 
     Gui::TextEditor textEditor(renderer, textEngine, g_resources.FontManager.Get("largeFont"), {0, 0, 100, 100});
     textEditor.setVisible(false);
-    
 
     std::filesystem::path projectsAbsPath = std::filesystem::absolute(getProjectsPath());
     Gui::FileExplorer fileExplorer(renderer, textEngine, g_resources.FontManager.Get("regularFont"), window, projectsAbsPath.string(), "*.json");
@@ -672,7 +672,6 @@ int main(int argc, char* argv[]) {
         fileExplorer.open();
     });
 
-    
     auto openScriptBtn = makeButton("O-Script", [&]() {
         fileExplorer.setNewTitle("File Explorer - [*.cpp;*.h;*.ls;*.lh;*.txt;*.*]");
         fileExplorer.setFilter("*.cpp;*.h;*.ls;*.txt;*.*;*.json");
@@ -700,7 +699,6 @@ int main(int argc, char* argv[]) {
     auto addGuiElemBtn = makeButton("+ GuiElem", [dialog2]() { modeBeforeDialog = currentEditMode; currentEditMode = EditMode::Dialog; dialog2->open(); });
 
     textEditor.onClose = [&]() { showCanvas = true; textEditor.setVisible(false);  SDL_StopTextInput(window); };
-   
 
     auto selectModeBtn = makeButton("Select", [](){ currentEditMode = EditMode::Select; });
     auto moveBtn = makeButton("Move", [](){ currentEditMode = EditMode::MoveWithMouse; });
@@ -718,7 +716,6 @@ int main(int argc, char* argv[]) {
     });
 
     auto worldOverlayBtn = makeButton("World Ref", [](){ g_showWorldOverlay = !g_showWorldOverlay; });
-
 
     auto transpileLsBtn = makeButton("Ls To C++", [&textEditor]() {
         if (!textEditor.isLogicScript) {
@@ -758,16 +755,16 @@ int main(int argc, char* argv[]) {
     toolbarBox->addChild(std::move(loadBtn));
     toolbarBox->addChild(std::move(openScriptBtn));
     toolbarBox->addChild(std::move(saveBtn));
-    toolbarBox->addChild(std::move(addEntBtn)); 
+    toolbarBox->addChild(std::move(addEntBtn));
     toolbarBox->addChild(std::move(addGuiElemBtn));
-    toolbarBox->addChild(std::move(selectModeBtn)); 
-    toolbarBox->addChild(std::move(moveBtn)); 
+    toolbarBox->addChild(std::move(selectModeBtn));
+    toolbarBox->addChild(std::move(moveBtn));
     toolbarBox->addChild(std::move(deleteBtn));
-    toolbarBox->addChild(std::move(selectSingleBtn)); 
-    toolbarBox->addChild(std::move(selectMultiBtn)); 
+    toolbarBox->addChild(std::move(selectSingleBtn));
+    toolbarBox->addChild(std::move(selectMultiBtn));
     toolbarBox->addChild(std::move(deselectBtn));
-    toolbarBox->addChild(std::move(inspectorToggleBtn)); 
-    toolbarBox->addChild(std::move(canvasBtn)); 
+    toolbarBox->addChild(std::move(inspectorToggleBtn));
+    toolbarBox->addChild(std::move(canvasBtn));
     toolbarBox->addChild(std::move(transpileLsBtn));
     toolbarBox->addChild(std::move(transpileCppBtn));
     toolbarBox->addChild(std::move(worldOverlayBtn));
@@ -811,7 +808,6 @@ int main(int argc, char* argv[]) {
     // Camera state — P+drag to pan (no more Z gate for zoom)
     static bool cameraPanning = false;
     static float cameraLastMouseX = 0.0f, cameraLastMouseY = 0.0f;
-
 
     SDL_Log("Entering main loop now");
 
@@ -963,8 +959,6 @@ int main(int argc, char* argv[]) {
             if (!showCanvas) {
                 if (textEditor.handleEvent(e, window, 0.0f, 0.0f)) continue;
             }
-
-            
 
             bool consumedByScrollbar = false;
             if (showCanvas) {
@@ -1239,7 +1233,7 @@ int main(int argc, char* argv[]) {
                     SDL_RenderTexture(renderer, sdlCanvasTex, nullptr, &canvasRect);
                     SDL_DestroyTexture(sdlCanvasTex);
                 }
-            } 
+            }
             // ── 2D CANVAS MODE (Grid, Entities, World Overlay, Scene GUI) ────
             else if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode2D) {
                 // FIX: Explicitly clear/fill the 2D canvas area each frame to prevent pixel trails
@@ -1310,12 +1304,16 @@ int main(int argc, char* argv[]) {
     // gamepad cleanup
     if (gamepad) SDL_CloseGamepad(gamepad);
 
-    // GPU resource cleanup
-    if (canvasTexture) SDL_ReleaseGPUTexture(gpuDevice, canvasTexture);
-    if (vertexBuffer) SDL_ReleaseGPUBuffer(gpuDevice, vertexBuffer);
-    if (trianglePipeline) SDL_ReleaseGPUGraphicsPipeline(gpuDevice, trianglePipeline);
-    if (vertexShader) SDL_ReleaseGPUShader(gpuDevice, vertexShader);
-    if (fragmentShader) SDL_ReleaseGPUShader(gpuDevice, fragmentShader);
+    // GPU resource cleanup (only in 3D mode, pointers are nullptr in 2D)
+    if (gpuDevice) {
+        if (canvasTexture) SDL_ReleaseGPUTexture(gpuDevice, canvasTexture);
+        if (vertexBuffer) SDL_ReleaseGPUBuffer(gpuDevice, vertexBuffer);
+        if (trianglePipeline) SDL_ReleaseGPUGraphicsPipeline(gpuDevice, trianglePipeline);
+        if (vertexShader) SDL_ReleaseGPUShader(gpuDevice, vertexShader);
+        if (fragmentShader) SDL_ReleaseGPUShader(gpuDevice, fragmentShader);
+        // Release the GPU device itself (this also releases the window claim)
+        SDL_DestroyGPUDevice(gpuDevice);
+    }
 
     // clears all allocations and also calls library quit functions unless that is internal
     g_resources.FontManager.Clear();
@@ -1328,7 +1326,9 @@ int main(int argc, char* argv[]) {
     if (iconSurface) SDL_DestroySurface(iconSurface);
 
     // systems cleanup
-    TTF_DestroyRendererTextEngine(textEngine); SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window);
+    TTF_DestroyRendererTextEngine(textEngine);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
 
     // final exit
     SDL_Quit();
