@@ -1,20 +1,39 @@
 #include "engine.h"
 #include "engine3d.h"
+#include "physics3d.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/quaternion.hpp> // glm::quat used by Physics3D bodies
 
-static constexpr uint32_t TRIANGLE_VERTEX_COUNT = 3;
-static constexpr uint32_t CANVAS_TEX_WIDTH  = 1390;   // match canvasViewW
-static constexpr uint32_t CANVAS_TEX_HEIGHT = 690;    // match canvasViewH
+// ===== ADDED: 3D camera and render target globals =====
+Engine3D::Camera3D g_editorCamera3D;
+Engine3D::CanvasRenderTarget3D g_canvasRenderTarget;
+bool g_camOrbiting = false;
+float g_camLastMouseX = 0.0f, g_camLastMouseY = 0.0f;
+
+SDL_FRect GamepadCursorIconSrcRect =  {0.0f, 0.0f, 32.0f, 32.0f};
+SDL_FRect GamepadCursorIconDestRect = {0.0f, 0.0f, 1600.0f, 900.0f};
+
+// ===== REMOVED: fixed-size texture constants (no longer needed) =====
+// static constexpr uint32_t CANVAS_TEX_WIDTH  = 1390;
+// static constexpr uint32_t CANVAS_TEX_HEIGHT = 690;
+
+// Path to the shader binaries used by both the Examples triangle and the
+// real obj pipeline. Compile the corresponding .vert/.frag GLSL sources
+// (see comment blocks near their load sites below) to SPIR-V with
+// glslc/glslangValidator and drop them here.
+static const std::string SHADER_DIR = getAssetsPath() + "shaders/";
 
 bool showCanvas = true;
 
-// ── Canvas mode: decided here in code, not at runtime ───────────────────
-// There is no in-app toggle for this anymore. Change this line and
-// recompile to switch the editor between 2D (SDL_Renderer only, no raw
-// SDL_GPU calls) and 3D (raw SDL_GPU pipeline only, no 2D canvas drawing).
-constexpr Engine3D::CanvasMode g_canvasMode = Engine3D::CanvasMode::Mode3D;
+#ifdef __EMSCRIPTEN__
+    // Web: 2D only – no GPU device, no Vulkan/WebGPU risk
+    constexpr Engine3D::CanvasMode g_canvasMode = Engine3D::CanvasMode::Mode2D;
+#else
+    // Desktop: you can freely switch between 2D and 3D here
+    constexpr Engine3D::CanvasMode g_canvasMode = Engine3D::CanvasMode::Mode3D;
+#endif
 
 
 void create_entity_with_user_input(ECSWorld& world, const std::string& name, float w, float h) {
@@ -301,25 +320,45 @@ void draw_world_overlay(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_
                          Tools::Camera& camera) {
     if (!g_showWorldOverlay || g_worldOverlayEntities.empty()) return;
 
+    // ── Compute visible world rectangle for culling ──────────────────────
+    // Get the canvas dimensions from the global variables (they are updated each frame)
+    float viewX = canvasViewX;
+    float viewY = canvasViewY;
+    float viewW = canvasViewW;
+    float viewH = canvasViewH;
+    float wL, wT, wR, wB;
+    camera.getVisibleWorldBounds(viewX, viewY, viewW, viewH, wL, wT, wR, wB);
+    // Add a small margin to avoid culling objects that are exactly on the edge
+    const float cullMargin = 20.0f; // in world units
+    SDL_FRect visibleRect = { wL - cullMargin, wT - cullMargin,
+                              (wR - wL) + 2.0f * cullMargin,
+                              (wB - wT) + 2.0f * cullMargin };
+
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
     for (Entity e : g_worldOverlayEntities) {
         if (!g_worldOverlay.has_position[e]) continue;
 
-        // Get entity dimensions
+        // Get entity dimensions (fallback to 16x16)
         float w = g_worldOverlay.has_rectangle_shape[e]
                       ? g_worldOverlay.rectangle_shape_pool[e].w
                       : 16.0f;
         float h = g_worldOverlay.has_rectangle_shape[e]
                       ? g_worldOverlay.rectangle_shape_pool[e].h
                       : 16.0f;
+
+        // Culling: skip if entity's AABB doesn't intersect visible rect
+        float ex = g_worldOverlay.position_pool[e].x;
+        float ey = g_worldOverlay.position_pool[e].y;
+        if (ex + w < visibleRect.x || ex > visibleRect.x + visibleRect.w ||
+            ey + h < visibleRect.y || ey > visibleRect.y + visibleRect.h) {
+            continue;
+        }
+
         float scaledW = w * camera.zoom;
         float scaledH = h * camera.zoom;
 
-        SDL_FPoint screenPos = camera.worldToScreen(
-            g_worldOverlay.position_pool[e].x,
-            g_worldOverlay.position_pool[e].y
-        );
+        SDL_FPoint screenPos = camera.worldToScreen(ex, ey);
         float screenX = screenPos.x;
         float screenY = screenPos.y;
 
@@ -443,6 +482,10 @@ int main(int argc, char* argv[]) {
 
     g_resources.TextureManager.SetRenderer(renderer);
 
+    std::string GamepadCursorIconPath = getAssetsPath() + "icon.ico";
+
+    g_resources.TextureManager.Load("GamePadCursorIcon", GamepadCursorIconPath);
+
     // ──────────────────────────────────────────────────────────────
     // GPU resources for the triangle — 3D mode ONLY.
     // g_canvasMode is a compile-time constant now, so `if constexpr` here
@@ -450,127 +493,65 @@ int main(int argc, char* argv[]) {
     // exists at all in a 2D build: the 2D canvas never touches the GPU API,
     // it only ever draws through the SDL_Renderer.
     // ──────────────────────────────────────────────────────────────
-    SDL_GPUShader* vertexShader = nullptr;
-    SDL_GPUShader* fragmentShader = nullptr;
-    SDL_GPUGraphicsPipeline* trianglePipeline = nullptr;
-    SDL_GPUBuffer* vertexBuffer = nullptr;
-    SDL_GPUTexture* canvasTexture = nullptr;
+    // ===== REMOVED: canvasTexture, canvasDepthTexture, sdlCanvasTexture =====
+    // They are replaced by g_canvasRenderTarget.
+    Engine3D::Examples::TriangleResources triangleExample;
+
+    // Real obj + material rendering resources (renderObj path).
+    SDL_GPUShader* objVertexShader = nullptr;
+    SDL_GPUShader* objFragmentShader = nullptr;
+    SDL_GPUGraphicsPipeline* objPipeline = nullptr;
+    Engine3D::DefaultGpuResources gpuDefaults;
+    Engine3D::ObjModel cubeObjModel;
 
     if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode3D) {
-        // 1. Create render‑target texture for the canvas
-        SDL_GPUTextureCreateInfo texInfo = {};
-        texInfo.type = SDL_GPU_TEXTURETYPE_2D;
-        texInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-        texInfo.width = CANVAS_TEX_WIDTH;
-        texInfo.height = CANVAS_TEX_HEIGHT;
-        texInfo.layer_count_or_depth = 1;
-        texInfo.num_levels = 1;
-        texInfo.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
-        canvasTexture = SDL_CreateGPUTexture(gpuDevice, &texInfo);
-        if (!canvasTexture) {
-            SDL_Log("Failed to create canvas texture: %s", SDL_GetError());
+        // ===== REMOVED: fixed-size canvas texture creation =====
+        // Instead we rely on g_canvasRenderTarget.resize() each frame.
+
+        // 1. Minimal hardcoded-triangle example, entirely optional --
+        // useful as a smoke test that the GPU device/shader pipeline
+        // works at all before debugging the heavier obj pipeline below.
+        // Requires assets/shaders/triangle.{vert,frag}.spv, compiled from:
+        //   // triangle.vert
+        //   #version 450
+        //   layout(location=0) in vec2 pos;
+        //   layout(location=1) in vec4 color;
+        //   layout(location=0) out vec4 vColor;
+        //   void main() { vColor = color; gl_Position = vec4(pos, 0.0, 1.0); }
+        //   // triangle.frag
+        //   #version 450
+        //   layout(location=0) in vec4 vColor;
+        //   layout(location=0) out vec4 fragColor;
+        //   void main() { fragColor = vColor; }
+        if (!Engine3D::Examples::setupTriangleExample(gpuDevice, SHADER_DIR,
+                                                       SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, triangleExample)) {
+            SDL_Log("Triangle example setup failed (missing shader binaries?) -- continuing without it.");
         }
 
-        auto vertData = loadFile(getAssetsPath() + "shaders/triangle.vert.spv");
-        auto fragData = loadFile(getAssetsPath() + "shaders/triangle.frag.spv");
-        if (vertData.empty() || fragData.empty()) {
-            SDL_Log("Failed to load shader binaries.");
-        }
-        // 2. Compile shaders from embedded SPIR‑V
-        SDL_GPUShaderFormat shaderFormat = SDL_GPU_SHADERFORMAT_SPIRV;
-        vertexShader = CreateShaderFromSPV(gpuDevice,
-            vertData.data(), vertData.size(),
-            SDL_GPU_SHADERSTAGE_VERTEX, SDL_GPU_SHADERFORMAT_SPIRV);
-        fragmentShader = CreateShaderFromSPV(gpuDevice,
-            fragData.data(), fragData.size(),
-            SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV);
-
-        // 3. Create pipeline
-        SDL_GPUVertexBufferDescription vertexDesc = {};
-        vertexDesc.slot = 0;
-        vertexDesc.pitch = sizeof(float) * 6; // 2 position + 4 color
-        vertexDesc.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-
-        SDL_GPUVertexAttribute attributes[2] = {};
-        attributes[0].location = 0;
-        attributes[0].buffer_slot = 0;
-        attributes[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-        attributes[0].offset = 0;
-
-        attributes[1].location = 1;
-        attributes[1].buffer_slot = 0;
-        attributes[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-        attributes[1].offset = sizeof(float) * 2;
-
-        SDL_GPUGraphicsPipelineCreateInfo pipelineInfo = {};
-        pipelineInfo.vertex_shader = vertexShader;
-        pipelineInfo.fragment_shader = fragmentShader;
-        pipelineInfo.vertex_input_state.num_vertex_buffers = 1;
-        pipelineInfo.vertex_input_state.vertex_buffer_descriptions = &vertexDesc;
-        pipelineInfo.vertex_input_state.num_vertex_attributes = 2;
-        pipelineInfo.vertex_input_state.vertex_attributes = attributes;
-        pipelineInfo.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
-        SDL_GPUColorTargetDescription colorTargetDesc = {};
-        colorTargetDesc.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-        colorTargetDesc.blend_state.enable_blend = false;
-        pipelineInfo.target_info.num_color_targets = 1;
-        pipelineInfo.target_info.color_target_descriptions = &colorTargetDesc;
-        pipelineInfo.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
-        pipelineInfo.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
-        pipelineInfo.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
-        pipelineInfo.rasterizer_state.enable_depth_clip = true;
-
-        if (!vertexShader || !fragmentShader) {
-           SDL_Log("Skipping pipeline creation: shader compilation failed");
+        // 2. Real obj + material pipeline. Requires
+        // assets/shaders/obj.{vert,frag}.spv, compiled 
+        // (SDL_GPU's SPIR-V binding convention reserves descriptor set 0
+        // for the vertex-stage sampler slots, 1 for vertex uniforms, 2
+        // for fragment samplers, 3 for fragment uniforms -- adjust the
+        // `set=` numbers above to match whatever your build's shader
+        // cross-compiler expects if you target Metal/DX12 as well.)
+        objVertexShader = Engine3D::loadShaderSPV(gpuDevice, SHADER_DIR + "obj.vert.spv",
+                                                   SDL_GPU_SHADERSTAGE_VERTEX, 0, 1);
+        objFragmentShader = Engine3D::loadShaderSPV(gpuDevice, SHADER_DIR + "obj.frag.spv",
+                                                     SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
+        if (objVertexShader && objFragmentShader) {
+            objPipeline = Engine3D::createObjPipeline(gpuDevice, objVertexShader, objFragmentShader,
+                                                       SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
         } else {
-            trianglePipeline = SDL_CreateGPUGraphicsPipeline(gpuDevice, &pipelineInfo);
-            if (!trianglePipeline) {
-                SDL_Log("Failed to create triangle pipeline: %s", SDL_GetError());
-            }
+            SDL_Log("Obj shaders failed to load -- renderObj() will be skipped this run.");
         }
 
-        // 4. Upload vertex data
-        std::vector<float> vertexData = {
-            // x, y, r, g, b, a
-            -0.5f, -0.5f,  1.0f, 0.0f, 0.0f, 1.0f,
-             0.5f, -0.5f,  0.0f, 1.0f, 0.0f, 1.0f,
-             0.0f,  0.5f,  0.0f, 0.0f, 1.0f, 1.0f
-        };
-
-        SDL_GPUBufferCreateInfo bufferInfo = {};
-        bufferInfo.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
-        bufferInfo.size = vertexData.size() * sizeof(float);
-        vertexBuffer = SDL_CreateGPUBuffer(gpuDevice, &bufferInfo);
-        if (!vertexBuffer) {
-            SDL_Log("Failed to create vertex buffer: %s", SDL_GetError());
-        }
-
-        // Upload using a transfer buffer
-        SDL_GPUTransferBufferCreateInfo tbInfo = {};
-        tbInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        tbInfo.size = vertexData.size() * sizeof(float);
-        SDL_GPUTransferBuffer* transferBuf = SDL_CreateGPUTransferBuffer(gpuDevice, &tbInfo);
-        if (transferBuf) {
-            void* mapped = SDL_MapGPUTransferBuffer(gpuDevice, transferBuf, false);
-            if (mapped) {
-                memcpy(mapped, vertexData.data(), vertexData.size() * sizeof(float));
-                SDL_UnmapGPUTransferBuffer(gpuDevice, transferBuf);
-            }
-            SDL_GPUCommandBuffer* uploadCmd = SDL_AcquireGPUCommandBuffer(gpuDevice);
-            if (uploadCmd) {
-                SDL_GPUCopyPass* copyPass = SDL_BeginGPUCopyPass(uploadCmd);
-                SDL_GPUTransferBufferLocation src = {};
-                src.transfer_buffer = transferBuf;
-                src.offset = 0;
-                SDL_GPUBufferRegion dst = {};
-                dst.buffer = vertexBuffer;
-                dst.offset = 0;
-                dst.size = vertexData.size() * sizeof(float);
-                SDL_UploadToGPUBuffer(copyPass, &src, &dst, false);
-                SDL_EndGPUCopyPass(copyPass);
-                SDL_SubmitGPUCommandBuffer(uploadCmd);
-            }
-            SDL_ReleaseGPUTransferBuffer(gpuDevice, transferBuf);
+        // 3. Load the cube (faces + materials) for the GPU renderer.
+        // loadMesh() below still parses the same file for the legacy
+        // flat/wireframe path (kept for reference); loadObjModel() is
+        // the one renderObj() actually draws.
+        if (!Engine3D::loadObjModel(gpuDevice, getAssetsPath() + "models/cube.obj", gpuDefaults, cubeObjModel)) {
+            SDL_Log("Failed to load GPU obj model for cube.obj");
         }
     }
 
@@ -635,7 +616,31 @@ int main(int argc, char* argv[]) {
 
     Engine3D::Transform3D testTransform;
     Engine3D::Mesh3D testMesh;
-    bool meshLoaded = Engine3D::loadMesh("assets/models/cube.obj", testMesh);
+    // Legacy flat-vertex parse of the same file, kept for the CPU
+    // wireframe path below; the GPU renderObj() path uses
+    // Engine3D::loadObjModel(cubeObjModel) set up earlier instead.
+    bool meshLoaded = Engine3D::loadMesh(getAssetsPath() + "models/cube.obj", testMesh);
+
+    // ── Jolt physics world driving the cube's transform ──────────────────
+    // Mirrors how a 2D scene would own a Physics::PhysicsWorld: one world,
+    // any number of owned bodies, stepped once per frame with delta_time.
+    Physics3D::InitJolt();
+    auto g_physicsWorld3D = std::make_unique<Physics3D::PhysicsWorld3D>(glm::vec3(0.0f, -2.0f, 0.0f));
+    Physics3D::PhysicsBody3D* cubePhysicsBody = nullptr;
+    {
+        auto cubeBody = std::make_unique<Physics3D::RigidBody3D>(
+            g_physicsWorld3D->GetSystem(), glm::vec3(0.0f, 2.0f, 0.0f));
+        cubeBody->AddBox(glm::vec3(0.5f, 0.5f, 0.5f));
+        cubePhysicsBody = cubeBody.get();
+        g_physicsWorld3D->AddOwned(std::move(cubeBody));
+
+        // A static floor a couple units below so the cube has something
+        // to land and settle on instead of falling forever.
+        auto floorBody = std::make_unique<Physics3D::StaticBody3D>(
+            g_physicsWorld3D->GetSystem(), glm::vec3(0.0f, -1.0f, 0.0f));
+        floorBody->AddBox(glm::vec3(10.0f, 0.5f, 10.0f));
+        g_physicsWorld3D->AddOwned(std::move(floorBody));
+    }
 
     Gui::Scrollbar verticalScrollbar, horizontalScrollbar;
     verticalScrollbar.setOrientation(Gui::ScrollOrientation::Vertical);
@@ -837,6 +842,13 @@ int main(int argc, char* argv[]) {
             if (cvH < 200) cvH = 200;
             canvasViewX = cvX; canvasViewY = cvY; canvasViewW = cvW; canvasViewH = cvH;
             g_editorCamera.setupForCanvas(canvasViewX, canvasViewY, canvasViewW, canvasViewH);
+
+            // ===== ADDED: Resize 3D render target to match canvas size, and update 3D camera viewport =====
+            if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode3D) {
+                g_canvasRenderTarget.resize(gpuDevice, renderer,
+                                            (Uint32)canvasViewW, (Uint32)canvasViewH);
+                g_editorCamera3D.setupForCanvas(canvasViewX, canvasViewY, canvasViewW, canvasViewH);
+            }
         }
 
         while (SDL_PollEvent(&e)) {
@@ -850,7 +862,7 @@ int main(int argc, char* argv[]) {
                     if (!currentSceneFilePath.empty()) sceneParser.saveToFile(scene, currentSceneFilePath);
                     textEditor.saveFile();
                 }
-                // Camera: P + LMB = pan
+                // Camera: P + LMB = pan (2D camera only)
                 if (e.key.key == SDLK_P) {
                     cameraPanning = true;
                     SDL_GetMouseState(&cameraLastMouseX, &cameraLastMouseY);
@@ -999,7 +1011,34 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // ── Camera: P + LMB = pan ───────────────────────────────────────
+            // ── 3D Camera controls (only in 3D mode) ──────────────────────
+            if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode3D) {
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_RIGHT) {
+                    float mx = e.button.x, my = e.button.y;
+                    if (isInsideCanvas(mx, my)) {
+                        SDL_HideCursor();
+                        SDL_SetWindowRelativeMouseMode(window, true); // capture relative motion
+                        g_camOrbiting = true;
+                    }
+                }
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_RIGHT) {
+                    g_camOrbiting = false;
+                    SDL_SetWindowRelativeMouseMode(window, false);
+                    SDL_ShowCursor();
+                }
+                if (e.type == SDL_EVENT_MOUSE_MOTION && g_camOrbiting) {
+                    g_editorCamera3D.lookMouseDelta((float)e.motion.xrel, (float)e.motion.yrel);
+                }
+                if (e.type == SDL_EVENT_MOUSE_WHEEL) {
+                    float mx, my; SDL_GetMouseState(&mx, &my);
+                    if (isInsideCanvas(mx, my)) {
+                        bool rmbHeld = (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_RMASK) != 0;
+                        g_editorCamera3D.scroll((float)e.wheel.y, rmbHeld);
+                    }
+                }
+            }
+
+            // ── Camera: P + LMB = pan (2D camera) ────────────────────────
             if (e.type == SDL_EVENT_MOUSE_MOTION && cameraPanning) {
                 float dx = e.motion.x - cameraLastMouseX;
                 float dy = e.motion.y - cameraLastMouseY;
@@ -1010,7 +1049,7 @@ int main(int argc, char* argv[]) {
 
             // ── Mouse wheel: scene scrollbars first, then camera zoom ─────
             // No Z key required. Scrollbars inside Panels get first claim
-            // so they keep working; everything else zooms the camera.
+            // so they keep working; everything else zooms the 2D camera.
             if (!consumedByScrollbar && e.type == SDL_EVENT_MOUSE_WHEEL) {
                 bool consumedByScene = false;
                 for (auto& elem : guiElements) {
@@ -1107,6 +1146,27 @@ int main(int argc, char* argv[]) {
             }
             confirmLastFrame = confirmNow;
         }
+        
+        // ── Keyboard movement for 3D camera (WASD/QE, Shift to speed) ──
+        if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode3D) {
+            if (showCanvas) {
+                // Deduces const Uint8* in SDL2 and const bool* in SDL3
+                const auto* keys = SDL_GetKeyboardState(nullptr); 
+                
+                bool forward = keys[SDL_SCANCODE_W];
+                bool back    = keys[SDL_SCANCODE_S];
+                bool left    = keys[SDL_SCANCODE_A];
+                bool right   = keys[SDL_SCANCODE_D];
+                bool up      = keys[SDL_SCANCODE_Q];
+                bool down    = keys[SDL_SCANCODE_E];
+                bool fast    = keys[SDL_SCANCODE_LSHIFT] || keys[SDL_SCANCODE_RSHIFT];
+
+                if (forward || back || left || right || up || down) {
+                    g_editorCamera3D.flyMove(delta_time, forward, back, left, right, up, down, fast);
+                    g_editorCamera3D.clampToBounds(); 
+                }
+            }
+        }
 
         animation_system(world, delta_time);
 
@@ -1187,55 +1247,72 @@ int main(int argc, char* argv[]) {
             // Canvas viewport target rectangle
             SDL_FRect canvasRect = { canvasViewX, canvasViewY, canvasViewW, canvasViewH };
 
-            // ── 3D CANVAS MODE (GPU Triangle / 3D Scene Pipeline) ───────────
-            // if constexpr: since g_canvasMode is decided at compile time,
-            // a 2D build contains none of this raw SDL_GPU rendering code,
-            // and a 3D build contains none of the 2D SDL_Renderer canvas
-            // drawing below. The two paths can never run in the same binary.
+            // ── 3D CANVAS MODE (Obj + Material GPU Pipeline) ─────────────────
+            // if constexpr: since g_canvasMode is decided at compile time, a
+            // 2D build contains none of this raw SDL_GPU rendering code, and
+            // a 3D build contains none of the 2D SDL_Renderer canvas drawing
+            // below. The two paths can never run in the same binary.
             if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode3D) {
-                // 1. Render the triangle to canvasTexture via GPU
+                // Advance physics for position/falling, but drive yaw
+                // ourselves. Reading rotation straight from the physics
+                // body (glm::eulerAngles(cubePhysicsBody->GetRotation()))
+                // is why it stopped: a resting rigid body has zero angular
+                // velocity once it settles on the floor, so that quaternion
+                // stops changing. Position still comes from physics --
+                // only rotation is now a continuous scripted spin.
+                if (cubePhysicsBody) {
+                    //g_physicsWorld3D->Step(delta_time);
+                    //testTransform.position = cubePhysicsBody->GetPosition();
+                } else {
+                    // No physics body (Jolt init failed) -- keep it in view.
+                    testTransform.position.z = 3.0f;
+                }
+
+                testTransform.rotation.y += delta_time * 60.0f; // degrees/sec, left-to-right yaw
+                if (testTransform.rotation.y >= 360.0f) testTransform.rotation.y -= 360.0f;
+
+                // ===== Use 3D camera for view/projection =====
+                float aspect = (canvasViewH > 0.0f) ? (canvasViewW / canvasViewH) : 1.0f;
+                glm::mat4 view = g_editorCamera3D.getViewMatrix();
+                glm::mat4 proj = g_editorCamera3D.getProjectionMatrix(aspect, false); // flipY for Vulkan
+
                 SDL_GPUCommandBuffer* gpuCmd = SDL_AcquireGPUCommandBuffer(gpuDevice);
-                if (gpuCmd) {
+                if (gpuCmd && g_canvasRenderTarget.isValid()) {
                     SDL_GPUColorTargetInfo colorInfo = {};
-                    colorInfo.texture = canvasTexture;
+                    colorInfo.texture = g_canvasRenderTarget.colorTexture;
                     colorInfo.load_op = SDL_GPU_LOADOP_CLEAR;
                     colorInfo.store_op = SDL_GPU_STOREOP_STORE;
-                    colorInfo.clear_color = {0.08f, 0.08f, 0.12f, 1.0f}; // Dark 3D viewport clear color
+                    colorInfo.clear_color = {0.08f, 0.08f, 0.12f, 1.0f};
 
-                    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmd, &colorInfo, 1, nullptr);
+                    SDL_GPUDepthStencilTargetInfo depthInfo = {};
+                    depthInfo.texture = g_canvasRenderTarget.depthTexture;
+                    depthInfo.load_op = SDL_GPU_LOADOP_CLEAR;
+                    depthInfo.store_op = SDL_GPU_STOREOP_DONT_CARE;
+                    depthInfo.clear_depth = 1.0f;
+
+                    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(gpuCmd, &colorInfo, 1, &depthInfo);
                     if (pass) {
-                        SDL_BindGPUGraphicsPipeline(pass, trianglePipeline);
-
-                        SDL_GPUBufferBinding binding;
-                        binding.buffer = vertexBuffer;
-                        binding.offset = 0;
-                        SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
-
-                        SDL_DrawGPUPrimitives(pass, TRIANGLE_VERTEX_COUNT, 1, 0, 0);
+                        if (objPipeline && cubeObjModel.isLoaded) {
+                            Engine3D::renderObj(gpuCmd, pass, objPipeline, cubeObjModel,
+                                                 testTransform, view, proj, gpuDefaults);
+                        } else if (triangleExample.isLoaded) {
+                            Engine3D::Examples::step5_Render(pass, triangleExample);
+                        }
                         SDL_EndGPURenderPass(pass);
                     }
                     SDL_SubmitGPUCommandBuffer(gpuCmd);
                     SDL_WaitForGPUIdle(gpuDevice);
+                } else if (gpuCmd) {
+                    SDL_CancelGPUCommandBuffer(gpuCmd);
                 }
 
-                // 2. Wrap the GPU texture into an SDL texture using properties
-                SDL_PropertiesID props = SDL_CreateProperties();
-                SDL_SetPointerProperty(props, SDL_PROP_TEXTURE_CREATE_GPU_TEXTURE_POINTER, canvasTexture);
-                SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_FORMAT_NUMBER, SDL_PIXELFORMAT_RGBA32);
-                SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_ACCESS_NUMBER, SDL_TEXTUREACCESS_STATIC);
-                SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_WIDTH_NUMBER, CANVAS_TEX_WIDTH);
-                SDL_SetNumberProperty(props, SDL_PROP_TEXTURE_CREATE_HEIGHT_NUMBER, CANVAS_TEX_HEIGHT);
-
-                SDL_Texture* sdlCanvasTex = SDL_CreateTextureWithProperties(renderer, props);
-                SDL_DestroyProperties(props);
-
-                if (sdlCanvasTex) {
-                    SDL_RenderTexture(renderer, sdlCanvasTex, nullptr, &canvasRect);
-                    SDL_DestroyTexture(sdlCanvasTex);
+                // ===== Blit the dynamic render target's SDL_Texture =====
+                if (g_canvasRenderTarget.sdlTexture) {
+                    SDL_RenderTexture(renderer, g_canvasRenderTarget.sdlTexture, nullptr, &canvasRect);
                 }
             }
             // ── 2D CANVAS MODE (Grid, Entities, World Overlay, Scene GUI) ────
-            else if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode2D) {
+            if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode2D) {
                 // FIX: Explicitly clear/fill the 2D canvas area each frame to prevent pixel trails
                 SDL_SetRenderDrawColor(renderer, 30, 30, 35, 255); // Dark 2D viewport clear color
                 SDL_RenderFillRect(renderer, &canvasRect);
@@ -1289,10 +1366,27 @@ int main(int argc, char* argv[]) {
         }
         fileExplorer.tick(delta_time); if (fileExplorer.isOpen()) fileExplorer.render();
 
-        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-        SDL_FRect crosshair_firstrect = { cursorX - 10.0f, cursorY - 1.0f, 20.0f, 2.0f };
-        SDL_FRect crosshair_secondrect = { cursorX - 1.0f, cursorY - 10.0f, 2.0f, 20.0f };
-        SDL_RenderFillRect(renderer, &crosshair_firstrect); SDL_RenderFillRect(renderer, &crosshair_secondrect);
+        // Legacy CPU wireframe path -- only meaningful in the 2D build,
+        // which has no GPU pipeline of its own to draw the cube with.
+        // The 3D build already rendered it with real faces/materials via
+        // Engine3D::renderObj() further up, driven by the same
+        // testTransform (now updated from cubePhysicsBody each frame).
+        if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode2D) {
+            if (meshLoaded) {
+                testTransform.rotation.y += delta_time * 30.0f;
+                testTransform.position.z = 3.0f; // push back a bit
+                Engine3D::renderMeshWireFrame(renderer, testTransform, testMesh,
+                                            canvasViewW, canvasViewH);
+            }
+        }
+
+        // gamepad cursor rendering
+        GamepadCursorIconSrcRect.x = cursorX;
+        GamepadCursorIconSrcRect.y = cursorY;
+        GamepadCursorIconDestRect.w = winW;
+        GamepadCursorIconDestRect.h = winH;
+            
+        SDL_RenderTexture(renderer, g_resources.TextureManager.Get("GamePadCursorIcon"), &GamepadCursorIconSrcRect, &GamepadCursorIconDestRect);
 
         if (showVirtualKeyboard) virtualKeyboard->render();
         SDL_RenderPresent(renderer);
@@ -1304,15 +1398,32 @@ int main(int argc, char* argv[]) {
     // gamepad cleanup
     if (gamepad) SDL_CloseGamepad(gamepad);
 
-    // GPU resource cleanup (only in 3D mode, pointers are nullptr in 2D)
+    // Physics cleanup -- release owned bodies before tearing down the
+    // Jolt PhysicsSystem itself, then unregister Jolt's global types.
+    cubePhysicsBody = nullptr;
+    g_physicsWorld3D.reset();
+    Physics3D::ShutdownJolt();
+
+    // GPU resource cleanup (only in 3D mode, pointers are nullptr in 2D).
+    // Order matters here: `renderer` was created via
+    // SDL_CreateGPURenderer(gpuDevice, window) and holds its own Vulkan
+    // objects (semaphores/fences/buffers) tied to gpuDevice, so it MUST be
+    // destroyed before the device is. The window's GPU claim
+    // (SDL_ClaimWindowForGPUDevice, done at setup) also has to be
+    // explicitly released before the device goes away, or its swapchain
+    // surface leaks. Destroying gpuDevice first (the old order) orphaned
+    // both of those -- that's what the "leaked objects" / leaked
+    // VkSurfaceKHR validation errors at shutdown were.
     if (gpuDevice) {
-        if (canvasTexture) SDL_ReleaseGPUTexture(gpuDevice, canvasTexture);
-        if (vertexBuffer) SDL_ReleaseGPUBuffer(gpuDevice, vertexBuffer);
-        if (trianglePipeline) SDL_ReleaseGPUGraphicsPipeline(gpuDevice, trianglePipeline);
-        if (vertexShader) SDL_ReleaseGPUShader(gpuDevice, vertexShader);
-        if (fragmentShader) SDL_ReleaseGPUShader(gpuDevice, fragmentShader);
-        // Release the GPU device itself (this also releases the window claim)
-        SDL_DestroyGPUDevice(gpuDevice);
+        Engine3D::destroyObjModel(gpuDevice, cubeObjModel);
+        Engine3D::destroyDefaultGpuResources(gpuDevice, gpuDefaults);
+        if (objPipeline) SDL_ReleaseGPUGraphicsPipeline(gpuDevice, objPipeline);
+        if (objVertexShader) SDL_ReleaseGPUShader(gpuDevice, objVertexShader);
+        if (objFragmentShader) SDL_ReleaseGPUShader(gpuDevice, objFragmentShader);
+        Engine3D::Examples::destroyTriangleExample(gpuDevice, triangleExample);
+
+        // ===== Destroy the dynamic render target =====
+        g_canvasRenderTarget.destroy(gpuDevice);
     }
 
     // clears all allocations and also calls library quit functions unless that is internal
@@ -1325,9 +1436,16 @@ int main(int argc, char* argv[]) {
     // icon cleanup
     if (iconSurface) SDL_DestroySurface(iconSurface);
 
-    // systems cleanup
+    // systems cleanup -- renderer (and anything built on it) must go
+    // before the GPU device it was created from.
     TTF_DestroyRendererTextEngine(textEngine);
     SDL_DestroyRenderer(renderer);
+
+    if (gpuDevice) {
+        SDL_ReleaseWindowFromGPUDevice(gpuDevice, window);
+        SDL_DestroyGPUDevice(gpuDevice);
+    }
+
     SDL_DestroyWindow(window);
 
     // final exit

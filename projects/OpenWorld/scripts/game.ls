@@ -44,28 +44,6 @@ still stayexpr spnum minDt ~ 0.1f;
 
 still num reason ~ 0;
 
-
-
-
-still none drawCrosshair(Rnd* renderer, spnum x, spnum y) {
-    stay num size ~ 12;
-
-
-
-    SetRndDrwClr(renderer, 255, 255, 255, 255);
-
-
-
-    RdLine(renderer, x - size, y, x + size, y);
-
-
-
-    RdLine(renderer, x, y - size, x, y + size);
-
-
-
-}
-
 // The active scene's script is polymorphic (ScriptBase*, owned by
 // GameContext::scene->script) so that different scenes can run entirely
 // different ScriptBase subclasses. Generic dispatch (onStart/onUpdate/
@@ -381,14 +359,6 @@ still none RndFrame(Rnd* renderer, Window* window, GameCtx& ctx) {
 
 
         }
-    }
-
-    
-    if (ctx.gamepad and !ActiveGameScript(ctx)) {
-        drawCrosshair(renderer, ctx.gamepadCursorX, ctx.gamepadCursorY);
-
-
-
     }
 
     RdPresent(renderer);

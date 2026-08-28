@@ -1,0 +1,3 @@
+// To compile glsl shaders (easy to understand for humans) to spirv (high performance vulkan),
+// use the following command where [type] is the file extension such as .frag or .vert for fragment and vertex shaders
+glslangValidator -V shader.[type] -o shader.[type].spv

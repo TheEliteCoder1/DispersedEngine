@@ -46,27 +46,8 @@ static constexpr float minDt = 0.1f;
 
 static int reason = 0;
 
-
-
-
-static void drawCrosshair(SDL_Renderer* renderer, float x, float y) {
-    const int size = 12;
-
-
-
-    SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-
-
-
-    SDL_RenderLine(renderer, x - size, y, x + size, y);
-
-
-
-    SDL_RenderLine(renderer, x, y - size, x, y + size);
-
-
-
-}
+SDL_FRect GamepadCursorIconSrcRect =  {0.0f, 0.0f, 32.0f, 32.0f};
+SDL_FRect GamepadCursorIconDestRect = {0.0f, 0.0f, 1600.0f, 900.0f};
 
 // The active scene's script is polymorphic (ScriptBase*, owned by
 // GameContext::scene->script) so that different scenes can run entirely
@@ -79,13 +60,7 @@ static void drawCrosshair(SDL_Renderer* renderer, float x, float y) {
 // (e.g. a menu or losing-screen scene driven by some other script type).
 static GameScript* ActiveGameScript(GameContext& ctx) {
     if (!ctx.scene || !ctx.scene->script) return nullptr;
-
-
-
     return dynamic_cast<GameScript*>(ctx.scene->script.get());
-
-
-
 }
 
 // ---------------------------------------------------------------------------
@@ -385,11 +360,15 @@ static void RenderFrame(SDL_Renderer* renderer, SDL_Window* window, GameContext&
 
     
     if (ctx.gamepad && !ActiveGameScript(ctx)) {
-        drawCrosshair(renderer, ctx.gamepadCursorX, ctx.gamepadCursorY);
-
-
-
+        // gamepad cursor rendering
+        GamepadCursorIconSrcRect.x = ctx.gamepadCursorX;
+        GamepadCursorIconSrcRect.y = ctx.gamepadCursorY;
+        GamepadCursorIconDestRect.w = winW;
+        GamepadCursorIconDestRect.h = winH;
+        SDL_RenderTexture(renderer, ProjectScript_IMG_GetTexture("GamePadCursorIcon"), &GamepadCursorIconSrcRect, &GamepadCursorIconDestRect);
     }
+
+    
 
     SDL_RenderPresent(renderer);
 
@@ -3068,7 +3047,10 @@ int main(int argc, char *argv[])
     ProjectScript_IMG_LoadTexture("waterbarIcon", "OpenWorld/assets/textures/waterbarIcon.svg");
 
     ProjectScript_IMG_LoadTexture("path", "OpenWorld/assets/textures/path.svg");
+
     ProjectScript_IMG_LoadTexture("path90deg", "OpenWorld/assets/textures/path90deg.svg");
+
+    ProjectScript_IMG_LoadTexture("GamePadCursorIcon", "OpenWorld/assets/textures/cup.svg");
 
     // load audio 
     g_resources.AudioManager.CreateMixerDevice();

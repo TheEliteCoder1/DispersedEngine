@@ -86,12 +86,6 @@
 #error "Unsupported platform"
 #endif
 
-// IMPORTANT NOTES:
-// -Remove the trailing commas to avoid json scene/resource issues.
-// -Make paths relative and remove double slashes for exports if you notice issues.
-// -Always check engine components if they exist before acessing them to avoid bugs.
-// -use build.bat instead of fast_build.bat to help with debugging project config bugs.
-
 // Update the helper functions to handle Emscripten's virtual FS better:
 inline std::string getProjectsPath(const std::string& relativePath = "") {
 #ifdef EMSCRIPTEN
@@ -945,6 +939,16 @@ namespace Tools {
     inline bool contains(std::string_view haystack, std::string_view needle) {
         return haystack.find(needle) != std::string_view::npos;
     }
+
+
+    // void _DrawCrossHair(SDL_Renderer* renderer, float crossHairX, float crossHairY) 
+    // {
+    //     SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+    //     SDL_FRect crosshair_firstrect = { crossHairX - 10.0f, crossHairY - 1.0f, 20.0f, 2.0f };
+    //     SDL_FRect crosshair_secondrect = { crossHairX - 1.0f, crossHairY - 10.0f, 2.0f, 20.0f };
+    //     SDL_RenderFillRect(renderer, &crosshair_firstrect); 
+    //     SDL_RenderFillRect(renderer, &crosshair_secondrect);
+    // }
 
     class Timer {
     public:

@@ -17,6 +17,7 @@ target_include_directories(DispersedEngine INTERFACE
 )
 
 target_link_libraries(DispersedEngine INTERFACE
+    ZLIB::ZLIB
     SDL3::SDL3
     SDL3_image::SDL3_image
     SDL3_mixer::SDL3_mixer

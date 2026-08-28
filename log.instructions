@@ -1,0 +1,3 @@
+// to do basic loging use SDL_Log() with %s etc for formatting strings
+// to do more advanced logging for sdl3's gpu api - vulkan, dx3d12, metal wrapper:
+Editor.exe > log.txt 2>&1
