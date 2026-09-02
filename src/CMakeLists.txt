@@ -12,6 +12,19 @@
 
 add_library(DispersedEngine INTERFACE)
 
+# ── ufbx: vendored single-file C library (src/ufbx.h + src/ufbx.c), not a
+# vcpkg package -- there's no find_package() for it, so it has to be
+# compiled directly from source. Without this, loadFbx() in engine3d.h
+# compiles fine (it only needs the declarations in ufbx.h) but every
+# ufbx_* symbol it calls is unresolved at link time, since ufbx.c -- the
+# file that actually defines them -- was never part of any target.
+add_library(ufbx STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/ufbx.c
+)
+target_include_directories(ufbx PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
 target_include_directories(DispersedEngine INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}          # exposes engine.h, json.hpp, etc.
 )
@@ -25,7 +38,15 @@ target_link_libraries(DispersedEngine INTERFACE
     box2d::box2d  
     Jolt::Jolt 
     glm::glm 
-    tinyobjloader::tinyobjloader 
+    tinyobjloader::tinyobjloader
+    # ── ADDED: 3D model importers, consumed by engine3d.h's
+    # model_loaders_3d.h (glTF/GLB via fastgltf, FBX via ufbx). Both
+    # are pulled through the INTERFACE library so every executable
+    # that links DispersedEngine -- Editor and every project under
+    # projects/ -- gets them automatically, same as glm/box2d/Jolt
+    # above.
+    fastgltf::fastgltf
+    ufbx
 )
 
 # ── Editor executable (only when BUILD_ENGINE is ON) ──────────────────────

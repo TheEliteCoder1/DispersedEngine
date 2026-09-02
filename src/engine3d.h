@@ -13,11 +13,44 @@
 #include "glm/glm.hpp"
 #include "glm/gtc/matrix_transform.hpp"
 #include "glm/gtc/type_ptr.hpp"
+#include "glm/gtc/quaternion.hpp"
+#define GLM_ENABLE_EXPERIMENTAL
+#include "glm/gtx/matrix_decompose.hpp"
+#include "glm/gtx/quaternion.hpp"
 
 #ifndef TINYOBJLOADER_IMPLEMENTATION
 #define TINYOBJLOADER_IMPLEMENTATION
 #endif
 #include <tiny_obj_loader.h>
+
+// ── FBX / glTF importers ────────────────────────────────────
+// CRITICAL: these (and anything they transitively pull in --
+// fastgltf especially drags in <variant>, <memory_resource>,
+// <mutex>, etc.) MUST be included here, at file scope, before
+// `namespace Engine3D {` opens below.
+//
+// Previously these lived inside model_loaders_3d.h, which was
+// #included *from inside* `namespace Engine3D { ... }` (further
+// down this file). That's fine for ordinary code, but it is NOT
+// fine for third-party headers: the preprocessor just pastes
+// their text in place, so any standard-library header being
+// included for the very first time in the translation unit --
+// like <variant>, dragged in by fastgltf/types.hpp -- had its
+// `namespace std { ... }` block land *inside* the already-open
+// `namespace Engine3D { ... }`, producing a bogus nested
+// `Engine3D::std` instead of extending the real `::std`.
+// Everything downstream that expected real std::variant /
+// std::uint8_t / std::mutex then failed to compile, with error
+// messages that literally say `Engine3D::std::<unnamed-tag>` --
+// that IS this bug, not a coincidence.
+// Rule of thumb: third-party #includes always go at file scope,
+// never inside your own namespace, even for headers you only
+// use from inside that namespace -- the *using* is namespace-safe,
+// the *including* never is.
+#include <fastgltf/core.hpp>
+#include <fastgltf/types.hpp>
+#include <fastgltf/tools.hpp>
+#include <ufbx.h>
 
 // ============================================================
 // Engine3D
@@ -37,6 +70,8 @@
 //      SDL_GPU graphics pipeline (see ObjModel / GpuObjRenderer
 //      below).
 // ============================================================
+
+
 namespace Engine3D {
     enum class CanvasMode {
         Mode2D = 0,
@@ -874,9 +909,20 @@ namespace Engine3D {
     // ==================================================================
     class Camera3D {
     public:
-        glm::vec3 position{0.0f, 1.5f, -4.5f};
-        float yawDeg = 90.0f;    // 0 = looking down +X; 90 = looking down +Z
-        float pitchDeg = 0.0f;
+        // FIXED: was position{0,1.5,-4.5} with yawDeg=90 (looking straight
+        // down +Z). That aims the camera almost exactly parallel to the
+        // world Z axis, which makes the Z-axis ruler (drawn in
+        // renderAxisRulerGizmo3D below) collapse toward the vanishing
+        // point -- every tick along Z projects to nearly the same
+        // handful of screen pixels, so its numbers overlap into an
+        // unreadable smear instead of reading as a ruled line. An
+        // angled 3/4 start view (same idea as Blender/Unity/Godot's
+        // default editor camera) keeps X, Y, and Z all visually
+        // distinct: Y stays vertical, X and Z both recede diagonally
+        // into the screen at readable angles.
+        glm::vec3 position{-4.0f, 3.0f, -4.0f};
+        float yawDeg = 45.0f;    // 0 = looking down +X; 90 = looking down +Z
+        float pitchDeg = -25.0f;
         float fovDeg = 60.0f;
         float nearPlane = 0.1f;
         float farPlane = 100.0f;
@@ -922,6 +968,25 @@ namespace Engine3D {
         }
         glm::vec3 getUp() const {
             return glm::normalize(glm::cross(getRight(), getForward()));
+        }
+
+        glm::vec3 getScreenToWorldRay(float screenX, float screenY) const {
+            float aspect = (canvasH > 0.0f) ? (canvasW / canvasH) : 1.0f;
+            glm::mat4 view = getViewMatrix();
+            glm::mat4 proj = getProjectionMatrix(aspect, false);
+            glm::mat4 invVP = glm::inverse(proj * view);
+            
+            // Normalize screen coords to [-1, 1]
+            float nx = (2.0f * (screenX - canvasX)) / canvasW - 1.0f;
+            float ny = 1.0f - (2.0f * (screenY - canvasY)) / canvasH;
+            
+            glm::vec4 rayClip = glm::vec4(nx, ny, -1.0f, 1.0f);
+            glm::vec4 rayEye = glm::inverse(proj) * rayClip;
+            rayEye.z = -1.0f; 
+            rayEye.w = 0.0f;
+            
+            glm::vec3 rayDir = glm::normalize(glm::vec3(glm::inverse(view) * rayEye));
+            return rayDir;
         }
 
         // ── Godot-4-editor-style input handlers ──────────────────────
@@ -990,6 +1055,33 @@ namespace Engine3D {
             return proj;
         }
 
+        // ── CPU-side world -> screen-pixel projection ────────────────
+        // For anything drawn with SDL_Renderer on top of the blitted 3D
+        // render target (editor gizmos, entity outline overlays, debug
+        // physics shapes) rather than through the GPU pipeline -- same
+        // role Tools::Camera::worldToScreen() plays for the 2D canvas.
+        // Uses ordinary top-left-origin window pixel coordinates (no
+        // Vulkan clip-space flip -- that's only needed inside the GPU
+        // pass itself), mapped over this camera's canvasX/Y/W/H viewport
+        // (set via setupForCanvas(), same rect the GPU render target is
+        // sized to). Returns visible=false if the point is behind the
+        // camera (would otherwise project to a bogus on-screen location
+        // after the perspective divide) so callers can skip drawing it
+        // or clip the segment instead.
+        struct ScreenPoint { SDL_FPoint pt; bool visible; };
+        ScreenPoint worldToScreenCPU(const glm::vec3& worldPos) const {
+            glm::mat4 view = getViewMatrix();
+            float aspect = (canvasH > 0.0f) ? (canvasW / canvasH) : 1.0f;
+            glm::mat4 proj = getProjectionMatrix(aspect, false); // no Vulkan flip for CPU pixel math
+            glm::vec4 clip = proj * view * glm::vec4(worldPos, 1.0f);
+            if (clip.w <= 0.0001f) return { {0,0}, false }; // behind camera / at the eye
+            glm::vec3 ndc = glm::vec3(clip) / clip.w; // [-1,1]
+            SDL_FPoint p;
+            p.x = canvasX + (ndc.x * 0.5f + 0.5f) * canvasW;
+            p.y = canvasY + (1.0f - (ndc.y * 0.5f + 0.5f)) * canvasH; // NDC +Y is up, screen +Y is down
+            return { p, true };
+        }
+
         virtual ~Camera3D() = default;
     };
 
@@ -1044,6 +1136,380 @@ namespace Engine3D {
             position = target - getForward() * distance; // camera sits behind target, looking at it
             clampToBounds();
         }
+    };
+
+    // ==================================================================
+    // 3D axis/ruler gizmo
+    // ------------------------------------------------------------------
+    // The 2D editor's ruler (render_canvas_ruler in engine.h) is two
+    // fixed strips glued to the top/left of the canvas. That doesn't
+    // make sense in 3D -- there is no "top-left" of a scene with depth
+    // -- so instead of screen-fixed strips this draws three ruled lines
+    // running along the actual world X/Y/Z axes through the origin,
+    // color-coded per the editor convention: X = green, Y = blue,
+    // Z = red (deliberately NOT the common Red/Green/Blue = X/Y/Z
+    // convention -- this matches what was asked for). Tick spacing
+    // (1/5 world units, see MAJOR_STEP/MINOR_STEP below) is scaled to
+    // Camera3D's actual working distances (moveSpeed, orbit distance,
+    // farPlane), not the 2D pixel ruler's spacing -- see the FIXED
+    // comment on renderAxisRulerGizmo3D for why.
+    //
+    // Drawn with plain SDL_Renderer calls (worldToScreenCPU) *after*
+    // the GPU render target has been blitted into the canvas rect --
+    // same layering the entity outlines below use -- so it always
+    // draws on top of the 3D scene, like a wireframe overlay.
+    // ==================================================================
+    inline void renderAxisRulerGizmo3D(SDL_Renderer* renderer,
+                                    TTF_TextEngine* textEngine, TTF_Font* font,
+                                    const Camera3D& camera,
+                                    float axisLength = 50.0f)  // parameter kept for compatibility but unused
+    {
+        // ---- Compute visible range along each axis using the camera frustum ----
+        float aspect = (camera.canvasH > 0.0f) ? (camera.canvasW / camera.canvasH) : 1.0f;
+        glm::mat4 view = camera.getViewMatrix();
+        glm::mat4 proj = camera.getProjectionMatrix(aspect, false); // no Vulkan flip for CPU math
+        glm::mat4 invVP = glm::inverse(proj * view);
+
+        // 8 frustum corners in NDC
+        glm::vec4 ndcCorners[8] = {
+            {-1,-1,-1,1}, {1,-1,-1,1}, {1,1,-1,1}, {-1,1,-1,1},
+            {-1,-1, 1,1}, {1,-1, 1,1}, {1,1, 1,1}, {-1,1, 1,1}
+        };
+        std::vector<glm::vec3> worldCorners;
+        worldCorners.reserve(8);
+        for (const auto& ndc : ndcCorners) {
+            glm::vec4 world = invVP * ndc;
+            world /= world.w;
+            worldCorners.push_back(glm::vec3(world));
+        }
+
+        // Axis definitions: X=green, Y=blue, Z=red
+        struct AxisDef { glm::vec3 dir; SDL_Color color; const char* label; };
+        const AxisDef axes[3] = {
+            { {1,0,0}, {60, 220, 90, 255},  "X" },
+            { {0,1,0}, {70, 140, 240, 255}, "Y" },
+            { {0,0,1}, {230, 70, 70, 255},  "Z" },
+        };
+
+        auto clipToCanvas = [&](const SDL_FPoint& p) {
+            return p.x >= camera.canvasX && p.x <= camera.canvasX + camera.canvasW &&
+                p.y >= camera.canvasY && p.y <= camera.canvasY + camera.canvasH;
+        };
+
+        constexpr int   MAJOR_STEP = 5;
+        constexpr int   MINOR_STEP = 1;
+        constexpr float TICK_PX    = 6.0f;
+        constexpr float TICK_PX_MAJOR = 10.0f;
+
+        for (const auto& axis : axes) {
+            // Find min and max coordinate along this axis among the frustum corners
+            float minCoord = std::numeric_limits<float>::max();
+            float maxCoord = -std::numeric_limits<float>::max();
+            for (const auto& wc : worldCorners) {
+                float coord = glm::dot(wc, axis.dir);
+                minCoord = std::min(minCoord, coord);
+                maxCoord = std::max(maxCoord, coord);
+            }
+            // Add a small margin so the line extends slightly beyond the frustum
+            float margin = 0.5f;
+            minCoord -= margin;
+            maxCoord += margin;
+
+            // Main axis line from minCoord to maxCoord
+            auto a = camera.worldToScreenCPU(axis.dir * minCoord);
+            auto b = camera.worldToScreenCPU(axis.dir * maxCoord);
+            if (a.visible && b.visible) {
+                SDL_SetRenderDrawColor(renderer, axis.color.r, axis.color.g, axis.color.b, 255);
+                SDL_RenderLine(renderer, a.pt.x, a.pt.y, b.pt.x, b.pt.y);
+            }
+
+            // Ticks every MINOR_STEP within [minCoord, maxCoord]
+            int startTick = (int)std::ceil(minCoord / MINOR_STEP);
+            int endTick   = (int)std::floor(maxCoord / MINOR_STEP);
+            for (int i = startTick; i <= endTick; ++i) {
+                if (i == 0) continue; // skip origin, the three axis lines cross there
+                float d = (float)(i * MINOR_STEP);
+                bool major = (std::abs(i * MINOR_STEP) % MAJOR_STEP == 0);
+
+                glm::vec3 worldTick = axis.dir * d;
+                auto sp = camera.worldToScreenCPU(worldTick);
+                if (!sp.visible || !clipToCanvas(sp.pt)) continue;
+
+                // Tick direction: perpendicular to the projected axis line
+                auto spNext = camera.worldToScreenCPU(axis.dir * (d + 1.0f));
+                float dx = spNext.visible ? spNext.pt.x - sp.pt.x : 1.0f;
+                float dy = spNext.visible ? spNext.pt.y - sp.pt.y : 0.0f;
+                float len = std::sqrt(dx*dx + dy*dy);
+                if (len < 0.0001f) len = 1.0f;
+                float perpX = -dy / len, perpY = dx / len;
+                float half = major ? TICK_PX_MAJOR : TICK_PX;
+
+                SDL_SetRenderDrawColor(renderer,
+                    major ? axis.color.r : (Uint8)(axis.color.r * 0.6f),
+                    major ? axis.color.g : (Uint8)(axis.color.g * 0.6f),
+                    major ? axis.color.b : (Uint8)(axis.color.b * 0.6f), 255);
+                SDL_RenderLine(renderer,
+                    sp.pt.x - perpX * half, sp.pt.y - perpY * half,
+                    sp.pt.x + perpX * half, sp.pt.y + perpY * half);
+
+                // Major tick label
+                if (major && font && textEngine) {
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "%d", (int)d);
+                    TTF_Text* t = TTF_CreateText(textEngine, font, buf, 0);
+                    if (t) {
+                        TTF_SetTextColor(t, axis.color.r, axis.color.g, axis.color.b, 255);
+                        TTF_DrawRendererText(t, sp.pt.x + perpX * (half + 2.0f), sp.pt.y + perpY * (half + 2.0f));
+                        TTF_DestroyText(t);
+                    }
+                }
+            }
+
+            // Axis label at the positive end of the visible range (or at a fixed distance)
+            float labelPos = maxCoord;
+            auto tip = camera.worldToScreenCPU(axis.dir * labelPos);
+            if (tip.visible && font && textEngine) {
+                TTF_Text* t = TTF_CreateText(textEngine, font, axis.label, 0);
+                if (t) {
+                    TTF_SetTextColor(t, axis.color.r, axis.color.g, axis.color.b, 255);
+                    TTF_DrawRendererText(t, tip.pt.x + 4.0f, tip.pt.y - 12.0f);
+                    TTF_DestroyText(t);
+                }
+            }
+        }
+    }
+
+
+    // ==================================================================
+    // Default "basic 3D entity" look: a white wireframe cube outline,
+    // the exact 3D equivalent of the 2D editor's empty rectangle outline
+    // for un-textured entities (render_system_and_scene_gui_in_editor in
+    // engine.h). Drawn with the same white-unless-selected convention:
+    // pass selectionColor when the entity is selected, nullptr-ish
+    // {255,255,255,255} otherwise.
+    // ==================================================================
+    inline void renderEntityCubeOutline3D(SDL_Renderer* renderer,
+                                           const Camera3D& camera,
+                                           const glm::vec3& worldCenter,
+                                           const glm::vec3& halfExtents, // (w/2, h/2, depth/2)
+                                           SDL_Color color = {255, 255, 255, 255}) {
+        glm::vec3 h = halfExtents;
+        glm::vec3 corners[8] = {
+            worldCenter + glm::vec3(-h.x,-h.y,-h.z), worldCenter + glm::vec3( h.x,-h.y,-h.z),
+            worldCenter + glm::vec3( h.x, h.y,-h.z), worldCenter + glm::vec3(-h.x, h.y,-h.z),
+            worldCenter + glm::vec3(-h.x,-h.y, h.z), worldCenter + glm::vec3( h.x,-h.y, h.z),
+            worldCenter + glm::vec3( h.x, h.y, h.z), worldCenter + glm::vec3(-h.x, h.y, h.z),
+        };
+        static const int edges[12][2] = {
+            {0,1},{1,2},{2,3},{3,0}, {4,5},{5,6},{6,7},{7,4}, {0,4},{1,5},{2,6},{3,7}
+        };
+
+        Camera3D::ScreenPoint sp[8];
+        for (int i = 0; i < 8; ++i) sp[i] = camera.worldToScreenCPU(corners[i]);
+
+        SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
+        for (auto& e : edges) {
+            if (!sp[e[0]].visible || !sp[e[1]].visible) continue; // simple behind-camera clip: drop the segment
+            SDL_RenderLine(renderer, sp[e[0]].pt.x, sp[e[0]].pt.y, sp[e[1]].pt.x, sp[e[1]].pt.y);
+        }
+    }
+
+    // ==================================================================
+    // Skeleton3D / AnimationClip3D -- minimal CPU-side skinning data for
+    // rigged/animated models (glTF and FBX both expose this; .obj never
+    // does, so Skeleton3D::joints stays empty for obj-loaded models).
+    //
+    // Deliberately CPU-side and coarse rather than a full GPU-skinning
+    // pipeline: computing bone matrices is cheap (a few hundred 4x4
+    // multiplies per model per frame, trivial next to a Jolt physics
+    // step), and it's exactly the data Physics3D's rigged-collider rig
+    // (BuildRiggedApproxCollider in physics3d.h) needs to move capsules
+    // with the animation. Wiring these bone matrices into a GPU vertex
+    // shader for true per-vertex skinning is a further step -- see the
+    // note at the bottom of model_loaders_3d.h -- but everything here
+    // (joint hierarchy, keyframe sampling, world matrices) is exactly
+    // what that shader path would consume too, so it's not wasted work
+    // either way, and CPU skinning-adjacent uses (colliders, gameplay
+    // bone queries, attaching props to a hand bone) work today without it.
+    // ==================================================================
+    struct Joint3D {
+        std::string name;
+        int parentIndex = -1;              // -1 = root
+        glm::mat4 inverseBindMatrix{1.0f};  // model-space -> joint-local bind pose
+        glm::mat4 localBindTransform{1.0f}; // this joint's rest pose, relative to its parent
+    };
+
+    struct Skeleton3D {
+        std::vector<Joint3D> joints;
+        bool isSkinned() const { return !joints.empty(); }
+    };
+
+    // One keyframe track per joint: separate T/R/S key arrays since
+    // glTF (and FBX) both allow each channel to be sampled at different
+    // times/rates. Linear interpolation for T/S, nlerp for R -- plenty
+    // accurate for editor preview and gameplay at typical mocap/Mixamo
+    // frame rates (nlerp vs slerp is imperceptible below ~20 degrees of
+    // rotation between keys, which is the overwhelmingly common case).
+    struct JointKeyframes {
+        std::vector<float> posTimes;    std::vector<glm::vec3> posValues;
+        std::vector<float> rotTimes;    std::vector<glm::quat> rotValues;
+        std::vector<float> scaleTimes;  std::vector<glm::vec3> scaleValues;
+    };
+
+    struct AnimationClip3D {
+        std::string name;
+        float duration = 0.0f; // seconds
+        // Indexed by joint index (same indexing as Skeleton3D::joints);
+        // a joint with no keys in this clip just holds its bind pose.
+        std::vector<JointKeyframes> jointTracks;
+    };
+
+    inline bool loadModel3D(SDL_GPUDevice* device, const std::string& path,
+                        DefaultGpuResources& defaults, ObjModel& outModel,
+                        Skeleton3D* outSkeleton,
+                        std::vector<AnimationClip3D>* outAnimations);
+
+    // Evaluates `clip` at `timeSeconds` (wrapped to [0, duration) if
+    // `loop`) and writes one world-space matrix per joint into
+    // outWorldMatrices, ready to (a) skin vertices on the GPU, (b) drive
+    // Physics3D's per-bone capsule rig, or (c) attach a prop/camera to
+    // a named bone.
+    inline void sampleAnimationPose(const Skeleton3D& skeleton, const AnimationClip3D& clip,
+                                     float timeSeconds, bool loop,
+                                     std::vector<glm::mat4>& outWorldMatrices) {
+        size_t n = skeleton.joints.size();
+        outWorldMatrices.assign(n, glm::mat4(1.0f));
+        if (n == 0) return;
+
+        float t = timeSeconds;
+        if (clip.duration > 0.0001f) {
+            if (loop) { t = std::fmod(t, clip.duration); if (t < 0.0f) t += clip.duration; }
+            else       t = std::clamp(t, 0.0f, clip.duration);
+        }
+
+        auto sampleVec3 = [](const std::vector<float>& times, const std::vector<glm::vec3>& values,
+                              float time, const glm::vec3& fallback) -> glm::vec3 {
+            if (times.empty()) return fallback;
+            if (time <= times.front()) return values.front();
+            if (time >= times.back())  return values.back();
+            for (size_t i = 0; i + 1 < times.size(); ++i) {
+                if (time >= times[i] && time <= times[i+1]) {
+                    float span = times[i+1] - times[i];
+                    float a = span > 0.0001f ? (time - times[i]) / span : 0.0f;
+                    return glm::mix(values[i], values[i+1], a);
+                }
+            }
+            return values.back();
+        };
+        auto sampleQuat = [](const std::vector<float>& times, const std::vector<glm::quat>& values,
+                              float time, const glm::quat& fallback) -> glm::quat {
+            if (times.empty()) return fallback;
+            if (time <= times.front()) return values.front();
+            if (time >= times.back())  return values.back();
+            for (size_t i = 0; i + 1 < times.size(); ++i) {
+                if (time >= times[i] && time <= times[i+1]) {
+                    float span = times[i+1] - times[i];
+                    float a = span > 0.0001f ? (time - times[i]) / span : 0.0f;
+                    return glm::normalize(glm::slerp(values[i], values[i+1], a));
+                }
+            }
+            return values.back();
+        };
+
+        std::vector<glm::mat4> local(n, glm::mat4(1.0f));
+        for (size_t i = 0; i < n; ++i) {
+            const Joint3D& j = skeleton.joints[i];
+            glm::vec3 bindPos, bindScale; glm::quat bindRot;
+            {
+                // Decompose the rest-pose local transform once so a
+                // joint with no keyframes in this particular clip (e.g.
+                // it's not animated) still gets a sensible T/R/S to
+                // rebuild from, instead of defaulting to identity.
+                glm::vec3 skew; glm::vec4 persp;
+                glm::decompose(j.localBindTransform, bindScale, bindRot, bindPos, skew, persp);
+            }
+            glm::vec3 pos = bindPos, scale = bindScale; glm::quat rot = bindRot;
+            if (i < clip.jointTracks.size()) {
+                const JointKeyframes& kf = clip.jointTracks[i];
+                pos   = sampleVec3(kf.posTimes,   kf.posValues,   t, bindPos);
+                rot   = sampleQuat(kf.rotTimes,   kf.rotValues,   t, bindRot);
+                scale = sampleVec3(kf.scaleTimes, kf.scaleValues, t, bindScale);
+            }
+            local[i] = glm::translate(glm::mat4(1.0f), pos) * glm::mat4_cast(rot) * glm::scale(glm::mat4(1.0f), scale);
+        }
+
+        // Walk parent-before-child (skeletons are stored so a parent's
+        // index is always < its children's -- both fastgltf and ufbx nodes
+        // come out of the file in that order, and model_loaders_3d.h
+        // preserves it) to accumulate world matrices in one pass.
+        for (size_t i = 0; i < n; ++i) {
+            int p = skeleton.joints[i].parentIndex;
+            outWorldMatrices[i] = (p >= 0) ? outWorldMatrices[p] * local[i] : local[i];
+        }
+    }
+
+    // ==================================================================
+    // ModelCache3D -- de-duplicating GPU model loader, keyed by file
+    // path, mirroring Texture::Manager's path-cache pattern in
+    // texture.h. Lets many entities share one GPU upload of the same
+    // .obj/.fbx/.gltf/.glb file (via Mesh3DRef::modelPath) instead of
+    // re-parsing and re-uploading it once per entity.
+    //
+    // Format dispatch (by extension) is the loadModel3D() definition
+    // further down this file (see ModelLoaderDetail3D, and the
+    // dispatcher right after it) -- .obj keeps using the tinyobjloader
+    // path already in this file, .fbx goes through ufbx, .gltf/.glb
+    // through fastgltf. All three converge on the same ObjModel output, so
+    // renderObj() above needs no format-specific branches at all.
+    //
+    // NOTE: loadModel3D() is only forward-declared here and defined
+    // later in the file (after ModelLoaderDetail3D::loadGltf/loadFbx
+    // and Engine3D::loadObjModel are all visible), since it dispatches
+    // to all three. This used to live in a separate model_loaders_3d.h
+    // that got #included mid-namespace; that file's contents now live
+    // directly in this header instead.
+    // ==================================================================
+
+    class ModelCache3D {
+    public:
+        // Returns nullptr if loading failed (bad path, unsupported/corrupt
+        // file, etc). Non-owning pointer into the cache -- valid until
+        // Clear()/destructor.
+        ObjModel* GetOrLoad(SDL_GPUDevice* device, DefaultGpuResources& defaults, const std::string& path) {
+            if (path.empty()) return nullptr;
+            auto it = m_models.find(path);
+            if (it != m_models.end()) return it->second.get();
+
+            auto model = std::make_unique<ObjModel>();
+            bool ok = loadModel3D(device, path, defaults, *model, nullptr, nullptr); // model_loaders_3d.h
+            if (!ok) {
+                std::cerr << "[Engine3D] ModelCache3D: failed to load " << path << std::endl;
+                return nullptr;
+            }
+            ObjModel* raw = model.get();
+            m_models.emplace(path, std::move(model));
+            return raw;
+        }
+
+        // Cached skeleton/animation data for skinned formats (glTF/FBX),
+        // empty for plain .obj. Same key (file path) as GetOrLoad above.
+        Skeleton3D* GetSkeleton(const std::string& path) {
+            auto it = m_skeletons.find(path);
+            return it != m_skeletons.end() ? &it->second : nullptr;
+        }
+        void SetSkeleton(const std::string& path, Skeleton3D skel) {
+            m_skeletons[path] = std::move(skel);
+        }
+
+        void Clear(SDL_GPUDevice* device) {
+            for (auto& kv : m_models) destroyObjModel(device, *kv.second);
+            m_models.clear();
+            m_skeletons.clear();
+        }
+
+    private:
+        std::unordered_map<std::string, std::unique_ptr<ObjModel>> m_models;
+        std::unordered_map<std::string, Skeleton3D> m_skeletons;
     };
 };
 
@@ -1216,3 +1682,624 @@ namespace Engine3D::Examples {
     }
 
 } // namespace Engine3D::Examples
+
+
+
+namespace Engine3D {
+
+namespace ModelLoaderDetail3D {
+
+    inline std::string dirOf(const std::string& path) {
+        size_t slash = path.find_last_of("/\\");
+        return (slash == std::string::npos) ? "./" : path.substr(0, slash + 1);
+    }
+
+    inline std::string extOf(const std::string& path) {
+        size_t dot = path.find_last_of('.');
+        if (dot == std::string::npos) return "";
+        std::string ext = path.substr(dot + 1);
+        for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+        return ext;
+    }
+
+    // ---------------------------------------------------------
+    // glTF / GLB, via fastgltf (0.8/0.9-series API: Parser +
+    // Expected<Asset>, fastgltf::math types, primitive.findAttribute()).
+    // NOTE: fastgltf's public API has changed across minor versions a
+    // few times (pre-0.6 used a different Parser interface entirely).
+    // This targets the API shipped by vcpkg's fastgltf port as of this
+    // writing (0.9.x) -- if your vendored version differs, check
+    // fastgltf's own migration notes for the handful of renamed calls.
+    // ---------------------------------------------------------
+    inline bool loadGltf(SDL_GPUDevice* device, const std::string& path,
+                          Engine3D::DefaultGpuResources& defaults,
+                          Engine3D::ObjModel& outModel,
+                          Engine3D::Skeleton3D* outSkeleton,
+                          std::vector<Engine3D::AnimationClip3D>* outAnimations) {
+        std::string baseDir = dirOf(path);
+
+        auto bufferResult = fastgltf::GltfDataBuffer::FromPath(path);
+        if (bufferResult.error() != fastgltf::Error::None) {
+            std::cerr << "[Engine3D] fastgltf: failed to open " << path << std::endl;
+            return false;
+        }
+
+        fastgltf::Parser parser;
+        constexpr auto options = fastgltf::Options::LoadExternalBuffers |
+                                  fastgltf::Options::LoadExternalImages |
+                                  fastgltf::Options::DecomposeNodeMatrices;
+        auto assetResult = parser.loadGltf(bufferResult.get(), std::filesystem::path(baseDir), options);
+        if (assetResult.error() != fastgltf::Error::None) {
+            std::cerr << "[Engine3D] fastgltf: failed to parse " << path
+                       << " (error " << (int)assetResult.error() << ")" << std::endl;
+            return false;
+        }
+        fastgltf::Asset& asset = assetResult.get();
+
+        std::vector<Engine3D::Vertex3D> vertices;
+        std::unordered_map<int, std::vector<Uint32>> indicesByMaterial;
+        glm::vec3 bmin( std::numeric_limits<float>::max());
+        glm::vec3 bmax(-std::numeric_limits<float>::max());
+
+        // ---- Node -> world matrix (for baking static/unskinned mesh
+        // geometry into model space, same reasoning as the cgltf path
+        // this replaced). fastgltf::Options::DecomposeNodeMatrices above
+        // guarantees every node exposes .transform as a TRS
+        // (fastgltf::TRS), never a raw matrix, which keeps this simple.
+        std::function<glm::mat4(size_t)> nodeWorldMatrix = [&](size_t nodeIdx) -> glm::mat4 {
+            fastgltf::Node& node = asset.nodes[nodeIdx];
+            glm::mat4 local(1.0f);
+            if (auto* trs = std::get_if<fastgltf::TRS>(&node.transform)) {
+                glm::vec3 t(trs->translation[0], trs->translation[1], trs->translation[2]);
+                glm::quat r(trs->rotation[3], trs->rotation[0], trs->rotation[1], trs->rotation[2]); // fastgltf: x,y,z,w
+                glm::vec3 s(trs->scale[0], trs->scale[1], trs->scale[2]);
+                local = glm::translate(glm::mat4(1.0f), t) * glm::mat4_cast(r) * glm::scale(glm::mat4(1.0f), s);
+            }
+            for (size_t pi = 0; pi < asset.nodes.size(); ++pi) {
+                for (size_t child : asset.nodes[pi].children) {
+                    if (child == nodeIdx) return nodeWorldMatrix(pi) * local;
+                }
+            }
+            return local; // no parent found -- root node
+        };
+
+        auto readAccessorVec3 = [&](size_t accessorIdx, size_t i) -> glm::vec3 {
+            fastgltf::math::fvec3 v = fastgltf::getAccessorElement<fastgltf::math::fvec3>(asset, asset.accessors[accessorIdx], i);
+            return glm::vec3(v.x(), v.y(), v.z());
+        };
+        auto readAccessorVec2 = [&](size_t accessorIdx, size_t i) -> glm::vec2 {
+            fastgltf::math::fvec2 v = fastgltf::getAccessorElement<fastgltf::math::fvec2>(asset, asset.accessors[accessorIdx], i);
+            return glm::vec2(v.x(), v.y());
+        };
+
+        for (size_t mi = 0; mi < asset.meshes.size(); ++mi) {
+            fastgltf::Mesh& mesh = asset.meshes[mi];
+
+            glm::mat4 world(1.0f);
+            for (size_t ni = 0; ni < asset.nodes.size(); ++ni) {
+                if (asset.nodes[ni].meshIndex && *asset.nodes[ni].meshIndex == mi) { world = nodeWorldMatrix(ni); break; }
+            }
+            glm::mat3 normalMat = glm::mat3(glm::transpose(glm::inverse(world)));
+
+            for (auto& prim : mesh.primitives) {
+                if (prim.type != fastgltf::PrimitiveType::Triangles) continue;
+
+                auto* posIt = prim.findAttribute("POSITION");
+                if (posIt == prim.attributes.end()) continue;
+                size_t posAccIdx = posIt->accessorIndex;
+
+                auto* normIt = prim.findAttribute("NORMAL");
+                auto* uvIt = prim.findAttribute("TEXCOORD_0");
+                bool skinned = prim.findAttribute("JOINTS_0") != prim.attributes.end();
+
+                size_t vertCount = asset.accessors[posAccIdx].count;
+                Uint32 baseVertex = (Uint32)vertices.size();
+                for (size_t v = 0; v < vertCount; ++v) {
+                    Engine3D::Vertex3D vert{};
+                    glm::vec3 pos = readAccessorVec3(posAccIdx, v);
+                    if (!skinned) pos = glm::vec3(world * glm::vec4(pos, 1.0f));
+                    vert.position = pos;
+
+                    if (normIt != prim.attributes.end()) {
+                        glm::vec3 nrm = readAccessorVec3(normIt->accessorIndex, v);
+                        vert.normal = skinned ? nrm : glm::normalize(normalMat * nrm);
+                    } else {
+                        vert.normal = glm::vec3(0, 1, 0);
+                    }
+                    if (uvIt != prim.attributes.end()) {
+                        vert.texcoord = readAccessorVec2(uvIt->accessorIndex, v);
+                    }
+                    bmin = glm::min(bmin, vert.position);
+                    bmax = glm::max(bmax, vert.position);
+                    vertices.push_back(vert);
+                }
+
+                int matId = prim.materialIndex ? (int)*prim.materialIndex : -1;
+
+                if (prim.indicesAccessor) {
+                    fastgltf::Accessor& idxAcc = asset.accessors[*prim.indicesAccessor];
+                    fastgltf::iterateAccessor<std::uint32_t>(asset, idxAcc, [&](std::uint32_t idx) {
+                        indicesByMaterial[matId].push_back(idx + baseVertex);
+                    });
+                } else {
+                    for (size_t v = 0; v < vertCount; ++v) indicesByMaterial[matId].push_back(baseVertex + (Uint32)v);
+                }
+            }
+        }
+
+        if (vertices.empty()) {
+            std::cerr << "[Engine3D] " << path << " (gltf) produced no geometry." << std::endl;
+            return false;
+        }
+
+        std::vector<Uint32> flatIndices;
+        std::vector<Engine3D::SubMesh3D> submeshes;
+        for (auto& kv : indicesByMaterial) {
+            Engine3D::SubMesh3D sub;
+            sub.materialIndex = kv.first;
+            sub.indexOffset = (Uint32)flatIndices.size();
+            sub.indexCount = (Uint32)kv.second.size();
+            flatIndices.insert(flatIndices.end(), kv.second.begin(), kv.second.end());
+            submeshes.push_back(sub);
+        }
+
+        outModel.vertexBuffer = Engine3D::createAndUploadBuffer(device, SDL_GPU_BUFFERUSAGE_VERTEX,
+            vertices.data(), (Uint32)(vertices.size() * sizeof(Engine3D::Vertex3D)));
+        outModel.indexBuffer = Engine3D::createAndUploadBuffer(device, SDL_GPU_BUFFERUSAGE_INDEX,
+            flatIndices.data(), (Uint32)(flatIndices.size() * sizeof(Uint32)));
+        if (!outModel.vertexBuffer || !outModel.indexBuffer) return false;
+
+        outModel.vertexCount = (Uint32)vertices.size();
+        outModel.indexCount = (Uint32)flatIndices.size();
+        outModel.submeshes = std::move(submeshes);
+        outModel.boundsMin = bmin;
+        outModel.boundsMax = bmax;
+
+        // ---- Materials ----
+        outModel.materials.reserve(asset.materials.size());
+        for (size_t mi = 0; mi < asset.materials.size(); ++mi) {
+            fastgltf::Material& gm = asset.materials[mi];
+            Engine3D::Material3D mat;
+            mat.name = !gm.name.empty() ? std::string(gm.name) : ("material_" + std::to_string(mi));
+            auto& bcf = gm.pbrData.baseColorFactor;
+            mat.diffuseColor = glm::vec3(bcf[0], bcf[1], bcf[2]);
+
+            if (gm.pbrData.baseColorTexture.has_value()) {
+                size_t texIdx = gm.pbrData.baseColorTexture->textureIndex;
+                auto& tex = asset.textures[texIdx];
+                if (tex.imageIndex.has_value()) {
+                    fastgltf::Image& img = asset.images[*tex.imageIndex];
+                    if (auto* uriSource = std::get_if<fastgltf::sources::URI>(&img.data)) {
+                        mat.diffuseTexturePath = baseDir + std::string(uriSource->uri.path());
+                        SDL_GPUTexture* gtex = nullptr; SDL_GPUSampler* gsamp = nullptr;
+                        if (Engine3D::loadTextureToGPU(device, mat.diffuseTexturePath, &gtex, &gsamp)) {
+                            mat.gpuTexture = gtex; mat.gpuSampler = gsamp; mat.ownsTexture = true; mat.ownsSampler = true;
+                        }
+                    }
+                    // Embedded (glb-packed or data-URI) images: sources::Array/Vector/BufferView
+                    // aren't handled here -- external .bin-referenced or loose-file textures (the
+                    // overwhelmingly common case for a Blender glTF export with "Separate" textures)
+                    // are. Decode embedded images through SDL_image's memory-buffer load path
+                    // (IMG_Load_IO over an SDL_IOStream on the raw bytes) as a follow-up if you
+                    // need fully self-contained .glb files with baked-in textures.
+                }
+            }
+            if (!mat.gpuTexture) { mat.gpuTexture = defaults.whiteTexture; mat.gpuSampler = defaults.linearSampler; }
+            outModel.materials.push_back(mat);
+        }
+
+        // ---- Skeleton (first skin only) ----
+        if (outSkeleton && !asset.skins.empty()) {
+            fastgltf::Skin& skin = asset.skins[0];
+            std::unordered_map<size_t, int> nodeToJoint;
+            for (size_t j = 0; j < skin.joints.size(); ++j) nodeToJoint[skin.joints[j]] = (int)j;
+
+            outSkeleton->joints.resize(skin.joints.size());
+            for (size_t j = 0; j < skin.joints.size(); ++j) {
+                size_t nodeIdx = skin.joints[j];
+                fastgltf::Node& node = asset.nodes[nodeIdx];
+                Engine3D::Joint3D joint;
+                joint.name = !node.name.empty() ? std::string(node.name) : ("joint_" + std::to_string(j));
+
+                joint.parentIndex = -1;
+                for (size_t pi = 0; pi < asset.nodes.size(); ++pi)
+                    for (size_t child : asset.nodes[pi].children)
+                        if (child == nodeIdx && nodeToJoint.count(pi)) { joint.parentIndex = nodeToJoint[pi]; }
+
+                if (auto* trs = std::get_if<fastgltf::TRS>(&node.transform)) {
+                    glm::vec3 t(trs->translation[0], trs->translation[1], trs->translation[2]);
+                    glm::quat r(trs->rotation[3], trs->rotation[0], trs->rotation[1], trs->rotation[2]);
+                    glm::vec3 s(trs->scale[0], trs->scale[1], trs->scale[2]);
+                    joint.localBindTransform = glm::translate(glm::mat4(1.0f), t) * glm::mat4_cast(r) * glm::scale(glm::mat4(1.0f), s);
+                }
+                if (skin.inverseBindMatrices.has_value()) {
+                    fastgltf::math::fmat4x4 m = fastgltf::getAccessorElement<fastgltf::math::fmat4x4>(
+                        asset, asset.accessors[*skin.inverseBindMatrices], j);
+                    joint.inverseBindMatrix = glm::make_mat4(&m.col(0).x());
+                }
+                outSkeleton->joints[j] = joint;
+            }
+
+            // ---- Animations ----
+            if (outAnimations) {
+                for (size_t ai = 0; ai < asset.animations.size(); ++ai) {
+                    fastgltf::Animation& ga = asset.animations[ai];
+                    Engine3D::AnimationClip3D clip;
+                    clip.name = !ga.name.empty() ? std::string(ga.name) : ("clip_" + std::to_string(ai));
+                    clip.jointTracks.resize(skin.joints.size());
+
+                    for (auto& ch : ga.channels) {
+                        if (!ch.nodeIndex.has_value()) continue;
+                        auto it = nodeToJoint.find(*ch.nodeIndex);
+                        if (it == nodeToJoint.end()) continue;
+                        int jointIdx = it->second;
+                        fastgltf::AnimationSampler& samp = ga.samplers[ch.samplerIndex];
+                        fastgltf::Accessor& inputAcc = asset.accessors[samp.inputAccessor];
+                        size_t count = inputAcc.count;
+                        Engine3D::JointKeyframes& kf = clip.jointTracks[jointIdx];
+
+                        for (size_t k = 0; k < count; ++k) {
+                            float time = fastgltf::getAccessorElement<float>(asset, inputAcc, k);
+                            clip.duration = std::max(clip.duration, time);
+                            if (ch.path == fastgltf::AnimationPath::Translation) {
+                                glm::vec3 v = readAccessorVec3(samp.outputAccessor, k);
+                                kf.posTimes.push_back(time); kf.posValues.push_back(v);
+                            } else if (ch.path == fastgltf::AnimationPath::Rotation) {
+                                fastgltf::math::fvec4 q = fastgltf::getAccessorElement<fastgltf::math::fvec4>(asset, asset.accessors[samp.outputAccessor], k);
+                                kf.rotTimes.push_back(time); kf.rotValues.push_back(glm::quat(q.w(), q.x(), q.y(), q.z()));
+                            } else if (ch.path == fastgltf::AnimationPath::Scale) {
+                                glm::vec3 v = readAccessorVec3(samp.outputAccessor, k);
+                                kf.scaleTimes.push_back(time); kf.scaleValues.push_back(v);
+                            }
+                        }
+                    }
+                    outAnimations->push_back(std::move(clip));
+                }
+            }
+        }
+
+        outModel.objFilePath = path;
+        outModel.isLoaded = true;
+        return true;
+    }
+
+    // ---------------------------------------------------------
+    // FBX, via ufbx
+    // ---------------------------------------------------------
+    inline bool loadFbx(SDL_GPUDevice* device, const std::string& path,
+                         Engine3D::DefaultGpuResources& defaults,
+                         Engine3D::ObjModel& outModel,
+                         Engine3D::Skeleton3D* outSkeleton,
+                         std::vector<Engine3D::AnimationClip3D>* outAnimations) {
+        ufbx_load_opts opts{};
+        // ufbx_coordinate_axes fields are right/up/front, NOT x/y/z --
+        // and per ufbx.h's own comment, "front" is the OPPOSITE of
+        // forward. Right-handed Y-up with -Z forward (the convention
+        // the rest of this engine's glm/GPU math assumes) means
+        // front = +Z. Fixed from an earlier version of this file that
+        // used the wrong type name (`ufbx_axes` -- doesn't exist,
+        // correct type is `ufbx_coordinate_axes`) and treated it as a
+        // plain (x,y,z) triple instead of (right,up,front).
+        opts.target_axes = ufbx_coordinate_axes{
+            UFBX_COORDINATE_AXIS_POSITIVE_X,  // right
+            UFBX_COORDINATE_AXIS_POSITIVE_Y,  // up
+            UFBX_COORDINATE_AXIS_POSITIVE_Z,  // front (opposite of forward -- forward is -Z)
+        };
+        opts.target_unit_meters = 1.0f; // normalize whatever unit scale the DCC exported to meters, matches Physics3D's 1 unit = 1 meter
+        ufbx_error error;
+        ufbx_scene* scene = ufbx_load_file(path.c_str(), &opts, &error);
+        if (!scene) {
+            std::cerr << "[Engine3D] ufbx_load_file failed for " << path << ": " << error.description.data << std::endl;
+            return false;
+        }
+
+        std::string baseDir = dirOf(path);
+        std::vector<Engine3D::Vertex3D> vertices;
+        std::unordered_map<int, std::vector<Uint32>> indicesByMaterial;
+        glm::vec3 bmin( std::numeric_limits<float>::max());
+        glm::vec3 bmax(-std::numeric_limits<float>::max());
+
+        // Map every ufbx bone node we see to a stable joint index, built
+        // up as we encounter skinned meshes below.
+        std::unordered_map<ufbx_node*, int> nodeToJoint;
+
+        for (size_t mi = 0; mi < scene->nodes.count; ++mi) {
+            ufbx_node* node = scene->nodes.data[mi];
+            if (!node->mesh) continue;
+            ufbx_mesh* mesh = node->mesh;
+
+            bool skinned = mesh->skin_deformers.count > 0;
+            glm::mat4 world(1.0f);
+            if (!skinned) {
+                ufbx_matrix m = node->geometry_to_world;
+                world = glm::mat4(
+                    m.m00, m.m10, m.m20, 0.0f,
+                    m.m01, m.m11, m.m21, 0.0f,
+                    m.m02, m.m12, m.m22, 0.0f,
+                    m.m03, m.m13, m.m23, 1.0f);
+            }
+            glm::mat3 normalMat = glm::mat3(glm::transpose(glm::inverse(world)));
+
+            // Triangulate every face (ufbx faces can be n-gons) into a
+            // temp index buffer, then bucket by the face's assigned
+            // material, same shape as the obj/gltf paths above.
+            // mesh->max_triangles isn't a real field -- the correct
+            // member (per ufbx.h) is max_face_triangles: the largest
+            // number of triangles any single face in this mesh will
+            // triangulate into, which is exactly the per-call buffer
+            // size ufbx_triangulate_face() expects.
+            std::vector<uint32_t> triIndices(mesh->max_face_triangles * 3);
+            for (size_t fi = 0; fi < mesh->faces.count; ++fi) {
+                ufbx_face face = mesh->faces.data[fi];
+                uint32_t numTris = ufbx_triangulate_face(triIndices.data(), triIndices.size(), mesh, face);
+                int matId = -1;
+                if (mesh->face_material.count > fi) {
+                    uint32_t mIdx = mesh->face_material.data[fi];
+                    if (mIdx < mesh->materials.count) matId = (int)(mesh->materials.data[mIdx] - scene->materials.data[0]);
+                }
+
+                for (uint32_t t = 0; t < numTris * 3; ++t) {
+                    uint32_t vIdx = triIndices[t];
+                    Engine3D::Vertex3D vert{};
+                    ufbx_vec3 p = mesh->vertex_position[vIdx];
+                    glm::vec3 pos((float)p.x, (float)p.y, (float)p.z);
+                    if (!skinned) pos = glm::vec3(world * glm::vec4(pos, 1.0f));
+                    vert.position = pos;
+
+                    if (mesh->vertex_normal.exists) {
+                        ufbx_vec3 n = mesh->vertex_normal[vIdx];
+                        glm::vec3 nrm((float)n.x, (float)n.y, (float)n.z);
+                        vert.normal = skinned ? nrm : glm::normalize(normalMat * nrm);
+                    } else {
+                        vert.normal = glm::vec3(0, 1, 0);
+                    }
+                    if (mesh->vertex_uv.exists) {
+                        ufbx_vec2 uv = mesh->vertex_uv[vIdx];
+                        vert.texcoord = glm::vec2((float)uv.x, 1.0f - (float)uv.y);
+                    }
+
+                    bmin = glm::min(bmin, vert.position);
+                    bmax = glm::max(bmax, vert.position);
+                    Uint32 outIdx = (Uint32)vertices.size();
+                    vertices.push_back(vert);
+                    indicesByMaterial[matId].push_back(outIdx);
+                }
+            }
+
+            // ---- Skeleton, from this mesh's first skin deformer ----
+            if (outSkeleton && skinned && outSkeleton->joints.empty()) {
+                ufbx_skin_deformer* skin = mesh->skin_deformers.data[0];
+                outSkeleton->joints.reserve(skin->clusters.count);
+                for (size_t ci = 0; ci < skin->clusters.count; ++ci) {
+                    ufbx_skin_cluster* cluster = skin->clusters.data[ci];
+                    nodeToJoint[cluster->bone_node] = (int)outSkeleton->joints.size();
+                    Engine3D::Joint3D joint;
+                    joint.name = std::string(cluster->bone_node->name.data, cluster->bone_node->name.length);
+                    ufbx_matrix ibm = cluster->geometry_to_bone;
+                    joint.inverseBindMatrix = glm::mat4(
+                        ibm.m00, ibm.m10, ibm.m20, 0.0f,
+                        ibm.m01, ibm.m11, ibm.m21, 0.0f,
+                        ibm.m02, ibm.m12, ibm.m22, 0.0f,
+                        ibm.m03, ibm.m13, ibm.m23, 1.0f);
+                    outSkeleton->joints.push_back(joint);
+                }
+                // Second pass: parent indices + local bind transforms,
+                // now that every bone node has a stable index.
+                for (size_t ci = 0; ci < skin->clusters.count; ++ci) {
+                    ufbx_node* boneNode = skin->clusters.data[ci]->bone_node;
+                    int idx = nodeToJoint[boneNode];
+                    Engine3D::Joint3D& joint = outSkeleton->joints[idx];
+                    joint.parentIndex = (boneNode->parent && nodeToJoint.count(boneNode->parent)) ? nodeToJoint[boneNode->parent] : -1;
+                    ufbx_matrix lm = boneNode->node_to_parent;
+                    joint.localBindTransform = glm::mat4(
+                        lm.m00, lm.m10, lm.m20, 0.0f,
+                        lm.m01, lm.m11, lm.m21, 0.0f,
+                        lm.m02, lm.m12, lm.m22, 0.0f,
+                        lm.m03, lm.m13, lm.m23, 1.0f);
+                }
+            }
+        }
+
+        if (vertices.empty()) {
+            std::cerr << "[Engine3D] " << path << " (fbx) produced no geometry." << std::endl;
+            ufbx_free_scene(scene);
+            return false;
+        }
+
+        std::vector<Uint32> flatIndices;
+        std::vector<Engine3D::SubMesh3D> submeshes;
+        for (auto& kv : indicesByMaterial) {
+            Engine3D::SubMesh3D sub;
+            sub.materialIndex = kv.first;
+            sub.indexOffset = (Uint32)flatIndices.size();
+            sub.indexCount = (Uint32)kv.second.size();
+            flatIndices.insert(flatIndices.end(), kv.second.begin(), kv.second.end());
+            submeshes.push_back(sub);
+        }
+
+        outModel.vertexBuffer = Engine3D::createAndUploadBuffer(device, SDL_GPU_BUFFERUSAGE_VERTEX,
+            vertices.data(), (Uint32)(vertices.size() * sizeof(Engine3D::Vertex3D)));
+        outModel.indexBuffer = Engine3D::createAndUploadBuffer(device, SDL_GPU_BUFFERUSAGE_INDEX,
+            flatIndices.data(), (Uint32)(flatIndices.size() * sizeof(Uint32)));
+        if (!outModel.vertexBuffer || !outModel.indexBuffer) { ufbx_free_scene(scene); return false; }
+
+        outModel.vertexCount = (Uint32)vertices.size();
+        outModel.indexCount = (Uint32)flatIndices.size();
+        outModel.submeshes = std::move(submeshes);
+        outModel.boundsMin = bmin;
+        outModel.boundsMax = bmax;
+
+        outModel.materials.reserve(scene->materials.count);
+        for (size_t mi = 0; mi < scene->materials.count; ++mi) {
+            ufbx_material* fm = scene->materials.data[mi];
+            Engine3D::Material3D mat;
+            mat.name = std::string(fm->name.data, fm->name.length);
+            ufbx_vec3 diffuse = fm->fbx.diffuse_color.value_vec3;
+            mat.diffuseColor = glm::vec3((float)diffuse.x, (float)diffuse.y, (float)diffuse.z);
+            if (fm->fbx.diffuse_color.texture_enabled && fm->fbx.diffuse_color.texture) {
+                std::string texPath = std::string(fm->fbx.diffuse_color.texture->filename.data, fm->fbx.diffuse_color.texture->filename.length);
+                if (!texPath.empty()) {
+                    mat.diffuseTexturePath = baseDir + std::filesystem::path(texPath).filename().string();
+                    SDL_GPUTexture* tex = nullptr; SDL_GPUSampler* samp = nullptr;
+                    if (Engine3D::loadTextureToGPU(device, mat.diffuseTexturePath, &tex, &samp)) {
+                        mat.gpuTexture = tex; mat.gpuSampler = samp; mat.ownsTexture = true; mat.ownsSampler = true;
+                    }
+                }
+            }
+            if (!mat.gpuTexture) { mat.gpuTexture = defaults.whiteTexture; mat.gpuSampler = defaults.linearSampler; }
+            outModel.materials.push_back(mat);
+        }
+
+        // ---- Animations: baked at a fixed sample rate rather than
+        // walked curve-by-curve. ufbx exposes each bone's raw FBX
+        // animation curves (which can be non-uniformly keyed, use
+        // different interpolation types per key, etc.), but re-deriving
+        // exact FBX curve evaluation isn't worth it here -- ufbx already
+        // does that internally via ufbx_evaluate_transform(), so we just
+        // sample it at 30Hz per bone and store that as ordinary
+        // JointKeyframes. Costs more memory than sparse original keys,
+        // but stays completely format-agnostic downstream (the same
+        // sampleAnimationPose() in engine3d.h drives glTF and FBX
+        // clips identically), and 30Hz is well above what a Mixamo
+        // mocap clip actually needs to look correct.
+        if (outAnimations && outSkeleton && !outSkeleton->joints.empty()) {
+            constexpr float SAMPLE_RATE = 30.0f;
+            for (size_t si = 0; si < scene->anim_stacks.count; ++si) {
+                ufbx_anim_stack* stack = scene->anim_stacks.data[si];
+                Engine3D::AnimationClip3D clip;
+                clip.name = std::string(stack->name.data, stack->name.length);
+                clip.duration = (float)stack->time_end - (float)stack->time_begin;
+                clip.jointTracks.resize(outSkeleton->joints.size());
+
+                int sampleCount = std::max(2, (int)(clip.duration * SAMPLE_RATE));
+                for (auto& kv : nodeToJoint) {
+                    ufbx_node* boneNode = kv.first;
+                    int jointIdx = kv.second;
+                    Engine3D::JointKeyframes& kf = clip.jointTracks[jointIdx];
+                    kf.posTimes.reserve(sampleCount); kf.posValues.reserve(sampleCount);
+                    kf.rotTimes.reserve(sampleCount); kf.rotValues.reserve(sampleCount);
+                    kf.scaleTimes.reserve(sampleCount); kf.scaleValues.reserve(sampleCount);
+
+                    for (int s = 0; s < sampleCount; ++s) {
+                        double t = (double)stack->time_begin + (double)s / SAMPLE_RATE;
+                        ufbx_transform xf = ufbx_evaluate_transform(stack->anim, boneNode, t);
+                        float rel = (float)(t - (double)stack->time_begin);
+                        kf.posTimes.push_back(rel);
+                        kf.posValues.push_back(glm::vec3((float)xf.translation.x, (float)xf.translation.y, (float)xf.translation.z));
+                        kf.rotTimes.push_back(rel);
+                        kf.rotValues.push_back(glm::quat((float)xf.rotation.w, (float)xf.rotation.x, (float)xf.rotation.y, (float)xf.rotation.z));
+                        kf.scaleTimes.push_back(rel);
+                        kf.scaleValues.push_back(glm::vec3((float)xf.scale.x, (float)xf.scale.y, (float)xf.scale.z));
+                    }
+                }
+                outAnimations->push_back(std::move(clip));
+            }
+        }
+
+        outModel.objFilePath = path;
+        outModel.isLoaded = true;
+        ufbx_free_scene(scene);
+        return true;
+    }
+
+} // namespace ModelLoaderDetail3D
+
+    // ---------------------------------------------------------
+    // loadModel3D -- the definition promised by the forward
+    // declaration further up this file. This used to live in
+    // model_loaders_3d.h; now that that file's contents have been
+    // folded directly into engine3d.h (inside ModelLoaderDetail3D,
+    // above), this dispatcher has to live here too, after
+    // loadObjModel/loadGltf/loadFbx are all visible. Picks a loader
+    // by file extension; unknown extensions fail with a log message
+    // rather than silently no-op'ing.
+    // ---------------------------------------------------------
+    inline bool loadModel3D(SDL_GPUDevice* device, const std::string& path,
+                             DefaultGpuResources& defaults, ObjModel& outModel,
+                             Skeleton3D* outSkeleton,
+                             std::vector<AnimationClip3D>* outAnimations) {
+        std::string ext = ModelLoaderDetail3D::extOf(path);
+        if (ext == "obj") {
+            // .obj has no skeleton/animation data; outSkeleton/outAnimations
+            // are simply left untouched for this format.
+            return loadObjModel(device, path, defaults, outModel);
+        } else if (ext == "gltf" || ext == "glb") {
+            return ModelLoaderDetail3D::loadGltf(device, path, defaults, outModel, outSkeleton, outAnimations);
+        } else if (ext == "fbx") {
+            return ModelLoaderDetail3D::loadFbx(device, path, defaults, outModel, outSkeleton, outAnimations);
+        }
+        std::cerr << "[Engine3D] loadModel3D: unsupported file extension '" << ext << "' for " << path << std::endl;
+        return false;
+    }
+
+    inline void renderGridMap3D(SDL_GPUCommandBuffer* cmd,
+                                SDL_GPURenderPass* pass,
+                                SDL_GPUGraphicsPipeline* pipeline,
+                                const ObjModel& cellModel,  // unit cube model to instance
+                                const glm::vec3& entityPos,
+                                const std::vector<struct Components::GridCell3D>& cells,
+                                float cellW, float cellH, float cellD,
+                                const glm::mat4& view,
+                                const glm::mat4& projection,
+                                const DefaultGpuResources& defaults) {
+        if (!cellModel.isLoaded || !pipeline || cells.empty()) return;
+        
+        SDL_BindGPUGraphicsPipeline(pass, pipeline);
+        SDL_GPUBufferBinding vBinding = {};
+        vBinding.buffer = cellModel.vertexBuffer;
+        vBinding.offset = 0;
+        SDL_BindGPUVertexBuffers(pass, 0, &vBinding, 1);
+        SDL_GPUBufferBinding iBinding = {};
+        iBinding.buffer = cellModel.indexBuffer;
+        iBinding.offset = 0;
+        SDL_BindGPUIndexBuffer(pass, &iBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+        
+        // Bind default white texture
+        SDL_GPUTextureSamplerBinding texBinding = {};
+        texBinding.texture = defaults.whiteTexture;
+        texBinding.sampler = defaults.linearSampler;
+        SDL_BindGPUFragmentSamplers(pass, 0, &texBinding, 1);
+        
+        ObjFragmentUniforms fUniforms{};
+        fUniforms.baseColor = glm::vec4(0.6f, 0.8f, 1.0f, 1.0f);
+        SDL_PushGPUFragmentUniformData(cmd, 0, &fUniforms, sizeof(fUniforms));
+        
+        for (const auto& cell : cells) {
+            Transform3D t;
+            t.position = entityPos + glm::vec3(
+                cell.x * cellW + cell.offX,
+                cell.y * cellH + cell.offY,
+                cell.z * cellD + cell.offZ
+            );
+            t.scale = glm::vec3(cellW, cellH, cellD);
+            
+            glm::mat4 modelMat = t.toMatrix();
+            ObjVertexUniforms vUniforms{};
+            vUniforms.mvp = projection * view * modelMat;
+            vUniforms.model = modelMat;
+            SDL_PushGPUVertexUniformData(cmd, 0, &vUniforms, sizeof(vUniforms));
+            
+            for (const auto& sub : cellModel.submeshes) {
+                SDL_DrawGPUIndexedPrimitives(pass, sub.indexCount, 1, sub.indexOffset, 0, 0);
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------
+// GPU skinning note: sampleAnimationPose() (above, in engine3d.h)
+// produces one world-space glm::mat4 per joint every frame. That's
+// everything a vertex shader needs to do real per-vertex GPU skinning
+// -- multiply each bone matrix by the joint's inverseBindMatrix,
+// upload the resulting array as a uniform/storage buffer, and in the
+// vertex shader blend up to 4 bone matrices per vertex by
+// joint indices + weights (which cgltf/ufbx both expose per-vertex,
+// not yet threaded into Vertex3D here since that also means growing
+// Vertex3D's layout and the createObjPipeline() vertex attributes to
+// match -- a deliberate follow-up rather than baked in silently).
+// Until then, skinned models render in bind pose (T-pose) through
+// renderObj(), while Skeleton3D/AnimationClip3D data is fully usable
+// today for CPU-side purposes: Physics3D's per-bone rigged collider
+// rig (physics3d.h), attaching props/cameras to a named bone, and any
+// gameplay logic that just needs "where is this bone right now".
+// ------------------------------------------------------------------

@@ -293,6 +293,87 @@ namespace Components {
         float y = 1.0f;
     };
 
+    struct Position3D {
+        float x = 0.0f;
+        float y = 0.0f;
+        float z = 0.0f;
+    };
+
+
+    // ================================================================
+    // 3D-mode-only components (Engine3D::CanvasMode::Mode3D).
+    // Mirror the 2D RectangleShape/TextureRef pattern: the entity is
+    // "just data" here, Engine3D + Physics3D do the actual GPU/physics
+    // work driven by this data. Harmless to have on an entity in a 2D
+    // build too (never read), so no #ifdef needed around the struct
+    // definitions themselves -- only around where they're *used* for
+    // rendering (main.cpp already gates all 3D rendering on
+    // `if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode3D)`).
+    // ================================================================
+
+    // Third extent to pair with RectangleShape's w/h when an entity is
+    // being edited in 3D mode -- w=X size, h=Y size, depth=Z size.
+    struct Depth3D {
+        float depth = 50.0f;
+    };
+
+    // Points at a 3D model on disk (.obj/.fbx/.gltf/.glb) that
+    // Engine3D::ModelCache3D will load (and de-duplicate by path) on
+    // first use. Leave modelPath empty to fall back to the default
+    // white wireframe cube outline (see render_entities_3d in
+    // engine3d.h) instead of a real mesh -- this is the "basic 3D
+    // entity" look, same role the empty rectangle outline plays for
+    // un-textured 2D entities.
+    struct Mesh3DRef {
+        std::string modelPath;
+        // Which sub-mesh's material to override, or -1 to leave every
+        // submesh using whatever materials the model file itself
+        // defined (typical case). Sized for the (currently rare) case
+        // of wanting one flat tint across the whole model.
+        int materialOverrideSubmesh = -1;
+        // Separate dimensions for the mesh itself (0 = use native model size).
+        // These are independent from the outline dimensions (width/height/depth).
+        float meshW = 0.0f;
+        float meshH = 0.0f;
+        float meshD = 0.0f;
+    };
+
+    // Optional flat-color/texture override, applied on top of (or
+    // instead of, if the model had none) whatever Engine3D::Material3D
+    // came from the model file.
+    struct Material3DRef {
+        float r = 0.8f, g = 0.8f, b = 0.8f, a = 1.0f;
+        std::string diffuseTexturePath; // empty = keep the model's own texture
+        bool overrideColor = false;     // false = use the model's own diffuseColor
+    };
+
+    // Declarative 3D collider setup for Physics3D -- mirrors
+    // PhysicsBodyDef's role on the 2D side, minus the runtime JPH
+    // handle (that lives in a Physics3D::PhysicsBody3D owned by
+    // Physics3D::PhysicsWorld3D, looked up by entity id, same split
+    // physics_sync_system already uses for Box2D).
+    struct Collider3DRef {
+        enum class Shape { Box, Sphere, Capsule, ConvexHull, Mesh, RiggedApprox } shape = Shape::Box;
+        enum class Motion { Static, Kinematic, Dynamic } motion = Motion::Static;
+        // Plain floats, not glm::vec3: engine.h intentionally stays
+        // glm-independent (glm is only pulled in by engine3d.h /
+        // physics3d.h / main.cpp for actual 3D math). Physics3D::
+        // BuildColliderFromRef() converts these to glm on the way in.
+        float halfExtentsX = 0.5f, halfExtentsY = 0.5f, halfExtentsZ = 0.5f; // Box
+        float radius = 0.5f;                     // Sphere / Capsule
+        float halfHeight = 0.5f;                 // Capsule
+        float density = 1000.0f;
+        bool isSensor = false;
+        uint16_t category = 0x0001;
+        uint16_t mask = 0xFFFF;
+        // For Shape::ConvexHull/Mesh/RiggedApprox: build the collider
+        // from the entity's own Mesh3DRef model instead of a primitive.
+        // RiggedApprox additionally decimates + re-attaches a capsule
+        // chain per bone if the model is skinned -- see
+        // Physics3D::BuildRiggedApproxCollider in physics3d.h.
+        int maxHullPoints = 64; // decimation target for ConvexHull/RiggedApprox
+    };
+
     // A single named animation (e.g. "idle", "walk", "attack"). Each clip owns
     // its own frame list and playback state so switching clips doesn't stomp
     // on another clip's progress.
@@ -386,16 +467,23 @@ namespace Components {
         std::string textureName;
         float cellWidth = 32.0f;
         float cellHeight = 32.0f;
-        std::vector<std::pair<int,int>> cells; // anchor grid coordinates (col, row)
-        // Per-cell pixel offset from the anchor cell's snapped position.
-        // Always kept the same size/order as `cells` (index i of one
-        // corresponds to index i of the other). {0,0} means "sits exactly
-        // on the grid cell". Non-zero values are how a cell can be moved
-        // freely when snapEnabled is false -- the anchor (col,row) is still
-        // used for storage/lookup, but the offset shifts the drawn/hit
-        // position away from that grid cell.
+        std::vector<std::pair<int,int>> cells;
         std::vector<SDL_FPoint> cellOffsets;
-        bool snapEnabled = true; // whether painted tiles snap to the grid
+        bool snapEnabled = true;
+    };
+
+    struct GridCell3D {
+        int x = 0, y = 0, z = 0;
+        float offX = 0.0f, offY = 0.0f, offZ = 0.0f;
+    };
+
+    struct GridMap3D {
+        std::string materialName;  // texture or material resource
+        float cellWidth = 1.0f;
+        float cellHeight = 1.0f;
+        float cellDepth = 1.0f;
+        std::vector<GridCell3D> cells;
+        bool snapEnabled = true;
     };
 }
 
@@ -772,6 +860,19 @@ struct ECSWorld {
     std::vector<uint8_t> has_tilemap;
     std::vector<Components::TileMap> tilemap_pool;
 
+    // ── 3D-mode-only component pools (see Components::Depth3D etc.) ──
+    std::vector<uint8_t> has_position3d;
+    std::vector<Components::Position3D> position3d_pool;
+    std::vector<uint8_t> has_depth3d;
+    std::vector<Components::Depth3D> depth3d_pool;
+    std::vector<uint8_t> has_mesh3d;
+    std::vector<Components::Mesh3DRef> mesh3d_pool;
+    std::vector<uint8_t> has_material3d;
+    std::vector<Components::Material3DRef> material3d_pool;
+    std::vector<uint8_t> has_collider3d;
+    std::vector<Components::Collider3DRef> collider3d_pool;
+    std::vector<uint8_t> has_gridmap3d;
+    std::vector<Components::GridMap3D> gridmap3d_pool;
 
     size_t entity_count = 0;
 
@@ -802,6 +903,18 @@ struct ECSWorld {
         scale_pool.reserve(MAX_ENTITIES);
         has_tilemap.reserve(MAX_ENTITIES);
         tilemap_pool.reserve(MAX_ENTITIES);
+        has_depth3d.reserve(MAX_ENTITIES);
+        depth3d_pool.reserve(MAX_ENTITIES);
+        has_mesh3d.reserve(MAX_ENTITIES);
+        mesh3d_pool.reserve(MAX_ENTITIES);
+        has_material3d.reserve(MAX_ENTITIES);
+        material3d_pool.reserve(MAX_ENTITIES);
+        has_collider3d.reserve(MAX_ENTITIES);
+        collider3d_pool.reserve(MAX_ENTITIES);
+        has_position3d.reserve(MAX_ENTITIES);
+        position3d_pool.reserve(MAX_ENTITIES);
+        has_gridmap3d.reserve(MAX_ENTITIES);
+        gridmap3d_pool.reserve(MAX_ENTITIES);
     }
 
     Entity create_entity() {
@@ -832,6 +945,18 @@ struct ECSWorld {
         scale_pool.emplace_back();
         has_tilemap.push_back(0);
         tilemap_pool.emplace_back();
+        has_depth3d.push_back(0);
+        depth3d_pool.emplace_back();
+        has_mesh3d.push_back(0);
+        mesh3d_pool.emplace_back();
+        has_material3d.push_back(0);
+        material3d_pool.emplace_back();
+        has_collider3d.push_back(0);
+        collider3d_pool.emplace_back();
+        has_position3d.push_back(0);
+        position3d_pool.emplace_back();
+        has_gridmap3d.push_back(0);
+        gridmap3d_pool.emplace_back();
         return id;
     }
 
@@ -865,6 +990,18 @@ struct ECSWorld {
             scale_pool[id] = scale_pool[last];
             has_tilemap[id] = has_tilemap[last];
             tilemap_pool[id] = tilemap_pool[last];
+            has_depth3d[id] = has_depth3d[last];
+            depth3d_pool[id] = depth3d_pool[last];
+            has_mesh3d[id] = has_mesh3d[last];
+            mesh3d_pool[id] = mesh3d_pool[last];
+            has_material3d[id] = has_material3d[last];
+            material3d_pool[id] = material3d_pool[last];
+            has_collider3d[id] = has_collider3d[last];
+            collider3d_pool[id] = collider3d_pool[last];
+            has_position3d[id] = has_position3d[last];
+            position3d_pool[id] = position3d_pool[last];
+            has_gridmap3d[id] = has_gridmap3d[last];
+            gridmap3d_pool[id] = gridmap3d_pool[last];
         }
         has_metadata.pop_back();
         metadata_pool.pop_back();
@@ -892,11 +1029,24 @@ struct ECSWorld {
         scale_pool.pop_back();
         has_tilemap.pop_back();
         tilemap_pool.pop_back();
+        has_depth3d.pop_back();
+        depth3d_pool.pop_back();
+        has_mesh3d.pop_back();
+        mesh3d_pool.pop_back();
+        has_material3d.pop_back();
+        material3d_pool.pop_back();
+        has_collider3d.pop_back();
+        collider3d_pool.pop_back();
+        has_position3d.pop_back();
+        position3d_pool.pop_back();
+        has_gridmap3d.pop_back();
+        gridmap3d_pool.pop_back();
         entity_count--;
     }
 
     void add_metadata(Entity id) { if (id < entity_count) has_metadata[id] = 1; }
     void add_position(Entity id) { if (id < entity_count) has_position[id] = 1; }
+    void add_position3d(Entity id) { if (id < entity_count) has_position3d[id] = 1; }
     void add_rectangle_shape(Entity id) { if (id < entity_count) has_rectangle_shape[id] = 1; }
     void add_z_index(Entity id) { if (id < entity_count) has_z_index[id] = 1; }
     void add_selection(Entity id) { if (id < entity_count) has_selection[id] = 1; }
@@ -907,6 +1057,11 @@ struct ECSWorld {
     void add_rotation(Entity id) { if (id < entity_count) has_rotation[id] = 1; }
     void add_scale(Entity id)   { if (id < entity_count) has_scale[id] = 1; }
     void add_tilemap(Entity id) { if (id < entity_count) has_tilemap[id] = 1; }
+    void add_gridmap3d(Entity id) { if (id < entity_count) has_gridmap3d[id] = 1; }
+    void add_depth3d(Entity id)    { if (id < entity_count) has_depth3d[id] = 1; }
+    void add_mesh3d(Entity id)     { if (id < entity_count) has_mesh3d[id] = 1; }
+    void add_material3d(Entity id) { if (id < entity_count) has_material3d[id] = 1; }
+    void add_collider3d(Entity id) { if (id < entity_count) has_collider3d[id] = 1; }
 
     // Points this entity's AnimationState at the resource loaded from
     // `filepath`. If some other entity already loaded that exact file, the
@@ -4652,7 +4807,7 @@ namespace Gui {
         void setRect(SDL_FRect r) override { rect = r; }
         void setPos(SDL_Point p) override { rect.x = p.x; rect.y = p.y; }
 
-        bool getValue() const { return value; }
+        bool        getValue() const { return value; }
         void setValue(bool v) { value = v; }
 
         void render(float offsetX, float offsetY) override {
@@ -7172,10 +7327,20 @@ namespace Gui {
                         auto* sb = static_cast<Gui::SpinBox*>(wgt.get());
                         float val = sb->getValue();
                         if (val != f.lastSyncedValue) {
-                            if (f.key == "pos_x") world->position_pool[e].x = val;
-                            else if (f.key == "pos_y") world->position_pool[e].y = val;
+                            if (f.key == "pos_x") {
+                                if (world->has_position3d[e]) world->position3d_pool[e].x = val;
+                                else world->position_pool[e].x = val;
+                            }
+                            else if (f.key == "pos_y") {
+                                if (world->has_position3d[e]) world->position3d_pool[e].y = val;
+                                else world->position_pool[e].y = val;
+                            }
+                            else if (f.key == "pos_z") {
+                                if (world->has_position3d[e]) world->position3d_pool[e].z = val;
+                            }
                             else if (f.key == "rect_w") world->rectangle_shape_pool[e].w = val;
                             else if (f.key == "rect_h") world->rectangle_shape_pool[e].h = val;
+                            else if (f.key == "depth3d") world->depth3d_pool[e].depth = val;
                             else if (f.key == "z_index") world->z_index_pool[e].z = (int)val;
                             else if (f.key == "phys_shape") {
                                 auto newShape = SpinboxIndexToShapeType((int)val);
@@ -7215,6 +7380,15 @@ namespace Gui {
                             else if (f.key == "rotation") world->rotation_pool[e].degrees = val;
                             else if (f.key == "scale_x") world->scale_pool[e].x = val;
                             else if (f.key == "scale_y") world->scale_pool[e].y = val;
+                            else if (f.key == "mat3d_r") world->material3d_pool[e].r = val / 255.0f;
+                            else if (f.key == "mat3d_g") world->material3d_pool[e].g = val / 255.0f;
+                            else if (f.key == "mat3d_b") world->material3d_pool[e].b = val / 255.0f;
+                            else if (f.key == "mesh_w") world->mesh3d_pool[e].meshW = val;
+                            else if (f.key == "mesh_h") world->mesh3d_pool[e].meshH = val;
+                            else if (f.key == "mesh_d") world->mesh3d_pool[e].meshD = val;
+                            else if (f.key == "gridmap3d_cw") world->gridmap3d_pool[e].cellWidth = val;
+                            else if (f.key == "gridmap3d_ch") world->gridmap3d_pool[e].cellHeight = val;
+                            else if (f.key == "gridmap3d_cd") world->gridmap3d_pool[e].cellDepth = val;
                             f.lastSyncedValue = val;
                         }
                     } else if (wgt->getType() == "LineEdit") {
@@ -7260,6 +7434,10 @@ namespace Gui {
                                         if (th > 0.0f) tm.cellHeight = th;
                                     }
                                 }
+                            }  else if (f.key == "mesh3d_path") {
+                                world->mesh3d_pool[e].modelPath = text;
+                            } else if (f.key == "gridmap3d_mat") {
+                                world->gridmap3d_pool[e].materialName = text;
                             }
                             f.lastSyncedText = text;
                         }
@@ -7269,6 +7447,8 @@ namespace Gui {
                         if (val != (f.lastSyncedValue > 0.5f)) {
                             if (f.key == "sfx_col") world->sfx_emitter_pool[e].playOnCollision = val;
                             else if (f.key == "tile_snap") world->tilemap_pool[e].snapEnabled = val;
+                            else if (f.key == "gridmap3d_snap") world->gridmap3d_pool[e].snapEnabled = val;
+                            else if (f.key == "mat3d_override") world->material3d_pool[e].overrideColor = val;
                             f.lastSyncedValue = val ? 1.0f : 0.0f;
                         }
                     }
@@ -7276,6 +7456,8 @@ namespace Gui {
             }
         }
 
+
+        
         void syncFromWorld() {
             if (!world || targetEntity == (Entity)-1) return;
             Entity e = targetEntity;
@@ -7283,7 +7465,6 @@ namespace Gui {
                 // Special handling for the animation panel
                 if (f.key == "anim_panel") {
                     auto& anim = world->animation_state_pool[e];
-                    // Update clip selector (OptionSpinBox) - assume it's the first widget of that type
                     Gui::OptionSpinBox* clipSelector = nullptr;
                     Gui::SpinBox* widthSpin = nullptr;
                     Gui::SpinBox* heightSpin = nullptr;
@@ -7291,8 +7472,6 @@ namespace Gui {
                         if (wgt->getType() == "OptionSpinBox") {
                             clipSelector = static_cast<Gui::OptionSpinBox*>(wgt.get());
                         } else if (wgt->getType() == "SpinBox") {
-                            // We need to distinguish width vs height. We'll use the lastSyncedValue or a flag.
-                            // Since we have two spinboxes, we can check if we already assigned width.
                             if (!widthSpin) {
                                 widthSpin = static_cast<Gui::SpinBox*>(wgt.get());
                             } else {
@@ -7301,7 +7480,6 @@ namespace Gui {
                         }
                     }
                     if (clipSelector) {
-                        // Update options list (in case clips were added/removed)
                         std::vector<std::string> clipNames;
                         for (const auto& clip : anim.clips) clipNames.push_back(clip.name);
                         clipSelector->setOptions(clipNames);
@@ -7315,23 +7493,25 @@ namespace Gui {
                         float val = anim.active().frameHeight;
                         if (val != heightSpin->getValue()) heightSpin->setValue(val);
                     }
-                    // The spinboxes' onChange will update the world, so we don't need to update lastSyncedValue here.
-                    // But we also need to update the field's last synced values for spinboxes? Not necessary because we only sync from world.
-                    // However, we can update f.lastSyncedValue for them? Actually we don't store per-widget last synced for these.
-                    // We'll just leave as is; the spinboxes will be updated.
-                    continue; // skip the generic handling below
+                    continue;
                 }
-
-                // Original generic handling for other fields
+                
+                // Generic handling for other fields
                 for (auto& wgt : f.widgets) {
                     if (wgt->getType() == "SpinBox") {
                         auto* sb = static_cast<Gui::SpinBox*>(wgt.get());
                         if (!sb->isActive()) {
                             float worldVal = 0.0f;
-                            if (f.key == "pos_x") worldVal = world->position_pool[e].x;
-                            else if (f.key == "pos_y") worldVal = world->position_pool[e].y;
-                            else if (f.key == "rect_w") worldVal = world->rectangle_shape_pool[e].w;
+                            if (f.key == "pos_x") {
+                                worldVal = world->has_position3d[e] ? world->position3d_pool[e].x : world->position_pool[e].x;
+                            } else if (f.key == "pos_y") {
+                                worldVal = world->has_position3d[e] ? world->position3d_pool[e].y : world->position_pool[e].y;
+                            } else if (f.key == "pos_z") {
+                                // FIXED: was incorrectly using position_pool[e].y
+                                worldVal = world->has_position3d[e] ? world->position3d_pool[e].z : 0.0f;
+                            } else if (f.key == "rect_w") worldVal = world->rectangle_shape_pool[e].w;
                             else if (f.key == "rect_h") worldVal = world->rectangle_shape_pool[e].h;
+                            else if (f.key == "depth3d") worldVal = world->depth3d_pool[e].depth;
                             else if (f.key == "z_index") worldVal = (float)world->z_index_pool[e].z;
                             else if (f.key == "phys_shape") worldVal = (float)ShapeTypeToSpinboxIndex(world->physics_body_pool[e].shapeType);
                             else if (f.key == "phys_w") worldVal = world->physics_body_pool[e].width;
@@ -7344,8 +7524,16 @@ namespace Gui {
                             else if (f.key == "rotation") worldVal = world->rotation_pool[e].degrees;
                             else if (f.key == "scale_x") worldVal = world->scale_pool[e].x;
                             else if (f.key == "scale_y") worldVal = world->scale_pool[e].y;
-                            if (worldVal != f.lastSyncedValue) { sb->setValue(worldVal); f.lastSyncedValue = worldVal; }
-
+                            else if (f.key == "mat3d_r") worldVal = world->material3d_pool[e].r * 255.0f;
+                            else if (f.key == "mat3d_g") worldVal = world->material3d_pool[e].g * 255.0f;
+                            else if (f.key == "mat3d_b") worldVal = world->material3d_pool[e].b * 255.0f;
+                            else if (f.key == "gridmap3d_cw") worldVal = world->gridmap3d_pool[e].cellWidth;
+                            else if (f.key == "gridmap3d_ch") worldVal = world->gridmap3d_pool[e].cellHeight;
+                            else if (f.key == "gridmap3d_cd") worldVal = world->gridmap3d_pool[e].cellDepth;
+                            if (worldVal != f.lastSyncedValue) { 
+                                sb->setValue(worldVal); 
+                                f.lastSyncedValue = worldVal; 
+                            }
                         }
                     } else if (wgt->getType() == "LineEdit") {
                         auto* le = static_cast<Gui::LineEdit*>(wgt.get());
@@ -7355,8 +7543,12 @@ namespace Gui {
                             else if (f.key == "tex_res") worldText = world->texture_ref_pool[e].resourceName;
                             else if (f.key == "sfx_name") worldText = world->sfx_emitter_pool[e].sfxName;
                             else if (f.key == "tile_tex") worldText = world->tilemap_pool[e].textureName;
+                            else if (f.key == "mesh3d_path") worldText = world->mesh3d_pool[e].modelPath;
+                            else if (f.key == "gridmap3d_mat") worldText = world->gridmap3d_pool[e].materialName;
                             if (worldText != f.lastSyncedText) {
-                                le->clear(); for (char c : worldText) le->appendText(std::string(1, c)); f.lastSyncedText = worldText;
+                                le->clear(); 
+                                for (char c : worldText) le->appendText(std::string(1, c)); 
+                                f.lastSyncedText = worldText;
                             }
                         }
                     } else if (wgt->getType() == "CheckBox") {
@@ -7364,6 +7556,8 @@ namespace Gui {
                         bool worldVal = false;
                         if (f.key == "sfx_col") worldVal = world->sfx_emitter_pool[e].playOnCollision;
                         else if (f.key == "tile_snap") worldVal = world->tilemap_pool[e].snapEnabled;
+                        else if (f.key == "gridmap3d_snap") worldVal = world->gridmap3d_pool[e].snapEnabled;
+                        else if (f.key == "mat3d_override") worldVal = world->material3d_pool[e].overrideColor;
                         if (worldVal != (f.lastSyncedValue > 0.5f)) {
                             cb->setValue(worldVal);
                             f.lastSyncedValue = worldVal ? 1.0f : 0.0f;
@@ -7424,40 +7618,97 @@ namespace Gui {
             fields.clear();
             if (!world || targetEntity == (Entity)-1) return;
             Entity e = targetEntity;
-
-            // --- FIX: FILTER COMPONENT OPTIONS ---
+            
+            // Determine if this is a 3D entity
+            bool is3D = world->has_depth3d[e] || world->has_mesh3d[e] || world->has_position3d[e];
+            
+            // --- Filter component options based on 3D/2D mode ---
             std::vector<std::string> availableComponents;
-            if (!world->has_physics_body[e]) availableComponents.push_back("PhysicsBody");
-            if (!world->has_texture_ref[e]) availableComponents.push_back("TextureRef");
-            if (!world->has_animation_state[e]) availableComponents.push_back("AnimationState");
-            if (!world->has_sfx_emitter[e]) availableComponents.push_back("SfxEmitter");
-            if (!world->has_rotation[e]) availableComponents.push_back("Rotation");
-            if (!world->has_scale[e]) availableComponents.push_back("Scale");
-            if (!world->has_tilemap[e]) availableComponents.push_back("TileMap");
+            if (is3D) {
+                // 3D mode components
+                if (!world->has_mesh3d[e]) availableComponents.push_back("Mesh3D");
+                if (!world->has_material3d[e]) availableComponents.push_back("Material3D");
+                if (!world->has_collider3d[e]) availableComponents.push_back("Collider3D");
+                if (!world->has_depth3d[e]) availableComponents.push_back("Depth3D");
+                if (!world->has_gridmap3d[e]) availableComponents.push_back("GridMap3D");
+                // These work in both modes
+                if (!world->has_physics_body[e]) availableComponents.push_back("PhysicsBody");
+                if (!world->has_animation_state[e]) availableComponents.push_back("AnimationState");
+                if (!world->has_rotation[e]) availableComponents.push_back("Rotation");
+                if (!world->has_scale[e]) availableComponents.push_back("Scale");
+            } else {
+                // 2D mode components
+                if (!world->has_physics_body[e]) availableComponents.push_back("PhysicsBody");
+                if (!world->has_texture_ref[e]) availableComponents.push_back("TextureRef");
+                if (!world->has_animation_state[e]) availableComponents.push_back("AnimationState");
+                if (!world->has_sfx_emitter[e]) availableComponents.push_back("SfxEmitter");
+                if (!world->has_rotation[e]) availableComponents.push_back("Rotation");
+                if (!world->has_scale[e]) availableComponents.push_back("Scale");
+                if (!world->has_tilemap[e]) availableComponents.push_back("TileMap");
+            }
             componentSelector.setOptions(availableComponents);
-
+            
             auto addSpinBox = [&](const std::string& label, const std::string& key, float val, float min=0.0f, float max=9999.0f, float step=0.5f) {
                 Field f; f.label = label; f.key = key; f.lastSyncedValue = val;
                 auto sb = std::make_unique<Gui::SpinBox>(renderer, textEngine, font, SDL_FRect{0,0,1,1}, min, max, val, step);
+                // Add onChange callback to commit immediately
+                sb->onChange = [this, key, e](float newVal) {
+                    if (!world || e >= world->entity_count) return;
+                    if (key == "pos_x") {
+                        if (world->has_position3d[e]) world->position3d_pool[e].x = newVal;
+                        else world->position_pool[e].x = newVal;
+                    } else if (key == "pos_y") {
+                        if (world->has_position3d[e]) world->position3d_pool[e].y = newVal;
+                        else world->position_pool[e].y = newVal;
+                    } else if (key == "pos_z") {
+                        if (world->has_position3d[e]) world->position3d_pool[e].z = newVal;
+                    } else if (key == "rect_w") world->rectangle_shape_pool[e].w = newVal;
+                    else if (key == "rect_h") world->rectangle_shape_pool[e].h = newVal;
+                    else if (key == "depth3d") world->depth3d_pool[e].depth = newVal;
+                    else if (key == "rotation") world->rotation_pool[e].degrees = newVal;
+                    else if (key == "scale_x") world->scale_pool[e].x = newVal;
+                    else if (key == "scale_y") world->scale_pool[e].y = newVal;
+                    // Mesh3DRef's own dimensions -- deliberately separate from
+                    // rect_w/rect_h/depth3d above, which drive the entity's
+                    // outline. Without these three cases the Mesh W/H/D spin
+                    // boxes below render but silently do nothing on edit.
+                    else if (key == "mesh_w") world->mesh3d_pool[e].meshW = newVal;
+                    else if (key == "mesh_h") world->mesh3d_pool[e].meshH = newVal;
+                    else if (key == "mesh_d") world->mesh3d_pool[e].meshD = newVal;
+                    else if (key == "gridmap3d_cw") world->gridmap3d_pool[e].cellWidth = newVal;
+                    else if (key == "gridmap3d_ch") world->gridmap3d_pool[e].cellHeight = newVal;
+                    else if (key == "gridmap3d_cd") world->gridmap3d_pool[e].cellDepth = newVal;
+                    
+                    // Update lastSyncedValue in the fields array since 'f' is moved into it
+                    for (auto& field : this->fields) {
+                        if (field.key == key) {
+                            field.lastSyncedValue = newVal;
+                            break;
+                        }
+                    }
+                };
                 f.widgets.push_back(std::move(sb));
                 fields.push_back(std::move(f));
             };
-
-            auto addLineEdit = [&](const std::string& label, const std::string& key, const std::string& val) {
-                Field f; f.label = label; f.key = key; f.lastSyncedText = val;
+            
+            auto addLineEdit = [&](const std::string& lbl, const std::string& key, const std::string& val) {
+                Field f; f.label = lbl; f.key = key; f.lastSyncedText = val;
                 auto le = std::make_unique<Gui::LineEdit>(renderer, textEngine, font, SDL_FRect{0,0,1,1}, "Type here...");
                 for (char c : val) le->appendText(std::string(1, c));
                 f.widgets.push_back(std::move(le));
                 fields.push_back(std::move(f));
             };
-
+            
             auto addCheckBox = [&](const std::string& label, const std::string& key, bool val) {
                 Field f; f.label = label; f.key = key; f.lastSyncedValue = val ? 1.0f : 0.0f;
                 auto cb = std::make_unique<Gui::CheckBox>(renderer, textEngine, font, SDL_FRect{0,0,1,1}, val);
+                // NOTE: Gui::CheckBox has no onChange callback. Changes are committed
+                // through commitAllFields() (triggered by Enter/Tab or explicit calls),
+                // which reads getValue() and writes to the world based on f.key.
                 f.widgets.push_back(std::move(cb));
                 fields.push_back(std::move(f));
             };
-
+            
             auto addTexturePath = [&](const std::string& label, const std::string& key, const std::string& val) {
                 Field f; f.label = label; f.key = key; f.lastSyncedText = val;
                 auto le = std::make_unique<Gui::LineEdit>(renderer, textEngine, font, SDL_FRect{0,0,1,1}, "texture path...");
@@ -7470,7 +7721,6 @@ namespace Gui {
                         lePtr->clear();
                         for (char c : path) lePtr->appendText(std::string(1, c));
                         lePtr->deactivate(nullptr);
-                        // Commit the change to the world immediately
                         this->commitAllFields();
                     });
                     fileExplorer.open();
@@ -7479,68 +7729,47 @@ namespace Gui {
                 f.widgets.push_back(std::move(btn));
                 fields.push_back(std::move(f));
             };
-
+            
             auto addAnimationState = [&]() {
                 auto& anim = world->animation_state_pool[e];
                 if (anim.clips.empty()) {
                     anim.clips.push_back(Components::AnimationClip{});
                 }
-
-                // --- Clip selector (OptionSpinBox) ---
                 std::vector<std::string> clipNames;
                 for (const auto& clip : anim.clips) clipNames.push_back(clip.name);
                 auto clipSelector = std::make_unique<Gui::OptionSpinBox>(
                     renderer, textEngine, font, SDL_FRect{0,0,1,1}, clipNames, false);
                 clipSelector->setCurrentIndex(anim.activeClipIndex);
-
                 clipSelector->onChange = [this, e](int idx) {
                     if (!world || e >= world->entity_count) return;
                     auto& anim = world->animation_state_pool[e];
                     if (idx >= 0 && idx < (int)anim.clips.size()) {
                         anim.activeClipIndex = idx;
-                        // Don't rebuild synchronously here: this callback fires
-                        // from inside handleEvent()'s "for (auto& f : fields) for
-                        // (auto& wgt : f.widgets)" loop, and this very widget
-                        // (plus the width/height spinboxes right after it in the
-                        // same field) lives in that vector. Clearing `fields` now
-                        // would destroy them mid-iteration -- handleEvent would
-                        // go on to call handleEvent() on already-destroyed
-                        // widgets, which is UB and only crashes intermittently.
-                        // Instead, just flag it; handleEvent() rebuilds once the
-                        // loop is done and it's safe to clear `fields`.
                         this->pendingRebuild = true;
                     }
                 };
-
-                // --- Play/Stop buttons ---
                 auto playBtn = std::make_unique<Gui::Button>(renderer, font, "Play", SDL_FPoint{0,0}, 50, 26);
                 playBtn->onClicked = [this, e]() {
                     if (!world || e >= world->entity_count) return;
                     world->animation_state_pool[e].active().isPlaying = true;
                 };
-
                 auto stopBtn = std::make_unique<Gui::Button>(renderer, font, "Stop", SDL_FPoint{0,0}, 50, 26);
                 stopBtn->onClicked = [this, e]() {
                     if (!world || e >= world->entity_count) return;
                     world->animation_state_pool[e].active().isPlaying = false;
                 };
-
-                // --- Width/Height spinboxes (per-clip override) ---
                 auto widthSpin = std::make_unique<Gui::SpinBox>(renderer, textEngine, font,
                     SDL_FRect{0,0,1,1}, 0.0f, 9999.0f, anim.active().frameWidth, 1.0f);
                 widthSpin->onChange = [this, e](float val) {
                     if (!world || e >= world->entity_count) return;
                     world->animation_state_pool[e].active().frameWidth = val;
                 };
-
                 auto heightSpin = std::make_unique<Gui::SpinBox>(renderer, textEngine, font,
-                    SDL_FRect{0,0,1,1}, 0.0f, 9999.0f, anim.active().frameHeight, 1.0f);  // ← fixed: frameHeight
+                    SDL_FRect{0,0,1,1}, 0.0f, 9999.0f, anim.active().frameHeight, 1.0f);
                 heightSpin->onChange = [this, e](float val) {
                     if (!world || e >= world->entity_count) return;
                     world->animation_state_pool[e].active().frameHeight = val;
                 };
-
-                // --- Edit Clips button (opens the dialog) ---
                 auto editBtn = std::make_unique<Gui::Button>(renderer, font,
                     "Edit Clips...", SDL_FPoint{0,0}, 100, 26);
                 editBtn->onClicked = [this, e]() {
@@ -7549,87 +7778,84 @@ namespace Gui {
                     animFrameEditor->setTarget(&anim);
                     animFrameEditor->onResourceLoaded = [this, e](const std::string& path) {
                         if (world && e < world->entity_count) {
-                            // Store relative path -- same convention used by
-                            // the Physics Resource Load/Save buttons, so the
-                            // scene JSON keeps a clean, portable path instead
-                            // of whatever absolute path the file dialog gave us.
                             std::string relPath = std::filesystem::relative(path, projectRoot).string();
-                            if (relPath.empty()) relPath = path; // fallback
+                            if (relPath.empty()) relPath = path;
                             world->animation_resource_path[e] = relPath;
                         }
                         this->commitAllFields();
-                        this->rebuildFields();  // refresh after load
+                        this->rebuildFields();
                     };
                     modeBeforeDialog = currentEditMode;
                     currentEditMode = EditMode::Dialog;
                     animFrameEditor->open();
                 };
-
-                // --- Assemble the field ---
                 Field f;
                 f.label = "Animation";
                 f.key = "anim_panel";
-
-                // Clip selector
                 f.widgets.push_back(std::move(clipSelector));
-
-                // HBox for Play/Stop
                 auto hbox = std::make_unique<Gui::HBoxContainer>();
                 hbox->setRect(SDL_FRect{0,0,120,30});
                 hbox->addChild(std::move(playBtn));
                 hbox->addChild(std::move(stopBtn));
                 f.widgets.push_back(std::move(hbox));
-
-                // Width and Height spinboxes
                 f.widgets.push_back(std::move(widthSpin));
                 f.widgets.push_back(std::move(heightSpin));
-
-                // Edit button
                 f.widgets.push_back(std::move(editBtn));
-
                 fields.push_back(std::move(f));
             };
-
+            
             if (world->has_metadata[e]) addLineEdit("Name", "metadata_name", world->metadata_pool[e].name);
-            if (world->has_position[e]) {
-                addSpinBox("X", "pos_x", world->position_pool[e].x, -25000.0f, 25000.0f);
-                addSpinBox("Y", "pos_y", world->position_pool[e].y, -25000.0f, 25000.0f);
+            
+            if (world->has_position[e] || world->has_position3d[e]) {
+                if (is3D) {
+                    if (!world->has_position3d[e]) {
+                        world->add_position3d(e);
+                        world->position3d_pool[e].x = world->position_pool[e].x;
+                        world->position3d_pool[e].y = 0.0f;
+                        world->position3d_pool[e].z = world->has_depth3d[e] ? world->depth3d_pool[e].depth : 0.0f;
+                    }
+                    addSpinBox("X", "pos_x", world->position3d_pool[e].x, -25000.0f, 25000.0f);
+                    addSpinBox("Y", "pos_y", world->position3d_pool[e].y, -25000.0f, 25000.0f);
+                    addSpinBox("Z", "pos_z", world->position3d_pool[e].z, -25000.0f, 25000.0f);
+                    addSpinBox("Width",  "rect_w", world->rectangle_shape_pool[e].w, 1.0f, 9999.0f);
+                    addSpinBox("Height", "rect_h", world->rectangle_shape_pool[e].h, 1.0f, 9999.0f);
+                    if (world->has_depth3d[e]) {
+                        addSpinBox("Depth",  "depth3d", world->depth3d_pool[e].depth, 0.1f, 9999.0f, 0.1f);
+                    }
+                } else {
+                    addSpinBox("X", "pos_x", world->position_pool[e].x, -25000.0f, 25000.0f);
+                    addSpinBox("Y", "pos_y", world->position_pool[e].y, -25000.0f, 25000.0f);
+                    addSpinBox("Width",  "rect_w", world->rectangle_shape_pool[e].w, 1.0f, 9999.0f);
+                    addSpinBox("Height", "rect_h", world->rectangle_shape_pool[e].h, 1.0f, 9999.0f);
+                }
             }
-            if (world->has_rectangle_shape[e]) {
-                addSpinBox("Width", "rect_w", world->rectangle_shape_pool[e].w, 1.0f, 9999.0f);
-                addSpinBox("Height", "rect_h", world->rectangle_shape_pool[e].h, 1.0f, 9999.0f);
+            
+            // Hide Z-Index in 3D mode (only for 2D)
+            if (!is3D && world->has_z_index[e]) {
+                addSpinBox("Z-Index", "z_index", (float)world->z_index_pool[e].z, 0, 1000, 1.0f);
             }
-            if (world->has_z_index[e]) addSpinBox("Z-Index", "z_index", (float)world->z_index_pool[e].z, 0, 1000, 1.0f);
+            
             if (world->has_rotation[e]) addSpinBox("Rotation (deg)", "rotation", world->rotation_pool[e].degrees, -360.0f, 360.0f, 1.0f);
             if (world->has_scale[e]) {
                 addSpinBox("Scale X", "scale_x", world->scale_pool[e].x, 0.01f, 10.0f, 0.1f);
                 addSpinBox("Scale Y", "scale_y", world->scale_pool[e].y, 0.01f, 10.0f, 0.1f);
             }
+            
             if (world->has_physics_body[e]) {
                 auto& phys = world->physics_body_pool[e];
-
-                // Existing spinboxes for editing
                 addSpinBox("Shape (0=Rct,1=Crc,2=Poly)", "phys_shape",
                         (float)ShapeTypeToSpinboxIndex(phys.shapeType), 0, 2, 1);
                 addSpinBox("Width", "phys_w", phys.width, 1, 9999, 1);
                 addSpinBox("Height", "phys_h", phys.height, 1, 9999, 1);
                 addSpinBox("Radius", "phys_r", phys.radius, 1, 9999, 1);
-
-                // --- NEW: Load and Save buttons ---
-                // We'll add them as a separate field with two buttons side by side.
-                // We'll use a small HBox-like layout by manually placing them.
                 Field btnField;
                 btnField.label = "Physics Resource";
                 btnField.key = "phys_res_buttons";
-
-                // Load button
                 auto loadBtn = std::make_unique<Gui::Button>(renderer, font, "Load .physicsres",
                                                             SDL_FPoint{0,0}, 120, 26);
                 loadBtn->onClicked = [this, e]() {
                     if (!world || e >= world->entity_count) return;
                     this->commitAllFields();
-
-                    // Set file explorer to project's resources folder
                     std::string resFolder = (std::filesystem::path(projectRoot) / "resources").string();
                     fileExplorer.setCurrentPath(resFolder);
                     fileExplorer.setFilter("*.physicsres");
@@ -7648,13 +7874,10 @@ namespace Gui {
                             auto& phys = world->physics_body_pool[e];
                             phys = ComponentResourceManager::parsePhysicsJson(j);
                             phys.bodyId = b2_nullBodyId;
-
-                            // Store relative path
                             std::string relPath = std::filesystem::relative(path, projectRoot).string();
-                            if (relPath.empty()) relPath = path; // fallback
+                            if (relPath.empty()) relPath = path;
                             world->physics_resource_path[e] = relPath;
                             world->has_physics_body[e] = 1;
-
                             this->rebuildFields();
                         } catch (const std::exception& ex) {
                             SDL_Log("Error loading physics resource: %s", ex.what());
@@ -7664,14 +7887,11 @@ namespace Gui {
                     fileExplorer.open();
                 };
                 btnField.widgets.push_back(std::move(loadBtn));
-
-                // Save button
                 auto saveBtn = std::make_unique<Gui::Button>(renderer, font, "Save .physicsres",
                                                             SDL_FPoint{0,0}, 120, 26);
                 saveBtn->onClicked = [this, e]() {
                     if (!world || e >= world->entity_count) return;
                     this->commitAllFields();
-
                     std::string resFolder = (std::filesystem::path(projectRoot) / "resources").string();
                     fileExplorer.setCurrentPath(resFolder);
                     fileExplorer.setSaveMode(true, ".physicsres");
@@ -7696,16 +7916,18 @@ namespace Gui {
                     fileExplorer.open();
                 };
                 btnField.widgets.push_back(std::move(saveBtn));
-
                 fields.push_back(std::move(btnField));
             }
+            
             if (world->has_texture_ref[e]) {
                 auto& t = world->texture_ref_pool[e];
                 addTexturePath("Tex Resource", "tex_res", t.resourceName);
             }
+            
             if (world->has_animation_state[e]) {
                 addAnimationState();
             }
+            
             if (world->has_sfx_emitter[e]) {
                 auto& s = world->sfx_emitter_pool[e];
                 addLineEdit("SFX Name", "sfx_name", s.sfxName);
@@ -7714,15 +7936,13 @@ namespace Gui {
                 addSpinBox("Speed", "sfx_speed", s.speed, 0.1f, 3.0f, 0.1f);
                 addCheckBox("Play On Col", "sfx_col", s.playOnCollision);
             }
+            
             if (world->has_tilemap[e]) {
                 auto& tm = world->tilemap_pool[e];
-
-                // Texture name (LineEdit + browse button)
                 Field texField;
                 texField.label = "Tile Texture";
                 texField.key = "tile_tex";
                 texField.lastSyncedText = tm.textureName;
-
                 auto le = std::make_unique<Gui::LineEdit>(renderer, textEngine, font,
                     SDL_FRect{0,0,1,1}, "texture path...");
                 for (char c : tm.textureName) le->appendText(std::string(1, c));
@@ -7741,16 +7961,7 @@ namespace Gui {
                 texField.widgets.push_back(std::move(le));
                 texField.widgets.push_back(std::move(btn));
                 fields.push_back(std::move(texField));
-
-                // Snap-to-grid toggle for tile painting
                 addCheckBox("Snap To Grid", "tile_snap", tm.snapEnabled);
-
-                // Cell size is derived automatically from the loaded image's
-                // pixel dimensions (see "tile_tex" handling in
-                // commitAllFields) -- there's no manual override, so no
-                // spinboxes here. Painted cells always line up with the art.
-
-                // Clear tiles button
                 Field clearField;
                 clearField.label = "Clear Tiles";
                 clearField.key = "tile_clear";
@@ -7759,14 +7970,95 @@ namespace Gui {
                     if (!world || e >= world->entity_count) return;
                     world->tilemap_pool[e].cells.clear();
                     world->tilemap_pool[e].cellOffsets.clear();
-                    // Force inspector refresh
                     this->rebuildFields();
                 };
                 clearField.widgets.push_back(std::move(clearBtn));
                 fields.push_back(std::move(clearField));
             }
-
-            addComponentBtn.onClicked = [this]() {
+            
+            // --- 3D-specific components ---
+            if (world->has_mesh3d[e]) {
+                auto& mesh = world->mesh3d_pool[e];
+                Field meshField;
+                meshField.label = "Mesh Path";
+                meshField.key = "mesh3d_path";
+                meshField.lastSyncedText = mesh.modelPath;
+                auto le = std::make_unique<Gui::LineEdit>(renderer, textEngine, font, SDL_FRect{0,0,1,1}, "model path...");
+                for (char c : mesh.modelPath) le->appendText(std::string(1, c));
+                auto btn = std::make_unique<Gui::Button>(renderer, font, "...", SDL_FPoint{0,0}, 30, 26);
+                btn->onClicked = [this, lePtr = le.get()]() {
+                    fileExplorer.setFilter("*.obj;*.fbx;*.gltf;*.glb");
+                    fileExplorer.setSaveMode(false, "");
+                    fileExplorer.setCallback([this, lePtr](const std::string& path) {
+                        lePtr->clear();
+                        for (char c : path) lePtr->appendText(std::string(1, c));
+                        lePtr->deactivate(nullptr);
+                        this->commitAllFields();
+                    });
+                    fileExplorer.open();
+                };
+                meshField.widgets.push_back(std::move(le));
+                meshField.widgets.push_back(std::move(btn));
+                fields.push_back(std::move(meshField));
+                // Add mesh dimension spinboxes
+                addSpinBox("Mesh W", "mesh_w", mesh.meshW, 0.0f, 9999.0f, 0.1f);
+                addSpinBox("Mesh H", "mesh_h", mesh.meshH, 0.0f, 9999.0f, 0.1f);
+                addSpinBox("Mesh D", "mesh_d", mesh.meshD, 0.0f, 9999.0f, 0.1f);
+            }
+            
+            if (world->has_material3d[e]) {
+                auto& mat = world->material3d_pool[e];
+                addCheckBox("Override Color", "mat3d_override", mat.overrideColor);
+                if (mat.overrideColor) {
+                    addSpinBox("R", "mat3d_r", mat.r * 255.0f, 0, 255, 1);
+                    addSpinBox("G", "mat3d_g", mat.g * 255.0f, 0, 255, 1);
+                    addSpinBox("B", "mat3d_b", mat.b * 255.0f, 0, 255, 1);
+                }
+            }
+            
+            if (world->has_gridmap3d[e]) {
+                auto& gm = world->gridmap3d_pool[e];
+                Field texField;
+                texField.label = "GridMap Material";
+                texField.key = "gridmap3d_mat";
+                texField.lastSyncedText = gm.materialName;
+                auto le = std::make_unique<Gui::LineEdit>(renderer, textEngine, font, SDL_FRect{0,0,1,1}, "material path...");
+                for (char c : gm.materialName) le->appendText(std::string(1, c));
+                auto btn = std::make_unique<Gui::Button>(renderer, font, "...", SDL_FPoint{0,0}, 30, 26);
+                btn->onClicked = [this, lePtr = le.get()]() {
+                    fileExplorer.setFilter("*.png;*.jpg;*.svg;*.obj");
+                    fileExplorer.setSaveMode(false, "");
+                    fileExplorer.setCallback([this, lePtr](const std::string& path) {
+                        lePtr->clear();
+                        for (char c : path) lePtr->appendText(std::string(1, c));
+                        lePtr->deactivate(nullptr);
+                        this->commitAllFields();
+                    });
+                    fileExplorer.open();
+                };
+                texField.widgets.push_back(std::move(le));
+                texField.widgets.push_back(std::move(btn));
+                fields.push_back(std::move(texField));
+                
+                addCheckBox("Snap To Grid", "gridmap3d_snap", gm.snapEnabled);
+                addSpinBox("Cell W", "gridmap3d_cw", gm.cellWidth, 0.1f, 100.0f, 0.1f);
+                addSpinBox("Cell H", "gridmap3d_ch", gm.cellHeight, 0.1f, 100.0f, 0.1f);
+                addSpinBox("Cell D", "gridmap3d_cd", gm.cellDepth, 0.1f, 100.0f, 0.1f);
+                
+                Field clearField;
+                clearField.label = "Clear Cells";
+                clearField.key = "gridmap3d_clear";
+                auto clearBtn = std::make_unique<Gui::Button>(renderer, font, "Clear All", SDL_FPoint{0,0}, 120, 26);
+                clearBtn->onClicked = [this, e]() {
+                    if (!world || e >= world->entity_count) return;
+                    world->gridmap3d_pool[e].cells.clear();
+                    this->rebuildFields();
+                };
+                clearField.widgets.push_back(std::move(clearBtn));
+                fields.push_back(std::move(clearField));
+            }
+            
+            addComponentBtn.onClicked = [this, is3D]() {
                 if (!world || targetEntity == (Entity)-1) return;
                 Entity e = targetEntity;
                 std::string comp = componentSelector.getCurrentOption();
@@ -7777,8 +8069,12 @@ namespace Gui {
                 else if (comp == "Rotation") world->add_rotation(e);
                 else if (comp == "Scale") world->add_scale(e);
                 else if (comp == "TileMap") world->add_tilemap(e);
-                
-                rebuildFields(); // Automatically updates the dropdown to remove the added component
+                else if (comp == "Mesh3D") { world->add_mesh3d(e); world->mesh3d_pool[e].modelPath = ""; }
+                else if (comp == "Material3D") world->add_material3d(e);
+                else if (comp == "Collider3D") world->add_collider3d(e);
+                else if (comp == "Depth3D") world->add_depth3d(e);
+                else if (comp == "GridMap3D") world->add_gridmap3d(e);
+                rebuildFields();
             };
         }
 

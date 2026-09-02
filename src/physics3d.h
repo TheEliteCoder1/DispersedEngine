@@ -23,6 +23,9 @@
 #include <functional>
 #include <algorithm>
 #include <thread>
+#include <limits>
+#include <unordered_map>
+#include <cmath>
 
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
@@ -47,6 +50,8 @@
 
 #include "glm/glm.hpp"
 #include "glm/gtc/quaternion.hpp"
+#define GLM_ENABLE_EXPERIMENTAL
+#include "glm/gtx/quaternion.hpp"
 
 namespace Physics3D {
 
@@ -455,6 +460,208 @@ namespace Physics3D {
 
         std::vector<std::unique_ptr<PhysicsBody3D>> m_bodies;
     };
+
+    // ------------------------------------------------------------------
+    // High-performance approximate collision for large/animated meshes
+    // ------------------------------------------------------------------
+    // Jolt's ConvexHullShape and MeshShape are both accurate but scale
+    // with vertex count -- fine for a hand-modeled prop, expensive for
+    // a dense sculpted/scanned character mesh, and USELESS as-is for a
+    // *skinned* mesh (a hull/mesh shape is baked once from a static
+    // vertex list; it can't follow bones). The two pieces below solve
+    // those two problems separately:
+    //
+    //   1. DecimateVerticesGrid() -- a cheap spatial-grid clustering
+    //      pass that reduces an arbitrary point cloud (e.g. an
+    //      ObjModel's raw positions) down to at most `maxPoints`
+    //      representative points before it's handed to
+    //      PhysicsBody3D::AddConvexHull(). O(n) in vertex count, no
+    //      sorting/triangulation -- "somewhat accurate, efficient" by
+    //      design: it preserves the mesh's overall silhouette (one
+    //      point survives per occupied grid cell) without preserving
+    //      exact local surface detail, which is exactly the trade a
+    //      collision proxy should make.
+    //
+    //   2. BuildRiggedApproxCollider() -- for a *skinned* model, builds
+    //      one capsule per bone instead of one hull for the whole mesh.
+    //      Each capsule is a Kinematic body (driven by animation, not
+    //      simulated by gravity/forces) sized from the bone's own
+    //      length, and RiggedColliderRig::SyncToPose() repositions all
+    //      of them every frame from Engine3D::sampleAnimationPose()'s
+    //      output. This is the standard "ragdoll bone" approximation
+    //      technique (also how most game engines drive hit-detection
+    //      on animated characters) -- capsule-vs-capsule and
+    //      capsule-vs-anything-else collision is O(1) per pair, so a
+    //      dozen-bone rig costs nothing next to a single MeshShape
+    //      query, while still moving with the actual animation instead
+    //      of collision staying frozen in bind pose.
+    // ------------------------------------------------------------------
+
+    // Reduces `points` to at most `maxPoints` by binning into a uniform
+    // 3D grid sized from the point cloud's own bounding box (so it
+    // adapts to the model's scale automatically) and keeping one
+    // representative point per occupied cell -- farthest-from-cell-mean
+    // isn't worth the extra cost here since ConvexHullShape only cares
+    // about the outer envelope anyway; any point in a populated cell is
+    // a fine representative once the grid is fine enough to matter.
+    inline std::vector<glm::vec3> DecimateVerticesGrid(const std::vector<glm::vec3>& points, int maxPoints) {
+        if ((int)points.size() <= maxPoints || points.empty()) return points;
+
+        glm::vec3 bmin(std::numeric_limits<float>::max()), bmax(std::numeric_limits<float>::lowest());
+        for (auto& p : points) { bmin = glm::min(bmin, p); bmax = glm::max(bmax, p); }
+        glm::vec3 extent = glm::max(bmax - bmin, glm::vec3(0.0001f));
+
+        // Pick a grid resolution so cellCount^3 is roughly maxPoints --
+        // dense enough to hit the target count, coarse enough to
+        // actually merge points. Clamped to >=2 so degenerate/flat
+        // meshes (all points near one plane) don't divide by zero.
+        int cellsPerAxis = std::max(2, (int)std::cbrt((double)maxPoints));
+
+        std::unordered_map<uint64_t, glm::vec3> cellToPoint;
+        cellToPoint.reserve(points.size());
+        for (auto& p : points) {
+            glm::vec3 rel = (p - bmin) / extent; // [0,1]
+            uint32_t cx = (uint32_t)std::clamp((int)(rel.x * cellsPerAxis), 0, cellsPerAxis - 1);
+            uint32_t cy = (uint32_t)std::clamp((int)(rel.y * cellsPerAxis), 0, cellsPerAxis - 1);
+            uint32_t cz = (uint32_t)std::clamp((int)(rel.z * cellsPerAxis), 0, cellsPerAxis - 1);
+            uint64_t key = ((uint64_t)cx << 42) | ((uint64_t)cy << 21) | (uint64_t)cz;
+            cellToPoint[key] = p; // last-write-wins: good enough for a coarse envelope proxy
+        }
+
+        std::vector<glm::vec3> out;
+        out.reserve(cellToPoint.size());
+        for (auto& kv : cellToPoint) out.push_back(kv.second);
+
+        // If clustering still overshot maxPoints (very non-uniform
+        // distributions can leave more occupied cells than expected),
+        // uniformly stride the result down rather than looping the grid
+        // pass again -- one more O(n) pass, never O(n^2).
+        if ((int)out.size() > maxPoints) {
+            std::vector<glm::vec3> strided;
+            strided.reserve(maxPoints);
+            float stride = (float)out.size() / (float)maxPoints;
+            for (int i = 0; i < maxPoints; ++i) strided.push_back(out[(size_t)(i * stride)]);
+            return strided;
+        }
+        return out;
+    }
+
+    // Convenience: decimate then hand to AddConvexHull in one call.
+    // `body` should be freshly constructed and not have had another
+    // Add*() shape call yet (same one-shape-per-body rule every other
+    // Add*() follows).
+    inline JPH::BodyID AddDecimatedConvexHull(PhysicsBody3D& body, const std::vector<glm::vec3>& rawVertices,
+                                               int maxPoints = 64, float density = 1000.0f,
+                                               uint16_t category = LAYER3D_1, uint16_t mask = LAYER3D_ALL) {
+        std::vector<glm::vec3> decimated = DecimateVerticesGrid(rawVertices, maxPoints);
+        return body.AddConvexHull(decimated, density, category, mask, false);
+    }
+
+    // ------------------------------------------------------------------
+    // RiggedColliderRig -- one kinematic capsule per bone, following a
+    // skeleton's animated pose. Owns its own PhysicsBody3D instances
+    // (added to the given PhysicsWorld3D via AddOwned, same lifetime
+    // model as everything else in the world) so it can be dropped in
+    // per-entity: one rig per skinned Mesh3DRef entity that also has a
+    // Collider3DRef with shape == RiggedApprox.
+    //
+    // Deliberately independent of Engine3D::Skeleton3D (no #include of
+    // engine3d.h from this header, keeping the physics/render headers
+    // decoupled the same way they already are) -- callers pass plain
+    // rest-pose positions + parent indices once at Build() time, and
+    // plain world matrices each frame at SyncToPose() time. Converting
+    // an Engine3D::Skeleton3D + sampleAnimationPose() output into those
+    // two shapes is a couple of lines at the call site (see the
+    // integration note below the class).
+    // ------------------------------------------------------------------
+    class RiggedColliderRig {
+    public:
+        struct BoneCollider {
+            int jointIndex = -1;
+            int parentJointIndex = -1;
+            PhysicsBody3D* body = nullptr; // owned by the PhysicsWorld3D, not this rig
+            float restLength = 0.1f;
+        };
+
+        // Builds one capsule per joint-with-a-parent (a bone conceptually
+        // spans parent -> child, so a leaf joint with no children of its
+        // own gets a small fixed-size capsule instead, since there's no
+        // "next" position to size it from).
+        void Build(PhysicsWorld3D& world,
+                   const std::vector<glm::vec3>& jointRestPositions,
+                   const std::vector<int>& parentIndices,
+                   float capsuleRadius = 0.08f,
+                   uint16_t category = LAYER3D_1, uint16_t mask = LAYER3D_ALL) {
+            m_bones.clear();
+            size_t n = jointRestPositions.size();
+            for (size_t i = 0; i < n; ++i) {
+                int parent = (i < parentIndices.size()) ? parentIndices[i] : -1;
+                if (parent < 0) continue; // root joint: no bone segment to represent it
+
+                glm::vec3 a = jointRestPositions[parent];
+                glm::vec3 b = jointRestPositions[i];
+                float length = glm::length(b - a);
+                float halfHeight = std::max(0.01f, length * 0.5f - capsuleRadius); // capsule halfHeight excludes the rounded caps
+
+                glm::vec3 mid = (a + b) * 0.5f;
+                auto body = std::make_unique<KinematicBody3D>(world.GetSystem(), mid);
+                body->AddCapsule(halfHeight, capsuleRadius, 1000.0f, category, mask, false);
+
+                BoneCollider bc;
+                bc.jointIndex = (int)i;
+                bc.parentJointIndex = parent;
+                bc.restLength = length;
+                bc.body = body.get();
+                world.AddOwned(std::move(body));
+                m_bones.push_back(bc);
+            }
+        }
+
+        // Call once per frame (after animation sampling, before or
+        // after PhysicsWorld3D::Step -- these are kinematic, so Step()
+        // never moves them itself) with one world-space joint matrix
+        // per joint index used in Build() above. Each capsule is
+        // repositioned to the midpoint of (parentJoint, thisJoint) and
+        // rotated to point along that segment, so it keeps tracking the
+        // limb regardless of how it's currently posed.
+        void SyncToPose(const std::vector<glm::mat4>& jointWorldMatrices) {
+            for (auto& bc : m_bones) {
+                if (bc.jointIndex >= (int)jointWorldMatrices.size() ||
+                    bc.parentJointIndex >= (int)jointWorldMatrices.size()) continue;
+
+                glm::vec3 a = glm::vec3(jointWorldMatrices[bc.parentJointIndex][3]);
+                glm::vec3 b = glm::vec3(jointWorldMatrices[bc.jointIndex][3]);
+                glm::vec3 mid = (a + b) * 0.5f;
+
+                glm::vec3 dir = b - a;
+                float len = glm::length(dir);
+                glm::quat rot = (len > 0.0001f)
+                    ? glm::rotation(glm::vec3(0, 1, 0), dir / len) // capsule's rest axis is +Y (matches JPH::CapsuleShape)
+                    : glm::quat(1, 0, 0, 0);
+
+                bc.body->SetPosition(mid);
+                bc.body->SetRotation(rot);
+            }
+        }
+
+        const std::vector<BoneCollider>& Bones() const { return m_bones; }
+
+    private:
+        std::vector<BoneCollider> m_bones;
+    };
+
+    // Integration note (Engine3D::Skeleton3D -> RiggedColliderRig):
+    //   std::vector<glm::vec3> restPos; std::vector<int> parents;
+    //   for (auto& j : skeleton.joints) {
+    //       restPos.push_back(glm::vec3(glm::inverse(j.inverseBindMatrix)[3]));
+    //       parents.push_back(j.parentIndex);
+    //   }
+    //   rig.Build(*world, restPos, parents);
+    //   ...
+    //   std::vector<glm::mat4> pose;
+    //   Engine3D::sampleAnimationPose(skeleton, clip, timeSec, true, pose);
+    //   for (auto& m : pose) m = entityTransform.toMatrix() * m; // world-space, not model-space
+    //   rig.SyncToPose(pose);
 
     // ------------------------------------------------------------------
     // Debug draw helper -- builds line segments for a body's shape in
