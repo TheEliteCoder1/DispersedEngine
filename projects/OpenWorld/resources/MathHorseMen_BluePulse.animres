@@ -1,0 +1,26 @@
+{
+    "activeClipIndex": 0,
+    "clips": [
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemen.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemen2.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemen3.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemen4.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemen5.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemen6.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemen7.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemen8.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemen9.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemen10.svg"
+            ],
+            "isPlaying": true,
+            "loop": true,
+            "name": "MathHorseMen_BluePulse",
+            "speed": 12.0
+        }
+    ]
+}
+

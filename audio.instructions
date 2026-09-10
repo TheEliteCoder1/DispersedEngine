@@ -1,0 +1,2 @@
+convert mp3 to engine compatible wav via ffmpeg cli tool:
+ffmpeg -i "input_filename.mp3" -acodec pcm_s16le -ar 44100 -ac 2 "output_filename.wav"

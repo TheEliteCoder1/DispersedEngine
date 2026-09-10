@@ -1,0 +1,7 @@
+{
+    "scene_name": "battle",
+    "script_attached": "OpenWorld/scripts/battle.cpp",
+    "are_biomes_and_entities_generated": false,
+    "entities": [],
+    "gui_elements": []
+}
