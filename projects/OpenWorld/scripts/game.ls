@@ -1013,8 +1013,6 @@ none GameScript:onStart() {
 
 
     ctx%scene%world.z_index_pool[background].z ~ 0;
-
-
  
  
     if (!ctx%scene%world.has_physics_body[player]) {

@@ -383,13 +383,24 @@ namespace Components {
         float timer = 0.0f;
         int currentFrame = 0;
         bool isPlaying = true;
-        bool loop = true; // when false, the clip halts on its last frame instead of wrapping
+        bool loop = true;
 
-        // Only image frames are supported now
         std::vector<std::string> imageFrameResources;
 
         float frameWidth = 0.0f;
         float frameHeight = 0.0f;
+
+        int loopLimit = 0;
+        int loopsCompleted = 0;
+
+        // Use std::function so it can capture variables like `ctx` or `this`
+        std::function<void()> onLoopCompleted;
+        std::function<void()> onLoopStarted;
+
+        void limitLoopsTo(int n) {
+            loop = true;
+            loopLimit = (n > 0) ? n : 0;
+        }
     };
 
     // Holds one or more named AnimationClips and tracks which one is
@@ -438,9 +449,24 @@ namespace Components {
         bool play(const std::string& name, bool resetFrame = true, bool loop = true) {
             for (size_t i = 0; i < clips.size(); ++i) {
                 if (clips[i].name == name) {
+                    bool alreadyActive = (activeClipIndex == (int)i);
                     activeClipIndex = (int)i;
-                    if (resetFrame) { clips[i].currentFrame = 0; clips[i].timer = 0.0f; }
-                    clips[i].isPlaying = true;
+                    if (resetFrame) { clips[i].currentFrame = 0; clips[i].timer = 0.0f;  clips[i].loopsCompleted = 0; }
+                    // Only force isPlaying = true on a genuine (re)start:
+                    // switching onto a different clip, or an explicit
+                    // resetFrame request. If this clip is already the
+                    // active one and no reset was requested, leave
+                    // isPlaying untouched -- otherwise a caller that calls
+                    // play() on every frame (e.g. to keep an attack clip
+                    // selected while waiting for it to finish) would
+                    // silently re-arm isPlaying right after
+                    // animation_system() sets it false on the last frame
+                    // of a non-looping clip, and "has this clip finished"
+                    // could never be observed as true by anything polling
+                    // isPlaying.
+                    if (!alreadyActive || resetFrame) {
+                        clips[i].isPlaying = true;
+                    }
                     clips[i].loop = loop;
                     return true;
                 }
@@ -760,6 +786,7 @@ public:
             clipJson["speed"] = clip.speed;
             clipJson["isPlaying"] = clip.isPlaying;
             clipJson["loop"] = clip.loop;
+            clipJson["loopLimit"] = clip.loopLimit;   
             clipJson["imageFrames"] = clip.imageFrameResources;
             // Per-clip frame size override. parseAnimationJson() already reads
             // these back (defaulting to 0.0f i.e. "use the texture's native
@@ -1061,7 +1088,7 @@ struct ECSWorld {
     void add_depth3d(Entity id)    { if (id < entity_count) has_depth3d[id] = 1; }
     void add_mesh3d(Entity id)     { if (id < entity_count) has_mesh3d[id] = 1; }
     void add_material3d(Entity id) { if (id < entity_count) has_material3d[id] = 1; }
-    void add_collider3d(Entity id) { if (id < entity_count) has_collider3d[id] = 1; }
+    void add_collider3d(Entity id) { if (id < entity_count) has_collider3d[id] = 1; }   
 
     // Points this entity's AnimationState at the resource loaded from
     // `filepath`. If some other entity already loaded that exact file, the
@@ -1095,15 +1122,190 @@ namespace Tools {
         return haystack.find(needle) != std::string_view::npos;
     }
 
+    // ============================================================================
+    // AnimatedText System (Prodigy-style fly-in, hold, and drift-out)
+    // ============================================================================
+    struct AnimatedText {
+        std::string text;
+        float elapsed = 0.0f;
+        float totalDuration = 2.5f;
+        float popInDuration = 0.5f;  // Time to fly in from the right
+        float holdDuration = 1.0f;   // Time to stay in the center
+        float driftDuration = 1.0f;  // Time to drift left and fade out
+        
+        SDL_FPoint startPos = {0,0};
+        SDL_FPoint holdPos = {0,0};
+        SDL_FPoint endPos = {0,0};
+        
+        float startScale = 1.0f;
+        float popScale = 1.15f; // Slight "pop" when it stops in the center
+        float holdScale = 1.0f;
+        
+        SDL_Color textColor = {255, 255, 255, 255};
+        bool hasBackgroundBar = false;
+        SDL_Color barColor = {0, 0, 0, 160};
+        float barWidth = 0.0f;  // 0 = auto-size to text
+        float barHeight = 0.0f; // 0 = auto-size to text
+        float barPaddingX = 40.0f;
+        float barPaddingY = 15.0f;
+        
+        bool finished = false;
+    };
 
-    // void _DrawCrossHair(SDL_Renderer* renderer, float crossHairX, float crossHairY) 
-    // {
-    //     SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-    //     SDL_FRect crosshair_firstrect = { crossHairX - 10.0f, crossHairY - 1.0f, 20.0f, 2.0f };
-    //     SDL_FRect crosshair_secondrect = { crossHairX - 1.0f, crossHairY - 10.0f, 2.0f, 20.0f };
-    //     SDL_RenderFillRect(renderer, &crosshair_firstrect); 
-    //     SDL_RenderFillRect(renderer, &crosshair_secondrect);
-    // }
+    inline void ActivateQuickShock(SDL_Gamepad *gamepad) {
+        if (gamepad == NULL) return;
+
+        // Parameters: gamepad, low_frequency (0-0xFFFF), high_frequency (0-0xFFFF), duration_ms
+        // Maxing out both motors gives the strongest impact shock
+        Uint16 low_freq = 0xFFFF;  
+        Uint16 high_freq = 0xFFFF; 
+        Uint32 duration = 80; // 80 milliseconds is ideal for a fast "hit/explosion" snap
+
+        SDL_RumbleGamepad(gamepad, low_freq, high_freq, duration);
+    }
+
+    class AnimatedTextSystem {
+    public:
+        void spawn(const AnimatedText& config) {
+            instances.push_back(config);
+        }
+        
+        // Spawns the specific "Contender's Clash!" effect (Prodigy style)
+        void spawnContenderClash(float screenW, float screenH, const std::string& text = "Contender's Clash!") {
+            AnimatedText at;
+            at.text = text;
+            at.totalDuration = 2.5f;
+            at.popInDuration = 0.5f; // Fly in from right
+            at.holdDuration = 1.0f;  // Slow down / hold in center
+            at.driftDuration = 1.0f; // Drift left and fade
+            
+            // Positions: Start off-screen right, hold center, end off-screen left
+            at.startPos = {screenW + 400.0f, screenH * 0.5f}; 
+            at.holdPos  = {screenW * 0.5f, screenH * 0.5f};   
+            at.endPos   = {-400.0f, screenH * 0.5f};          
+            
+            at.startScale = 1.0f;
+            at.popScale = 1.15f; // Slight scale bump when it hits the center
+            at.holdScale = 1.0f;
+            
+            at.hasBackgroundBar = true;
+            at.barColor = {0, 0, 0, 180};
+            at.textColor = {255, 220, 100, 255}; // Gold/Yellow
+            
+            spawn(at);
+        }
+        
+        // Spawns a static bottom bar text (e.g. for attack results)
+        void spawnBottomBarText(float screenW, float screenH, const std::string& text, float duration = 2.0f, SDL_Color textColor = {255,255,255,255}, SDL_Color barColor = {0,0,0,160}) {
+            AnimatedText at;
+            at.text = text;
+            at.totalDuration = duration;
+            at.popInDuration = 0.0f;
+            at.holdDuration = duration > 0.5f ? duration - 0.5f : 0.0f;
+            at.driftDuration = duration > 0.5f ? 0.5f : duration;
+            
+            at.startPos = {screenW * 0.5f, screenH * 0.85f};
+            at.holdPos  = {screenW * 0.5f, screenH * 0.85f};
+            at.endPos   = {screenW * 0.5f, screenH * 0.85f};
+            
+            at.startScale = 1.0f;
+            at.popScale = 1.0f;
+            at.holdScale = 1.0f;
+            
+            at.hasBackgroundBar = true;
+            at.barColor = barColor;
+            at.textColor = textColor;
+            at.barWidth = screenW * 0.8f; // Spans the bottom
+            at.barHeight = 60.0f;
+            
+            spawn(at);
+        }
+
+        void update(float dt) {
+            for (auto& inst : instances) {
+                inst.elapsed += dt;
+                if (inst.elapsed >= inst.totalDuration) inst.finished = true;
+            }
+            instances.erase(std::remove_if(instances.begin(), instances.end(), 
+                [](const AnimatedText& t){ return t.finished; }), instances.end());
+        }
+
+        void render(SDL_Renderer* renderer, TTF_TextEngine* textEngine, TTF_Font* font) {
+            for (auto& inst : instances) {
+                float alpha = 1.0f;
+                float scale = inst.holdScale;
+                SDL_FPoint currentPos = inst.holdPos;
+
+                // Phase 1: Fly in (Ease Out - starts fast, slows down as it approaches center)
+                if (inst.elapsed < inst.popInDuration) {
+                    float p = inst.popInDuration > 0 ? (inst.elapsed / inst.popInDuration) : 1.0f;
+                    p = 1.0f - powf(1.0f - p, 3.0f); // Cubic Ease Out
+                    currentPos.x = inst.startPos.x + (inst.holdPos.x - inst.startPos.x) * p;
+                    currentPos.y = inst.startPos.y + (inst.holdPos.y - inst.startPos.y) * p;
+                    scale = inst.startScale + (inst.popScale - inst.startScale) * p;
+                    alpha = 1.0f; // Fully opaque while flying in
+                } 
+                // Phase 2: Hold (Settle in center, scale down from pop)
+                else if (inst.elapsed < inst.popInDuration + inst.holdDuration) {
+                    currentPos = inst.holdPos;
+                    float p = (inst.elapsed - inst.popInDuration) / inst.holdDuration;
+                    scale = inst.popScale + (inst.holdScale - inst.popScale) * p;
+                    alpha = 1.0f;
+                } 
+                // Phase 3: Drift away & fade out (Ease In - starts slow, accelerates off-screen)
+                else {
+                    float p = (inst.elapsed - inst.popInDuration - inst.holdDuration) / inst.driftDuration;
+                    p = std::clamp(p, 0.0f, 1.0f);
+                    float driftP = powf(p, 1.5f); // Ease In for the drift
+                    currentPos.x = inst.holdPos.x + (inst.endPos.x - inst.holdPos.x) * driftP;
+                    currentPos.y = inst.holdPos.y + (inst.endPos.y - inst.holdPos.y) * driftP;
+                    scale = inst.holdScale;
+                    alpha = 1.0f - p; // Linear fade out
+                }
+
+                // Render Background Bar
+                if (inst.hasBackgroundBar) {
+                    int textW = 0, textH = 0;
+                    if (font) TTF_GetStringSize(font, inst.text.c_str(), inst.text.size(), &textW, &textH);
+                    
+                    float bw = inst.barWidth > 0 ? inst.barWidth : (textW * scale + inst.barPaddingX * 2);
+                    float bh = inst.barHeight > 0 ? inst.barHeight : (textH * scale + inst.barPaddingY * 2);
+                    
+                    SDL_FRect barRect = { currentPos.x - bw * 0.5f, currentPos.y - bh * 0.5f, bw, bh };
+                    SDL_Color c = inst.barColor;
+                    c.a = (Uint8)(c.a * alpha);
+                    
+                    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                    SDL_SetRenderDrawColor(renderer, c.r, c.g, c.b, c.a);
+                    SDL_RenderFillRect(renderer, &barRect);
+                }
+
+                // Render Text
+                if (font) {
+                    SDL_Color c = inst.textColor;
+                    c.a = (Uint8)(c.a * alpha);
+                    SDL_Surface* surf = TTF_RenderText_Blended(font, inst.text.c_str(), inst.text.size(), c);
+                    if (surf) {
+                        SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surf);
+                        if (tex) {
+                            SDL_FRect dst = {
+                                currentPos.x - (surf->w * scale) * 0.5f,
+                                currentPos.y - (surf->h * scale) * 0.5f,
+                                surf->w * scale, surf->h * scale
+                            };
+                            SDL_SetTextureAlphaMod(tex, c.a);
+                            SDL_RenderTexture(renderer, tex, nullptr, &dst);
+                            SDL_DestroyTexture(tex);
+                        }
+                        SDL_DestroySurface(surf);
+                    }
+                }
+            }
+        }
+
+        public:
+            std::vector<AnimatedText> instances;
+    };
 
     class Timer {
     public:
@@ -1220,269 +1422,426 @@ namespace Tools {
 
     };
 
+    struct CutsceneTrack {
+        ECSWorld* world;
+        Entity target = (Entity)-1;
+        std::vector<b2Vec2> points;
+        std::vector<float> durations;
+        int segIdx;
+        float segTime;
+        bool playing = false;
+        bool finished = false;
+        bool wasFinished = false;
+
+        // When true, the target's rotation is kept facing the direction of
+        // travel along the current segment (recomputed every Update() call
+        // from that segment's from->to vector). Off by default: most
+        // cutscene moves either don't care about facing direction or use a
+        // sprite that's rotation-agnostic, and skipping this avoids an
+        // atan2 + extra pool/Box2D transform write per track per frame for
+        // tracks that don't need it.
+        bool rotateAlongPath = false;
+
+        // Degrees added to the computed heading before it's written out.
+        // atan2(dy, dx) treats "facing directly right" as 0 degrees, so if
+        // the target's sprite/body is authored facing some other direction
+        // at rotation 0 (e.g. facing up), set this so the visual heading
+        // lines up with the actual direction of travel.
+        float rotationOffsetDegrees = 0.0f;
+
+        // When true, rotation is instead driven by explicit authored
+        // values in `rotations` rather than derived from travel direction
+        // -- one degrees value per waypoint (same indexing as `points`:
+        // rotations[i] is the absolute rotation the target should have
+        // exactly when it reaches points[i]), linearly eased across each
+        // segment the same way position and scale are.
+        //
+        // Use this instead of rotateAlongPath when the rotation you want
+        // isn't "face the direction I'm moving" -- e.g. a spinning object,
+        // something that should stay upright while moving diagonally, or
+        // a camera/prop with a scripted rotation independent of its path.
+        //
+        // rotateAlongPath takes priority if both are left true; enable
+        // only one of the two.
+        bool useExplicitRotations = false;
+        std::vector<float> rotations;
+
+        // When true, the target's scale is tweened along `scales` the same
+        // way position is tweened along `points`: one Scale value per
+        // waypoint, linearly eased across each segment with the same
+        // ease curve Update() already uses for position. Off by default.
+        //
+        // Unlike rotateAlongPath, there's no "along path" direction to
+        // derive this from automatically -- scale has no inherent
+        // relationship to travel direction -- so the caller must author an
+        // explicit `scales` entry for every point in `points` (same
+        // indexing: scales[i] is the scale the target should have exactly
+        // when it reaches points[i]).
+        bool scaleAlongPath = false;
+        std::vector<Components::Scale> scales;
+
+        // Remembers the body type the target had before the cutscene took
+        // over, so it can be restored once the cutscene finishes.
+        b2BodyType savedBodyType = b2_staticBody;
+        bool savedBodyTypeValid = false;
+
+        // Pushes a position (top-left, same convention as position_pool)
+        // out to both position_pool and, if present, the entity's Box2D
+        // body. This matters because movement_system() re-derives
+        // position_pool from the physics body every frame for any entity
+        // that has one — writing to position_pool alone gets silently
+        // overwritten the next time movement_system runs.
+        void applyPosition(float x, float y) {
+            if (world->has_position[target]) {
+                world->position_pool[target].x = x;
+                world->position_pool[target].y = y;
+            }
+
+            if (world->has_physics_body[target]) {
+                auto& phys = world->physics_body_pool[target];
+                if (b2Body_IsValid(phys.bodyId)) {
+                    float w = world->has_rectangle_shape[target] ? world->rectangle_shape_pool[target].w : phys.width;
+                    float h = world->has_rectangle_shape[target] ? world->rectangle_shape_pool[target].h : phys.height;
+                    b2Vec2 centerPx = { x + w * 0.5f, y + h * 0.5f };
+                    b2Vec2 posM = Physics::PxToM(centerPx);
+                    b2Rot rot = b2Body_GetRotation(phys.bodyId);
+                    b2Body_SetTransform(phys.bodyId, posM, rot);
+                }
+            }
+        }
+
+        // Faces `target` toward the direction of travel given by segment
+        // vector (dx, dy) -- writes to rotation_pool (if present) and to
+        // the Box2D body's transform (if present), preserving whatever
+        // position is already there. No-ops entirely (no atan2, no writes)
+        // when rotateAlongPath is false, or when (dx, dy) is the zero
+        // vector, since a zero-length segment has no defined heading --
+        // whatever rotation was already showing is left alone rather than
+        // snapped to some arbitrary angle.
+        void applyRotation(float dx, float dy) {
+            if (!rotateAlongPath || target == (Entity)-1) return;
+            if (dx == 0.0f && dy == 0.0f) return;
+
+            float angleDeg = std::atan2(dy, dx) * (180.0f / (float)M_PI) + rotationOffsetDegrees;
+            writeRotation(angleDeg);
+        }
+
+        // Writes an authored absolute rotation (from `rotations`, already
+        // in degrees) straight out, bypassing the atan2/travel-direction
+        // math entirely. No-ops when useExplicitRotations is false.
+        void applyExplicitRotation(float angleDeg) {
+            if (!useExplicitRotations || target == (Entity)-1) return;
+            writeRotation(angleDeg);
+        }
+
+        // Shared low-level write used by both applyRotation() and
+        // applyExplicitRotation() -- writes to rotation_pool (if present)
+        // and to the Box2D body's transform (if present), preserving
+        // whatever position is already there.
+        void writeRotation(float angleDeg) {
+            if (world->has_rotation[target]) {
+                world->rotation_pool[target].degrees = angleDeg;
+            }
+
+            if (world->has_physics_body[target]) {
+                auto& phys = world->physics_body_pool[target];
+                if (b2Body_IsValid(phys.bodyId)) {
+                    b2Vec2 posM = b2Body_GetPosition(phys.bodyId);
+                    b2Rot rot = b2MakeRot(angleDeg * ((float)M_PI / 180.0f));
+                    b2Body_SetTransform(phys.bodyId, posM, rot);
+                }
+            }
+        }
+
+        // Writes an interpolated scale out to scale_pool. No-ops (no pool
+        // write) when scaleAlongPath is false or the target has no Scale
+        // component. Scale isn't part of the Box2D transform anywhere else
+        // in the engine, so unlike applyPosition/applyRotation there's no
+        // physics-body mirroring to do here.
+        void applyScale(float sx, float sy) {
+            if (!scaleAlongPath || target == (Entity)-1) return;
+            if (world->has_scale[target]) {
+                world->scale_pool[target].x = sx;
+                world->scale_pool[target].y = sy;
+            }
+        }
+
+        void Play() {
+            segIdx = 0;
+            segTime = 0.f;
+            playing = true;
+            finished = false;
+            wasFinished = false;
+            savedBodyTypeValid = false;
+
+            if (target != (Entity)-1 && world->has_physics_body[target]) {
+                auto& phys = world->physics_body_pool[target];
+                if (b2Body_IsValid(phys.bodyId)) {
+                    // Switch to kinematic for the duration of the cutscene so
+                    // gravity/forces/collision response don't fight the
+                    // scripted movement. Restored in Update() once finished.
+                    savedBodyType = b2Body_GetType(phys.bodyId);
+                    savedBodyTypeValid = true;
+                    b2Body_SetType(phys.bodyId, b2_kinematicBody);
+                }
+            }
+
+            if (target != (Entity)-1 && !points.empty()) {
+                applyPosition(points[0].x, points[0].y);
+            }
+
+            // Snap to the first waypoint's scale immediately, same
+            // reasoning as the position snap above -- otherwise the target
+            // would render one frame (or indefinitely, if paused right
+            // after Play()) at whatever scale it happened to have before
+            // the cutscene started.
+            if (scaleAlongPath && target != (Entity)-1 && !scales.empty()) {
+                applyScale(scales[0].x, scales[0].y);
+            }
+
+            // Face the first segment's direction immediately, rather than
+            // waiting for the first Update() tick to catch up -- otherwise
+            // the target would render one frame (or, if paused right after
+            // Play(), indefinitely) with whatever rotation it happened to
+            // have before the cutscene started.
+            if (rotateAlongPath && target != (Entity)-1 && points.size() >= 2) {
+                const b2Vec2& from = points[0];
+                const b2Vec2& to   = points[1];
+                applyRotation(to.x - from.x, to.y - from.y);
+            } else if (useExplicitRotations && target != (Entity)-1 && !rotations.empty()) {
+                applyExplicitRotation(rotations[0]);
+            }
+        }
+
+        void restoreBodyType() {
+            if (!savedBodyTypeValid || target == (Entity)-1) return;
+            if (world->has_physics_body[target]) {
+                auto& phys = world->physics_body_pool[target];
+                if (b2Body_IsValid(phys.bodyId)) {
+                    b2Body_SetType(phys.bodyId, savedBodyType);
+                }
+            }
+            savedBodyTypeValid = false;
+        }
+
+        void Update(float dt) {
+            if (!playing || finished || target == (Entity)-1) return;
+            if (points.size() < 2 || segIdx >= (int)durations.size()) {
+                finished = true; playing = false; restoreBodyType(); return;
+            }
+            segTime += dt;
+            float dur = durations[segIdx];
+            float t = (dur > 0.f) ? std::min(segTime / dur, 1.f) : 1.f;
+
+            float ease = t * t * (3.f - 2.f * t);
+
+            const b2Vec2& from = points[segIdx];
+            const b2Vec2& to = points[segIdx + 1];
+            applyPosition(from.x + (to.x - from.x) * ease, from.y + (to.y - from.y) * ease);
+
+            // Gated on the flag at the call site too (not just inside
+            // applyRotation()) so it's obvious at a glance that a track
+            // with rotateAlongPath == false does zero rotation-related work
+            // per frame -- no atan2, no pool write, no Box2D transform call.
+            // rotateAlongPath takes priority over useExplicitRotations if
+            // both were left on.
+            if (rotateAlongPath) {
+                applyRotation(to.x - from.x, to.y - from.y);
+            } else if (useExplicitRotations && segIdx + 1 < (int)rotations.size()) {
+                float angle = rotations[segIdx] + (rotations[segIdx + 1] - rotations[segIdx]) * ease;
+                applyExplicitRotation(angle);
+            }
+
+            // Same gating pattern as rotateAlongPath: checked here too (not
+            // just inside applyScale()) so a track with scaleAlongPath ==
+            // false does zero scale-related work per frame, and bounds-
+            // checked against scales.size() since scales is authored
+            // separately from points/durations and could be left shorter
+            // (e.g. not filled in yet, or intentionally omitted).
+            if (scaleAlongPath && segIdx + 1 < (int)scales.size()) {
+                const Components::Scale& sFrom = scales[segIdx];
+                const Components::Scale& sTo   = scales[segIdx + 1];
+                applyScale(sFrom.x + (sTo.x - sFrom.x) * ease,
+                           sFrom.y + (sTo.y - sFrom.y) * ease);
+            }
+
+            if (t >= 1.f) {
+                ++segIdx;
+                segTime = 0.f;
+                if (segIdx >= (int)durations.size()) {
+                    finished = true;
+                    playing = false;
+                    restoreBodyType();
+                }
+            }
+        }
+    };
+
     class Healthbar {
-
     public:
-
         Healthbar(
             float maxHealth = 100.0f,
             float barWidth = 100.0f,
             float barHeight = 12.0f
         )
-            :
-            maxHealth(maxHealth),
+            : maxHealth(maxHealth),
             currentHealth(maxHealth),
             barWidth(barWidth),
             barHeight(barHeight),
             pulseTimer(1.0f, true),
-            heartbeatTimer(1.0f, true)
+            heartbeatTimer(1.0f, true),
+            shakeTime(0.0f),
+            shakeDuration(0.0f),
+            shakeMaxDuration(0.3f),
+            shakeIntensity(3.0f) // Small shake: 3 pixels max offset
         {}
-
-
 
         void damage(float amount)
         {
-            currentHealth =
-                std::max(0.0f, currentHealth - amount);
+            // Trigger shake only if actual damage is taken and we're not already at 0.
+            // Only start our own default 0.3s bump if there isn't already a shake in
+            // progress -- otherwise this unconditionally overwrote shakeDuration
+            // (and shakeMaxDuration) every time, which meant a caller who had just
+            // requested a longer/stronger shake via triggerShake() right before
+            // calling damage() (the common pattern -- see BattleScript's
+            // onLoopCompleted callback) always had it silently cut down to 0.3s,
+            // regardless of what they asked for.
+            if (amount > 0.0f && currentHealth > 0.0f && shakeDuration <= 0.0f) {
+                shakeDuration = 0.3f; // Shake for 0.3 seconds
+                shakeMaxDuration = 0.3f;
+                shakeTime = 0.0f;     // Reset phase for a fresh shake
+            }
+            
+            currentHealth = std::max(0.0f, currentHealth - amount);
         }
-
-
 
         void heal(float amount)
         {
-            currentHealth =
-                std::min(maxHealth, currentHealth + amount);
+            currentHealth = std::min(maxHealth, currentHealth + amount);
         }
 
+        std::function<void()> startHeartbeat = nullptr;
+        std::function<void()> stopHeartbeat = nullptr;
 
 
         void update(
-            float delta,
-            std::function<void()> startHeartbeat = nullptr,
-            std::function<void()> stopHeartbeat = nullptr
-        )
-        {
+            float delta
+        ) {
             float ratio = currentHealth / maxHealth;
 
+            bool shouldHeartbeat = ratio <= LOW_HEALTH_THRESHOLD && currentHealth > 0;
 
-            bool shouldHeartbeat =
-                ratio <= LOW_HEALTH_THRESHOLD &&
-                currentHealth > 0;
-
-
-
-            if(shouldHeartbeat && !lowHealthActive)
-            {
+            if (shouldHeartbeat && !lowHealthActive) {
                 lowHealthActive = true;
-
-
                 pulseTimer.start();
-
-
-                if(startHeartbeat)
-                    startHeartbeat();
+                if (startHeartbeat) startHeartbeat();
             }
 
-
-
-            if(!shouldHeartbeat && lowHealthActive)
-            {
+            if (!shouldHeartbeat && lowHealthActive) {
                 lowHealthActive = false;
-
-
                 pulseTimer.stop();
-
-
-                if(stopHeartbeat)
-                    stopHeartbeat();
+                if (stopHeartbeat) stopHeartbeat();
             }
-
 
             pulseTimer.update(delta);
+
+            // Update shake timer
+            if (shakeDuration > 0.0f) {
+                shakeTime += delta;
+                shakeDuration -= delta;
+                
+                // Clamp to zero to prevent tiny negative values
+                if (shakeDuration <= 0.0f) {
+                    shakeDuration = 0.0f;
+                    shakeTime = 0.0f;
+                }
+            }
         }
 
+        float getCurrentVal() const { return currentHealth; }
+        float getPercentage() const { return currentHealth / maxHealth; }
 
-        float getCurrentVal() const
+        void render(SDL_Renderer* renderer, float screenX, float screenY)
         {
-            return currentHealth;
-        }
+            if (currentHealth <= 0) return;
 
-
-
-        float getPercentage() const
-        {
-            return currentHealth / maxHealth;
-        }
-
-
-
-        void render(
-            SDL_Renderer* renderer,
-            float screenX,
-            float screenY
-        )
-        {
-
-            if(currentHealth <= 0)
-                return;
-
-
-
-            SDL_FRect bgRect =
-            {
-                screenX,
-                screenY,
-                barWidth,
-                barHeight
-            };
-
-
-            SDL_SetRenderDrawColor(
-                renderer,
-                40,
-                40,
-                40,
-                255
-            );
-
-
-            SDL_RenderRect(
-                renderer,
-                &bgRect
-            );
-
-
-
-            float fillWidth =
-                getPercentage() * barWidth;
-
-
-
-            SDL_FRect fillRect =
-            {
-                screenX,
-                screenY,
-                fillWidth,
-                barHeight
-            };
-
-
-
-            SDL_Color color =
-                getHealthColor(
-                    getPercentage()
-                );
-
-
-
-            // Low health red pulse
-            if(
-                pulseTimer.isRunning() &&
-                getPercentage() <= LOW_HEALTH_THRESHOLD
-            )
-            {
-
-                float pulse =
-                    pulseTimer.pulse();
-
-
-
-                SDL_Color darkRed =
-                {
-                    120,
-                    0,
-                    0,
-                    255
-                };
-
-
-                SDL_Color lightRed =
-                {
-                    255,
-                    70,
-                    70,
-                    255
-                };
-
-
-
-                color.r =
-                    darkRed.r +
-                    (lightRed.r - darkRed.r) * pulse;
-
-
-                color.g =
-                    darkRed.g +
-                    (lightRed.g - darkRed.g) * pulse;
-
-
-                color.b =
-                    darkRed.b +
-                    (lightRed.b - darkRed.b) * pulse;
+            // 1. Calculate X-axis shake offset
+            float shakeOffset = 0.0f;
+            if (shakeDuration > 0.0f) {
+                // Smooth sine wave oscillation (50.0f controls speed/smoothness)
+                // Decay multiplier ensures the shake smoothly settles to 0.
+                // Divide by the actual requested duration (shakeMaxDuration),
+                // not a hardcoded 0.3f -- otherwise a triggerShake() call with
+                // any duration other than exactly 0.3s produced wrong decay:
+                // a longer duration (e.g. 1.0s) started decay above 1.0 and
+                // over-amplified the offset for most of the shake, and a
+                // shorter one decayed too fast.
+                float decay = (shakeMaxDuration > 0.0f) ? (shakeDuration / shakeMaxDuration) : 0.0f;
+                shakeOffset = std::sin(shakeTime * 50.0f) * shakeIntensity * decay;
             }
 
+            // 2. Apply offset to X axis ONLY
+            float shakenX = screenX + shakeOffset;
 
+            // Background rect
+            SDL_FRect bgRect = { shakenX, screenY, barWidth, barHeight };
+            SDL_SetRenderDrawColor(renderer, 40, 40, 40, 255);
+            SDL_RenderRect(renderer, &bgRect);
 
-            SDL_SetRenderDrawColor(
-                renderer,
-                color.r,
-                color.g,
-                color.b,
-                255
-            );
+            // Fill rect
+            float fillWidth = getPercentage() * barWidth;
+            SDL_FRect fillRect = { shakenX, screenY, fillWidth, barHeight };
 
+            SDL_Color color = getHealthColor(getPercentage());
 
-            SDL_RenderFillRect(
-                renderer,
-                &fillRect
-            );
+            // Low health red pulse
+            if (pulseTimer.isRunning() && getPercentage() <= LOW_HEALTH_THRESHOLD) {
+                float pulse = pulseTimer.pulse();
+
+                SDL_Color darkRed = { 120, 0, 0, 255 };
+                SDL_Color lightRed = { 255, 70, 70, 255 };
+
+                color.r = darkRed.r + (lightRed.r - darkRed.r) * pulse;
+                color.g = darkRed.g + (lightRed.g - darkRed.g) * pulse;
+                color.b = darkRed.b + (lightRed.b - darkRed.b) * pulse;
+            }
+
+            SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, 255);
+            SDL_RenderFillRect(renderer, &fillRect);
         }
 
-
+        void triggerShake(float intensity = 3.0f, float duration = 0.2f) {
+            shakeIntensity = intensity;
+            shakeDuration = duration;
+            shakeMaxDuration = duration;
+            shakeTime = 0.0f; // Reset phase for a fresh, snappy shake
+        }
 
     private:
-
-
         static constexpr float LOW_HEALTH_THRESHOLD = 0.30f;
         bool lowHealthActive = false; 
 
-
         float maxHealth;
         float currentHealth;
-
-
         float barWidth;
         float barHeight;
 
-
-
         Tools::Timer pulseTimer;
-
-        // controls heartbeat timing
         Tools::Timer heartbeatTimer;
 
+        // Shake effect members
+        float shakeTime;       // Tracks the phase of the sine wave
+        float shakeDuration;   // How long the shake has left (in seconds)
+        float shakeMaxDuration; // The duration originally requested -- used as the decay divisor in render() so decay always reaches exactly 0 at exactly 0 remaining, regardless of what duration was actually requested
+        float shakeIntensity;  // Maximum pixel offset (left/right)
 
-
-        SDL_Color getHealthColor(
-            float ratio
-        ) const
+        SDL_Color getHealthColor(float ratio) const
         {
-
-            if(ratio >= 0.6f)
-                return {0,200,0,255};
-
-
-            if(ratio >= 0.4f)
-                return {200,200,0,255};
-
-
-            if(ratio >= 0.2f)
-                return {255,165,0,255};
-
-
-            return {200,0,0,255};
+            if (ratio >= 0.6f) return { 0, 200, 0, 255 };
+            if (ratio >= 0.4f) return { 200, 200, 0, 255 };
+            if (ratio >= 0.2f) return { 255, 165, 0, 255 };
+            return { 200, 0, 0, 255 };
         }
-
     };
 
     struct Camera {
@@ -1493,7 +1852,47 @@ namespace Tools {
         float zoom     = 1.0f;
         float rotation = 0.0f;   // degrees, clockwise-positive (raylib convention)
 
-        // ── Coordinate conversion ────────────────────────────────────────
+        // ── Shake Effect Members ─────────────────────────────────────────────
+        float shakeTime             = 0.0f;
+        float currentShakeIntensity = 0.0f;
+        float shakeDecayRate        = 0.0f;
+        float shakeX                = 0.0f;
+        float shakeY                = 0.0f;
+
+        // Call this once per frame in your game loop
+        void update(float delta) {
+            if (currentShakeIntensity > 0.0f) {
+                shakeTime += delta;
+                currentShakeIntensity -= shakeDecayRate * delta;
+                
+                if (currentShakeIntensity <= 0.0f) {
+                    // Reset completely when done
+                    currentShakeIntensity = 0.0f;
+                    shakeTime = 0.0f;
+                    shakeX = 0.0f;
+                    shakeY = 0.0f;
+                } else {
+                    // Smooth, organic shake using different frequencies for X and Y.
+                    // This prevents a circular "orbiting" look and feels more like a natural impact.
+                    shakeX = std::sin(shakeTime * 35.0f) * currentShakeIntensity;
+                    shakeY = std::cos(shakeTime * 45.0f) * currentShakeIntensity;
+                }
+            }
+        }
+
+        // Trigger a shake. If a stronger shake is requested, it overrides the current one.
+        void addShake(float intensity, float duration = 0.3f) {
+            if (intensity <= 0.0f) return;
+            
+            // Only override if the new shake is stronger (prevents decay math from breaking)
+            if (intensity > currentShakeIntensity) {
+                currentShakeIntensity = intensity;
+                shakeDecayRate = currentShakeIntensity / duration;
+                shakeTime = 0.0f; // Reset phase for a crisp, new shake
+            }
+        }
+
+        // ── Coordinate conversion ────────────────────────────────────────────
         SDL_FPoint worldToScreen(float wx, float wy) const {
             float dx = wx - targetX;
             float dy = wy - targetY;
@@ -1504,12 +1903,14 @@ namespace Tools {
                 float ry = dx * s + dy * c;
                 dx = rx; dy = ry;
             }
-            return { dx * zoom + offsetX, dy * zoom + offsetY };
+            // Apply shake offset at the very end (screen space)
+            return { dx * zoom + offsetX + shakeX, dy * zoom + offsetY + shakeY };
         }
 
         SDL_FPoint screenToWorld(float sx, float sy) const {
-            float dx = (sx - offsetX) / zoom;
-            float dy = (sy - offsetY) / zoom;
+            // Reverse the shake offset FIRST so mouse picking remains 100% accurate
+            float dx = (sx - offsetX - shakeX) / zoom;
+            float dy = (sy - offsetY - shakeY) / zoom;
             if (rotation != 0.0f) {
                 float rad = -rotation * 3.14159265f / 180.0f;
                 float c = std::cos(rad), s = std::sin(rad);
@@ -1520,49 +1921,36 @@ namespace Tools {
             return { dx + targetX, dy + targetY };
         }
 
-        // ── Camera operations ────────────────────────────────────────────
-        // Pin the camera's target on the centre of an entity.  Used by game
-        // scripts to follow the player, and by the editor to focus on a pick.
+        // ── Camera operations ────────────────────────────────────────────────
         void centerOnEntity(const Components::Position& pos,
                             float entityW = 0.0f, float entityH = 0.0f) {
             targetX = pos.x + entityW * 0.5f;
             targetY = pos.y + entityH * 0.5f;
         }
 
-        // Place the camera so that its `offset` sits at the centre of the
-        // given canvas rect.  Call this every frame after the canvas size is
-        // known so the camera stays glued to the canvas when the window is
-        // resized.
         void setupForCanvas(float canvasX, float canvasY,
                             float canvasW, float canvasH) {
             offsetX = canvasX + canvasW * 0.5f;
             offsetY = canvasY + canvasH * 0.5f;
         }
 
-        // Zoom toward a screen point (keeps the world point under the cursor
-        // stable, exactly like raylib's scroll-wheel zoom in CanvasView).
         void zoomToward(float screenX, float screenY, float factor) {
             SDL_FPoint wb = screenToWorld(screenX, screenY);
-            zoom = std::clamp(zoom * factor, 0.25f, 10.0f);  // Adjust these values as needed
+            zoom = std::clamp(zoom * factor, 0.25f, 10.0f);
             SDL_FPoint wa = screenToWorld(screenX, screenY);
             targetX += wb.x - wa.x;
             targetY += wb.y - wa.y;
         }
 
-        // Pan the camera by a screen-space delta (e.g. mouse movement while
-        // P is held).  Divides by zoom so the pan speed feels the same at
-        // any zoom level.
         void pan(float deltaX, float deltaY) {
             targetX -= deltaX / zoom;
             targetY -= deltaY / zoom;
         }
 
-        // Compute the world-space AABB currently visible inside the canvas.
-        // Used by the ruler/grid to know which tick marks to draw.
         void getVisibleWorldBounds(float canvasX, float canvasY,
-                                   float canvasW, float canvasH,
-                                   float& outL, float& outT,
-                                   float& outR, float& outB) const {
+                                float canvasW, float canvasH,
+                                float& outL, float& outT,
+                                float& outR, float& outB) const {
             SDL_FPoint tl = screenToWorld(canvasX,        canvasY);
             SDL_FPoint br = screenToWorld(canvasX + canvasW, canvasY + canvasH);
             outL = std::min(tl.x, br.x);
@@ -7372,6 +7760,8 @@ namespace Gui {
                                 }
                                 world->physics_body_pool[e].shapeType = newShape;
                             }
+                            else if (f.key == "phys_w") world->physics_body_pool[e].width = val;
+                            else if (f.key == "phys_h") world->physics_body_pool[e].height = val;
                             else if (f.key == "phys_r") world->physics_body_pool[e].radius = val;
                             else if (f.key == "anim_speed") world->animation_state_pool[e].active().speed = val;
                             else if (f.key == "sfx_vol") world->sfx_emitter_pool[e].volume = val;
@@ -7654,6 +8044,17 @@ namespace Gui {
                 // Add onChange callback to commit immediately
                 sb->onChange = [this, key, e](float newVal) {
                     if (!world || e >= world->entity_count) return;
+                    // 'handled' tracks whether one of the cases below actually
+                    // wrote newVal into the world. Keys this chain doesn't
+                    // know about (e.g. "phys_shape", "phys_w", "phys_h",
+                    // "phys_r", "z_index", "anim_speed", "sfx_*", "mat3d_*")
+                    // must be left for commitAllFields() to apply on the next
+                    // frame -- stamping lastSyncedValue for them here would
+                    // make commitAllFields() think they're already in sync
+                    // and silently skip the real assignment, which is exactly
+                    // what was making the 2D collision-shape spinbox (and the
+                    // others above) appear unresponsive.
+                    bool handled = true;
                     if (key == "pos_x") {
                         if (world->has_position3d[e]) world->position3d_pool[e].x = newVal;
                         else world->position_pool[e].x = newVal;
@@ -7678,7 +8079,10 @@ namespace Gui {
                     else if (key == "gridmap3d_cw") world->gridmap3d_pool[e].cellWidth = newVal;
                     else if (key == "gridmap3d_ch") world->gridmap3d_pool[e].cellHeight = newVal;
                     else if (key == "gridmap3d_cd") world->gridmap3d_pool[e].cellDepth = newVal;
-                    
+                    else handled = false;
+
+                    if (!handled) return;
+
                     // Update lastSyncedValue in the fields array since 'f' is moved into it
                     for (auto& field : this->fields) {
                         if (field.key == key) {
@@ -8902,7 +9306,20 @@ inline void animation_system(ECSWorld& world, float dt)
                 int frameCount = (int)clip.imageFrameResources.size();
                 if (clip.currentFrame + 1 >= frameCount) {
                     if (clip.loop) {
-                        clip.currentFrame = 0;
+                        clip.loopsCompleted++;
+                        if (clip.onLoopCompleted) {
+                            clip.onLoopCompleted();
+                        }
+                        if (clip.loopLimit > 0 && clip.loopsCompleted >= clip.loopLimit) {
+                            clip.currentFrame = frameCount - 1;
+                            clip.isPlaying = false;
+                            clip.timer = 0.0f;
+                        } else {
+                            clip.currentFrame = 0;
+                            if (clip.onLoopStarted) {
+                                clip.onLoopStarted();
+                            }
+                        }
                     } else {
                         clip.currentFrame = frameCount - 1; // hold on the last frame
                         clip.isPlaying = false;
@@ -11481,17 +11898,106 @@ private:
         
 };
 
+// Copies one entity's components from `src` into `dst`, returning the new
+// entity's id in `dst` (or (Entity)-1 if `srcId` doesn't name a real entity
+// in `src`, e.g. it was (Entity)-1 or came from a since-shrunk world).
+//
+// This exists so change_scene() can carry specific entities across a scene
+// change instead of them simply vanishing along with the old ECSWorld —
+// see the `carryOverEntities` parameter on change_scene() below. `srcId`
+// and the returned id refer to two DIFFERENT worlds; nothing after the
+// caller's ECSWorlds get swapped may keep using `srcId` against `dst`, or
+// vice versa.
+//
+// Deliberately copies only the components a carried-over entity needs to
+// keep looking/animating the same in its new home: identity (metadata),
+// where it is and how it's drawn (position/rotation/scale), and what's
+// drawn (texture_ref/animation_state). Deliberately NOT copied:
+// physics_body (bodyId is only meaningful paired with the old PhysicsWorld,
+// which change_scene() always replaces with a fresh one right after this
+// runs, so a stale bodyId would just be silently recreated anyway by
+// physics_sync_system — better to start clean), tilemap/selection/
+// sfx_emitter (editor/authoring-only or scene-specific concerns a carried-
+// over combatant doesn't need). Add more component copies here if a future
+// carry-over entity needs them.
+inline Entity copy_entity(const ECSWorld& src, Entity srcId, ECSWorld& dst) {
+    if (srcId == (Entity)-1 || srcId >= src.entity_count) return (Entity)-1;
+
+    Entity dstId = dst.create_entity();
+
+    if (src.has_metadata[srcId]) {
+        dst.add_metadata(dstId);
+        dst.metadata_pool[dstId] = src.metadata_pool[srcId];
+    }
+    if (src.has_position[srcId]) {
+        dst.add_position(dstId);
+        dst.position_pool[dstId] = src.position_pool[srcId];
+    }
+    if (src.has_rectangle_shape[srcId]) {
+        dst.add_rectangle_shape(dstId);
+        dst.rectangle_shape_pool[dstId] = src.rectangle_shape_pool[srcId];
+    }
+    if (src.has_z_index[srcId]) {
+        dst.add_z_index(dstId);
+        dst.z_index_pool[dstId] = src.z_index_pool[srcId];
+    }
+    if (src.has_texture_ref[srcId]) {
+        dst.add_texture_ref(dstId);
+        dst.texture_ref_pool[dstId] = src.texture_ref_pool[srcId];
+    }
+    if (src.has_animation_state[srcId]) {
+        dst.add_animation_state(dstId);
+        dst.animation_state_pool[dstId] = src.animation_state_pool[srcId];
+        dst.animation_resource_path[dstId] = src.animation_resource_path[srcId];
+    }
+    if (src.has_rotation[srcId]) {
+        dst.add_rotation(dstId);
+        dst.rotation_pool[dstId] = src.rotation_pool[srcId];
+    }
+    if (src.has_scale[srcId]) {
+        dst.add_scale(dstId);
+        dst.scale_pool[dstId] = src.scale_pool[srcId];
+    }
+
+    return dstId;
+}
+
 inline bool change_scene(SceneParser& parser, Scene& targetScene,
                           std::string& sceneFilePathRef,
                           const std::string& newScenePath,
                           void* context,
                           Physics::PhysicsWorld*& physicsWorld,
-                          float gravity = 0.0f) {
+                          float gravity = 0.0f,
+                          // Entities (from targetScene's CURRENT world) to
+                          // transplant into the new scene's world instead of
+                          // letting them be destroyed with the old one, e.g.
+                          // the player/enemy going into a battle scene.
+                          // Everything else in the old world is not carried
+                          // over and becomes inaccessible until whatever
+                          // scene it lives in is loaded again.
+                          const std::vector<Entity>& carryOverEntities = {},
+                          // If non-null, filled with each carried-over
+                          // entity's NEW id (positionally matching
+                          // carryOverEntities — (Entity)-1 in a slot means
+                          // that source entity didn't exist). Ids in here
+                          // are only valid in targetScene.world AFTER this
+                          // function returns.
+                          std::vector<Entity>* carryOverOutIds = nullptr) {
     // 1. Load the new scene data (but do NOT assign it yet)
     Scene newScene = parser.ProjectScript_loadFromFile(newScenePath);
     if (newScene.projectRoot.empty()) {
         std::cerr << "[change_scene] Failed to load scene: " << newScenePath << "\n";
         return false;
+    }
+
+    // 1b. Carry over any requested entities from the OLD world into the NEW
+    // one. This MUST happen here — targetScene.world (old) and newScene.world
+    // (new) are only ever simultaneously alive in this window, right before
+    // the move-assignment below destroys the old one.
+    if (carryOverOutIds) carryOverOutIds->clear();
+    for (Entity srcId : carryOverEntities) {
+        Entity newId = copy_entity(targetScene.world, srcId, newScene.world);
+        if (carryOverOutIds) carryOverOutIds->push_back(newId);
     }
 
     // 2. End the old script (it may need the old physics world – keep it alive)

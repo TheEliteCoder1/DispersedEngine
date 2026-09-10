@@ -4,6 +4,7 @@ set(PROJECT_SOURCES
     scripts/game.cpp
     scripts/losing_screen.cpp
     scripts/main_menu.cpp
+    scripts/battle.cpp
 )
 
 add_executable(OpenWorld ${PROJECT_SOURCES})

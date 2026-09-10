@@ -1,13 +1,13 @@
 {
-    "activeClipIndex": 1,
+    "activeClipIndex": 0,
     "clips": [
         {
             "frameHeight": 256.0,
             "frameWidth": 256.0,
             "imageFrames": [
-                "assets\\textures\\HorsemathmenSleep1.svg",
-                "assets\\textures\\HorsemathmenSleep2.svg",
-                "assets\\textures\\HorsemathmenSleep3.svg"
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenSleep1.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenSleep2.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenSleep3.svg"
             ],
             "isPlaying": true,
             "loop": true,
@@ -18,13 +18,42 @@
             "frameHeight": 0.0,
             "frameWidth": 0.0,
             "imageFrames": [
-                "assets\\textures\\HorsemathmenIdle1.svg",
-                "assets\\textures\\HorsemathmenIdle2.svg",
-                "assets\\textures\\HorsemathmenIdle3.svg"
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenIdle1.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenIdle2.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenIdle3.svg"
             ],
             "isPlaying": true,
             "loop": true,
             "name": "idle",
+            "speed": 6.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenActive1.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenActive2.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenActive3.svg"
+            ],
+            "isPlaying": true,
+            "loop": true,
+            "name": "active",
+            "speed": 6.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenAttack1.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenAttack2.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenAttack3.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenAttack4.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenAttack5.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenAttack6.svg"
+            ],
+            "isPlaying": true,
+            "loop": true,
+            "name": "attack",
             "speed": 6.0
         }
     ]

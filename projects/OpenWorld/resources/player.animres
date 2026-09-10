@@ -102,6 +102,22 @@
             "loop": true,
             "name": "eat",
             "speed": 8.0
+        },
+        {
+            "frameHeight": 128.0,
+            "frameWidth": 64.0,
+            "imageFrames": [
+                "assets\\textures\\player-hurt-1.svg",
+                "assets\\textures\\player-hurt-2.svg",
+                "assets\\textures\\player-hurt-3.svg",
+                "assets\\textures\\player-hurt-4.svg",
+                "assets\\textures\\player-hurt-5.svg",
+                "assets\\textures\\player-hurt-6.svg"
+            ],
+            "isPlaying": false,
+            "loop": true,
+            "name": "hurt",
+            "speed": 8.0
         }
     ]
 }

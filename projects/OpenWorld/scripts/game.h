@@ -10,7 +10,7 @@ constexpr float waterbarOffsetY = -80.0f;
 
 
 
-constexpr float foodbarOffsetY = -90.0f;
+constexpr float foodbarOffsetY = -110.0f;
 
 
 
@@ -32,6 +32,45 @@ constexpr float WaterNFoodBarHeight = 12.0f;
 
 constexpr float WaterNFoodBarWidth = 100.0f;
 
+
+
+
+// Snapshot of one MathHorseMen encounter, copied out of GameScript's
+// ECSWorld into GameContext right before GameScript triggers the switch
+// to battle.json (see GameScript::onUpdate() in game.cpp). Plain data
+// only -- no Entity handles, no ECSWorld pointers -- since everything
+// about the old scene (including the GameScript instance itself) is
+// destroyed by change_scene() before BattleScript ever runs.
+struct BattleEncounterInfo {
+    // False until GameScript populates it, and reset to false again once
+    // BattleScript::onStart() has consumed it, so a later, unrelated
+    // scene load into this same GameContext never reads stale data.
+    bool valid = false;
+
+    // GameScript::approacherEntity's metadata name -- drawn on the LEFT
+    // side of the battle scene.
+    std::string approacherName;
+
+    // GameScript::challengerEntity's metadata name -- drawn on the RIGHT
+    // side of the battle scene.
+    std::string challengerName;
+
+    Entity approacherEntity = (Entity)-1;
+    Entity challengerEntity = (Entity)-1;
+
+    // 0..1 health fractions at hand-off time. approacherHealthPct comes
+    // straight from GameScript::healthbar; challengerHealthPct defaults to
+    // full since the enemy has no health system of its own yet -- this
+    // script doesn't invent one.
+    float approacherHealthPct = 1.0f;
+    float challengerHealthPct = 1.0f;
+
+    // textureName of the Biome (see GameScript::getBiomeAt()) the
+    // approacher was standing in when the encounter started, e.g.
+    // "grassBackground". Lets the battle scene pick a matching backdrop
+    // (see BattleScript::onDraw() in battle.cpp).
+    std::string biomeTexture;
+};
 
 
 
@@ -93,6 +132,14 @@ struct GameContext {
 
 
     SDL_Texture* foodbarIcon;
+
+
+
+    // Handoff channel from GameScript to BattleScript for a single
+    // encounter (see BattleEncounterInfo above for why GameContext, and
+    // not an Entity handle, is used to carry this across the scene
+    // change).
+    BattleEncounterInfo battleEncounter;
 
 
 
@@ -215,11 +262,9 @@ public:
 
  };
 
-    float normalSpeed = 300.0f;
-
-
-   // your default speed
-    float moveSpeed = 300.0f;
+    // your default speed is 300.0f
+    float normalSpeed = 1000.0f;
+    float moveSpeed = 1000.0f;
 
 
 
@@ -231,18 +276,25 @@ public:
     int puddleContactCount = 0;
 
 
+    int mathHorseMenContactCount = 0;
+
+
 
     bool isInPuddle = false;
 
 
+    bool isInCombat = false;
 
+    
+    Tools::CutsceneTrack playerCutsceneTracks;
 
+    Tools::CutsceneTrack enemyCutsceneTracks;
 
+    int playerCutScenesFinished = 0;
+    
+    int enemyCutScenesFinished = 0;
 
     void handleSensorTouch(b2ShapeId sensorShape, b2ShapeId visitorShape, bool isBegin);
-
-
-
 
     // Biome grid configuration
     std::vector<Biome> biomes;
@@ -312,7 +364,7 @@ public:
     bool movementLocked = false;
 
 
-            // blocks player input
+    // blocks player input
 
     // Math dialog
     std::unique_ptr<MathDialog> mathDialog;
@@ -348,6 +400,13 @@ public:
 
 
     void finishEating();
+
+    Entity challengerEntity;
+
+    Entity approacherEntity;
+
+
+    void Attack();
 
 
 
@@ -454,6 +513,7 @@ public:
     Entity puddle = (Entity)-1;
 
 
+    Entity MathHorseMen = (Entity)-1;
 
 
     std::vector<Entity> decorationEntities;
@@ -482,6 +542,15 @@ public:
 
 
     void rebuildBgMap();
+
+
+
+    // Returns a pointer into `biomes` for whichever cell contains the
+    // given world-space point, or nullptr if it falls outside every
+    // configured cell. Used to tell the battle scene which backdrop
+    // matches where the encounter started (see the enemyCutScenesFinished
+    // switch in onUpdate(), game.cpp).
+    const Biome* getBiomeAt(float worldX, float worldY) const;
 
 
 

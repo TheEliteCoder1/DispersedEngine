@@ -1,5 +1,0 @@
-// IMPORTANT NOTES:
-// -Remove the trailing commas to avoid json scene/resource issues.
-// -Make paths relative and remove double slashes for exports if you notice issues.
-// -Always check engine components if they exist before acessing them to avoid bugs.
-// -use build.bat instead of fast_build.bat to help with debugging project config bugs.

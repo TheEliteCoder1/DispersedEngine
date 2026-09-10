@@ -3,11 +3,11 @@
     "entities": [
         {
             "components": {
-                "AnimationState": "resources/player.animres",
+                "AnimationState": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/player.animres",
                 "Metadata": {
                     "name": "Player"
                 },
-                "PhysicsBody": "resources/Player_0.physicsres",
+                "PhysicsBody": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/Player_0.physicsres",
                 "Position": {
                     "x": 7470.0,
                     "y": 7435.5
@@ -44,7 +44,7 @@
         },
         {
             "components": {
-                "AnimationState": "resources/flower_2.animres",
+                "AnimationState": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/flower_2.animres",
                 "Metadata": {
                     "name": "flower"
                 },
@@ -63,7 +63,7 @@
         },
         {
             "components": {
-                "AnimationState": "resources/grass_3.animres",
+                "AnimationState": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/grass_3.animres",
                 "Metadata": {
                     "name": "grass"
                 },
@@ -82,11 +82,11 @@
         },
         {
             "components": {
-                "AnimationState": "resources/catcus_4.animres",
+                "AnimationState": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/catcus_4.animres",
                 "Metadata": {
                     "name": "catcus"
                 },
-                "PhysicsBody": "resources/Catcus.physicsres",
+                "PhysicsBody": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/Catcus.physicsres",
                 "Position": {
                     "x": 9997.2001953125,
                     "y": 9999.0
@@ -102,11 +102,11 @@
         },
         {
             "components": {
-                "AnimationState": "resources/emptyTree_5.animres",
+                "AnimationState": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/emptyTree_5.animres",
                 "Metadata": {
                     "name": "emptyTree"
                 },
-                "PhysicsBody": "resources/Tree.physicsres",
+                "PhysicsBody": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/Tree.physicsres",
                 "Position": {
                     "x": 6934.39990234375,
                     "y": 9735.400390625
@@ -122,7 +122,7 @@
         },
         {
             "components": {
-                "AnimationState": "resources/iceCrystal_6.animres",
+                "AnimationState": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/iceCrystal_6.animres",
                 "Metadata": {
                     "name": "iceCrystal"
                 },
@@ -141,11 +141,11 @@
         },
         {
             "components": {
-                "AnimationState": "resources/snowyEmptyTree_7.animres",
+                "AnimationState": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/snowyEmptyTree_7.animres",
                 "Metadata": {
                     "name": "snowyEmptyTree"
                 },
-                "PhysicsBody": "resources/Tree.physicsres",
+                "PhysicsBody": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/Tree.physicsres",
                 "Position": {
                     "x": 92.80000305175781,
                     "y": 654.0999755859375
@@ -161,11 +161,11 @@
         },
         {
             "components": {
-                "AnimationState": "resources/water.animres",
+                "AnimationState": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/water.animres",
                 "Metadata": {
                     "name": "puddle"
                 },
-                "PhysicsBody": "resources/water.physicsres",
+                "PhysicsBody": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/water.physicsres",
                 "Position": {
                     "x": 9388.099609375,
                     "y": 6592.2998046875
@@ -181,11 +181,11 @@
         },
         {
             "components": {
-                "AnimationState": "resources/fruitTree.animres",
+                "AnimationState": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/fruitTree.animres",
                 "Metadata": {
                     "name": "fruitTree"
                 },
-                "PhysicsBody": "resources/Tree.physicsres",
+                "PhysicsBody": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/Tree.physicsres",
                 "Position": {
                     "x": 9303.2001953125,
                     "y": 6872.2998046875
@@ -324,7 +324,7 @@
                         ]
                     ],
                     "snapEnabled": false,
-                    "textureName": "assets/textures/path.svg"
+                    "textureName": "assets\\textures\\path.svg"
                 },
                 "ZIndex": {
                     "z": 6
@@ -440,7 +440,7 @@
                         ]
                     ],
                     "snapEnabled": false,
-                    "textureName": "assets/textures/path90deg.svg"
+                    "textureName": "assets\\textures\\path90deg.svg"
                 },
                 "ZIndex": {
                     "z": 7
@@ -449,11 +449,11 @@
         },
         {
             "components": {
-                "AnimationState": "resources/MathHorseMen_12.animres",
+                "AnimationState": "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/MathHorseMen_12.animres",
                 "Metadata": {
                     "name": "MathHorseMen"
                 },
-                "PhysicsBody": "resources/MathHorseMen_12.physicsres",
+                "PhysicsBody": "resources\\MathHorseMen_12.physicsres",
                 "Position": {
                     "x": 13268.5,
                     "y": 9577.0

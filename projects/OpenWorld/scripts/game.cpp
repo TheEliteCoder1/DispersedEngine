@@ -47,7 +47,9 @@ static constexpr float minDt = 0.1f;
 static int reason = 0;
 
 SDL_FRect GamepadCursorIconSrcRect =  {0.0f, 0.0f, 32.0f, 32.0f};
-SDL_FRect GamepadCursorIconDestRect = {0.0f, 0.0f, 1600.0f, 900.0f};
+SDL_FRect GamepadCursorIconDestRect = {0.0f, 0.0f, 32.0f, 32.0f};
+SDL_FRect* GCISRPtr = &GamepadCursorIconSrcRect;
+SDL_FRect* GCIDRPtr = &GamepadCursorIconDestRect;
 
 // The active scene's script is polymorphic (ScriptBase*, owned by
 // GameContext::scene->script) so that different scenes can run entirely
@@ -227,6 +229,8 @@ static void RenderFrame(SDL_Renderer* renderer, SDL_Window* window, GameContext&
 
     // 2. Render the tiled biome backgrounds (GameScript-specific)
     if (script) {
+
+
         script->bgMap.render(renderer, ctx.camera, visibleWorld);
 
 
@@ -306,9 +310,6 @@ static void RenderFrame(SDL_Renderer* renderer, SDL_Window* window, GameContext&
     // driving this scene gets to draw, regardless of concrete type.
     if (ctx.scene->script) {
         ctx.scene->script->onDraw();
-
-
-
     }
 
     for (auto& elem : ctx.scene->guiElements) {
@@ -361,19 +362,13 @@ static void RenderFrame(SDL_Renderer* renderer, SDL_Window* window, GameContext&
     
     if (ctx.gamepad && !ActiveGameScript(ctx)) {
         // gamepad cursor rendering
-        GamepadCursorIconSrcRect.x = ctx.gamepadCursorX;
-        GamepadCursorIconSrcRect.y = ctx.gamepadCursorY;
-        GamepadCursorIconDestRect.w = winW;
-        GamepadCursorIconDestRect.h = winH;
-        SDL_RenderTexture(renderer, ProjectScript_IMG_GetTexture("GamePadCursorIcon"), &GamepadCursorIconSrcRect, &GamepadCursorIconDestRect);
+        GCIDRPtr->x = ctx.gamepadCursorX;
+        GCIDRPtr->y = ctx.gamepadCursorY;
+        // GCIDRPtr->w  = winW;
+        // GCIDRPtr->h = winH;
+        SDL_RenderTexture(renderer, ProjectScript_IMG_GetTexture("GamePadCursorIcon"), GCISRPtr, GCIDRPtr);
     }
-
-    
-
     SDL_RenderPresent(renderer);
-
-
-
 }
  
 #ifdef __EMSCRIPTEN__
@@ -752,7 +747,31 @@ void GameScript::rebuildBgMap() {
 
 
 }
- 
+
+// Given a world-space point, works out which biome grid cell it falls in
+// (same gridX/gridY math rebuildBgMap() uses to lay cells out) and returns
+// the matching Biome from `biomes`, or nullptr if the point is outside all
+// configured cells (or the background/tile size isn't set up yet).
+const Biome* GameScript::getBiomeAt(float worldX, float worldY) const {
+    if (!(ctx && ctx->scene) || background == (Entity)-1) return nullptr;
+    if (!ctx->scene->world.has_position[background]) return nullptr;
+
+    float originX = ctx->scene->world.position_pool[background].x;
+    float originY = ctx->scene->world.position_pool[background].y;
+
+    float cellW = biomeTileCountX * bgMap.tileWidth;
+    float cellH = biomeTileCountY * bgMap.tileHeight;
+    if (cellW <= 0.0f || cellH <= 0.0f) return nullptr;
+
+    int gx = (int)std::floor((worldX - originX) / cellW);
+    int gy = (int)std::floor((worldY - originY) / cellH);
+
+    for (const Biome& b : biomes) {
+        if (b.gridX == gx && b.gridY == gy) return &b;
+    }
+    return nullptr;
+}
+
 void GameScript::spawnRandomDecorations() {
     if (!(ctx && ctx->scene)) return;
 
@@ -1093,6 +1112,8 @@ void GameScript::onStart() {
 
     path90deg = findEntityByName(ctx->scene, "path90deg");
 
+    MathHorseMen = findEntityByName(ctx->scene, "MathHorseMen");
+
 
     auto setZ = [&](Entity e, int z) {
         if (e != (Entity)-1) {
@@ -1106,14 +1127,12 @@ void GameScript::onStart() {
 
     setZ(grass, 1);
 
-
+    setZ(MathHorseMen, 1);
 
     setZ(emptyTree, 1);
 
 
     setZ(iceCrystal, 1);
-
-
  
     setZ(snowyEmptyTree, 1);
 
@@ -1209,9 +1228,6 @@ void GameScript::onStart() {
         
         if (shouldStopRegeneration) {
             ctx->scene->areBiomesAndEntitiesGenerated = true;
-
-
-
         }
         
         // Save the newly generated world immediately
@@ -1253,6 +1269,30 @@ void GameScript::onStart() {
 
 
 
+        }
+    }
+
+
+    // Configure physics for all generic entities 
+    for (Entity e = 0; e < ctx->scene->world.entity_count; e++)
+    {
+        if (ctx->scene->world.has_metadata[e]) {
+            if (Tools::contains(ctx->scene->world.metadata_pool[e].name, "MathHorseMen")) {
+                if (ctx->scene->world.has_physics_body[e]) {
+
+                    auto& phys = ctx->scene->world.physics_body_pool[e];
+
+                    phys.bodyType = b2_staticBody;
+
+                    phys.category = Physics::LAYER_2;
+
+                    phys.mask = Physics::LAYER_1;
+
+                    phys.isSensor = true;
+                    
+                }
+
+            }
         }
     }
     
@@ -1350,6 +1390,18 @@ void GameScript::onStart() {
 
 
     }
+
+    ECSWorld* cutsceneWorld = &ctx->scene->world;
+    playerCutsceneTracks.world = cutsceneWorld;
+    if (player != (Entity)-1) {
+        playerCutsceneTracks.target = player;
+    }
+    enemyCutsceneTracks.world = cutsceneWorld;
+
+    healthbar.startHeartbeat = [&]() { ProjectScript_MIXER_PlayLoopingSound("heartbeat", 0.7f, 1.0f); };
+    healthbar.stopHeartbeat = [&]() { ProjectScript_MIXER_StopSound("heartbeat"); };
+
+    g_resources.AudioManager.PlaySong("main", 1.0f, true, 0.65f);
 }
 
 
@@ -1601,9 +1653,6 @@ void GameScript::handleSensorTouch(b2ShapeId sensorShape, b2ShapeId visitorShape
     Entity visitorEntity = (Entity)(intptr_t)b2Shape_GetUserData(visitorShape);
 
 
-
-
-
     if (sensorEntity == (Entity)-1)
         return;
 
@@ -1647,8 +1696,30 @@ void GameScript::handleSensorTouch(b2ShapeId sensorShape, b2ShapeId visitorShape
             }
             puddleContactCount++;
 
+        } else if (Tools::contains(ctx->scene->world.metadata_pool[sensorEntity].name, "MathHorseMen"))
+        {   
 
+            if (mathHorseMenContactCount == 0)
+            {
+                g_resources.AudioManager.StopSong("main");
 
+                approacherEntity = visitorEntity;
+
+                challengerEntity = sensorEntity;
+
+                g_resources.AudioManager.PlaySfx("activated", 0.65f, 1.0f);
+
+                isInCombat = true;
+
+                Attack();
+                // Attack() starts the enemy approach cutscene exactly once,
+                // right when combat begins. It must NOT be called again every
+                // frame from onUpdate()'s isInCombat block below, or it will
+                // keep restarting the cutscene (via enemyCutsceneTracks.Play())
+                // before it can ever reach "finished".
+            }
+
+            mathHorseMenContactCount++;
         }
     }
     else
@@ -1675,10 +1746,27 @@ void GameScript::handleSensorTouch(b2ShapeId sensorShape, b2ShapeId visitorShape
 
                 }
             }
+        }  else if (Tools::contains(ctx->scene->world.metadata_pool[sensorEntity].name, "MathHorseMen")) {
+            if (mathHorseMenContactCount > 0)
+            {
+                mathHorseMenContactCount--;
+
+
+
+
+                if (mathHorseMenContactCount == 0)
+                {
+
+                    // g_resources.AudioManager.StopSong("fight_theme");
+
+                    // isInCombat = false;
+
+                    //g_resources.AudioManager.PlaySong("main", 0.65, 1.0f);
+
+                }
+            }
         }
     };
-
-
 }
 
 WaterBar::WaterBar(float max, float width, float height)
@@ -2313,26 +2401,48 @@ void GameScript::onMathAnswer(bool correct) {
         {
             case 0:
                 startDrinking();
-
-
-
                 break;
-
-
 
             case 1: 
                 startEating();
-
-
-
                 break;
 
+            case 2:
+                // reserved for healing
+                break;
 
+            case 3:
+                break;
 
         }
     }
     // Wrong: water continues to deplete (no refill)
     // The player must re‑enter the puddle to trigger another question
+}
+
+void GameScript::Attack()
+{
+    // Defensive guard: if the enemy approach cutscene has already completed
+    // once, don't let a stray/duplicate call restart it from the beginning.
+    if (enemyCutsceneTracks.wasFinished) return;
+
+    auto& anim = ctx->scene->world.animation_state_pool[GameScript::challengerEntity];
+
+    Entity ce = GameScript::challengerEntity;
+    Entity ae = GameScript::approacherEntity;
+
+    if (anim.find("active"))
+    {
+        anim.play("active", false, false);
+    }
+
+    enemyCutsceneTracks.target = ce;
+    enemyCutsceneTracks.points = {
+        {ctx->scene->world.position_pool[ce].x, ctx->scene->world.position_pool[ce].y},
+        {ctx->scene->world.position_pool[ae].x + 100.0f, ctx->scene->world.position_pool[ae].y}
+    };
+    enemyCutsceneTracks.durations = {1.0f};
+    enemyCutsceneTracks.Play();
 }
 
 void GameScript::startDrinking() {
@@ -2459,12 +2569,125 @@ void GameScript::onUpdate(float dt) {
     // Update vanish effects and healthbar (heartbeat audio) – always run
     vanishEffects.update(ctx->scene->world, dt);
 
+    // Update cutscenes
+    playerCutsceneTracks.Update(dt);
+    enemyCutsceneTracks.Update(dt);
 
+    // Check which cutscene finished
+    if (enemyCutsceneTracks.finished && !enemyCutsceneTracks.wasFinished)
+    {
+        enemyCutsceneTracks.wasFinished = true;
+        enemyCutScenesFinished++;
+        switch(enemyCutScenesFinished)
+        {
+            case 1:
+                // change scene to battle.json - an empty scene with no entities/as blank as possible
+                // and also shows the GameScript::approacherEntity on the left and the  GameScript::challengerEntity on the right
+                // the change in scenes should also make any current processing in this scene paused like a true scene change
+                // if the engine dosent do that try to modify so that unecessary processing from this scene dosent happen in the battle scene
+                // have a simple colored background but comment the code for a background that fills the window even wen resized
+                // not a biomed/tiled background just a simple backdrop image which i can make the file for with inskape and have it
+                // resized to  the screen even on window resize and also pass information on the current biome the player/approacherEntity
+                // was in before transitioning so i can choose a specific file for now just check if the biome is the grass one and use that image
+                // as the simple backdrop without tiling I will change that to be an actual backdrop. Show the health bars for the left and right
+                // approacher and challenger entities dont invent combat moves or anything. Make sure this code works and give the new blank battle.json file
+                // and show how to transfer the required metadata i specified here to the new script battle.cpp which can optionally have battle.h
+                // unless a header is mandatory for every new script/scene depending on how engine.h works
+
+                SDL_Log("enemy start battle!");
+
+                // ---------------------------------------------------------
+                // Hand off to battle.json. IMPORTANT: change_scene() below
+                // move-assigns a brand-new Scene (with a brand-new script
+                // instance) into *ctx->scene, which destroys the old Scene
+                // -- including the GameScript object we're executing inside
+                // of right now (`this`). So everything this encounter needs
+                // to carry over must be copied out into `ctx` (which is
+                // owned by main() and outlives every scene change) BEFORE
+                // calling change_scene(), and change_scene() must be the
+                // last thing this branch touches `this` for. Raw Entity
+                // handles (approacherEntity/challengerEntity) can't be
+                // passed along at all -- they only mean something inside
+                // *this* scene's ECSWorld, which is about to be destroyed.
+                // ---------------------------------------------------------
+                if (ctx && ctx->scene) {
+                    auto& world = ctx->scene->world;
+
+                    // Copy the pointer itself out to a local BEFORE
+                    // change_scene() runs. `ctx` here reads as `this->ctx`
+                    // (a ScriptBase member), and change_scene() is about to
+                    // destroy `this` -- so touching `this->ctx` afterwards
+                    // would read a freed member. `ctxLocal` is just a plain
+                    // GameContext*, and GameContext itself is owned by
+                    // main(), so it's still perfectly valid to dereference
+                    // after `this`/GameScript is gone.
+                    GameContext* ctxLocal = ctx;
+
+                    ctxLocal->battleEncounter.valid = true;
+
+                    ctxLocal->battleEncounter.approacherName =
+                        (approacherEntity != (Entity)-1 && world.has_metadata[approacherEntity])
+                            ? world.metadata_pool[approacherEntity].name
+                            : "Player";
+
+                    ctxLocal->battleEncounter.challengerName =
+                        (challengerEntity != (Entity)-1 && world.has_metadata[challengerEntity])
+                            ? world.metadata_pool[challengerEntity].name
+                            : "Enemy";
+
+                    // Real player health carries over; the enemy has no
+                    // health system of its own yet, so it starts full.
+                    ctxLocal->battleEncounter.approacherHealthPct = healthbar.getPercentage();
+                    ctxLocal->battleEncounter.challengerHealthPct = 1.0f;
+
+                    // Which biome was the approacher (player) standing in?
+                    // Used by BattleScript to pick a matching backdrop.
+                    ctxLocal->battleEncounter.biomeTexture = "grassBackground"; // sane default
+                    if (approacherEntity != (Entity)-1 && world.has_position[approacherEntity]) {
+                        const Biome* b = getBiomeAt(world.position_pool[approacherEntity].x,
+                                                     world.position_pool[approacherEntity].y);
+                        if (b) ctxLocal->battleEncounter.biomeTexture = b->textureName;
+                    }
+
+                    // NOTE: approacherEntity/challengerEntity are indices
+                    // into `world` (this scene's ECSWorld), which is about
+                    // to be destroyed by change_scene()'s scene swap. We
+                    // don't assign them into ctxLocal->battleEncounter here
+                    // -- they'd be stale in the battle scene's world.
+                    // Instead, hand them to change_scene() as entities to
+                    // carry over: it copies their components into the NEW
+                    // world (battle.json's) before the old one dies, and
+                    // hands back the ids those copies got THERE. Order
+                    // matches carryOver below: [0] = approacher, [1] =
+                    // challenger.
+                    std::vector<Entity> carryOver  = { approacherEntity, challengerEntity };
+                    std::vector<Entity> carriedIds;
+
+                    // Last touch of `this` / *ctx->scene in this branch --
+                    // `this` (and everything read through it above, like
+                    // `world` and `approacherEntity`) may be destroyed the
+                    // moment this call returns.
+                    change_scene(*ctxLocal->sceneParser, *ctxLocal->scene, ctxLocal->sceneFilePath,
+                                 "OpenWorld/scenes/battle.json",
+                                 static_cast<void*>(ctxLocal), ctxLocal->physicsWorld,
+                                 0.0f, carryOver, &carriedIds);
+
+                    // Safe: only touches ctxLocal (GameContext*), never `this`.
+                    // These ids are now valid in ctxLocal->scene->world, i.e.
+                    // the battle scene BattleScript::onDraw() will render.
+                    ctxLocal->battleEncounter.approacherEntity =
+                        (carriedIds.size() > 0) ? carriedIds[0] : (Entity)-1;
+                    ctxLocal->battleEncounter.challengerEntity =
+                        (carriedIds.size() > 1) ? carriedIds[1] : (Entity)-1;
+                }
+                return; // `this` may be destroyed past this point -- nothing after change_scene() may touch it
+
+        }
+        return;
+    }
 
     healthbar.update(
-        dt,
-        [&]() { ProjectScript_MIXER_PlayLoopingSound("heartbeat", 0.7f, 1.0f); },
-        [&]() { ProjectScript_MIXER_StopSound("heartbeat"); }
+        dt
     );
 
 
@@ -2584,12 +2807,29 @@ void GameScript::onUpdate(float dt) {
 
         movementLocked = true;
 
-
    // freeze player while answering
         return;
 
 
                   // wait for the user's answer
+    }
+
+    
+    if (isInCombat)
+    {
+        //reason = 3;
+        //showMathDialog();
+        movementLocked = true;
+        // NOTE: Attack() is intentionally NOT called here anymore.
+        // Calling it every frame re-triggered enemyCutsceneTracks.Play(),
+        // which reset the cutscene's progress (and "finished" flag) back to
+        // the start on every single tick. That meant enemyCutsceneTracks
+        // could never actually reach finished == true, so the
+        // "enemy start battle!" log / enemyCutScenesFinished counter above
+        // never fired, and the enemy just kept sliding toward the player
+        // forever. Attack() is now called exactly once, at the moment
+        // isInCombat first becomes true (see handleSensorTouch).
+        return;
     }
     
 
@@ -3026,6 +3266,9 @@ int main(int argc, char *argv[])
     // load textures
     ProjectScript_IMG_LoadTexture("grassBackground",  "OpenWorld/assets/textures/grassBackground.svg");
 
+    
+    ProjectScript_IMG_LoadTexture("battleBackgroundGrass", "OpenWorld/assets/textures/battleBackgroundGrass.svg");
+
 
 
     ProjectScript_IMG_LoadTexture("snowBackground",   "OpenWorld/assets/textures/snowBackground.svg");
@@ -3050,11 +3293,24 @@ int main(int argc, char *argv[])
 
     ProjectScript_IMG_LoadTexture("path90deg", "OpenWorld/assets/textures/path90deg.svg");
 
-    ProjectScript_IMG_LoadTexture("GamePadCursorIcon", "OpenWorld/assets/textures/cup.svg");
+    ProjectScript_IMG_LoadTexture("GamePadCursorIcon", "OpenWorld/assets/textures/GamepadCursor.svg");
+
+    ProjectScript_IMG_LoadTexture("MathHorseMan_BluePulse", "OpenWorld/assets/textures/BluePulse_MathHorsemen.svg");
 
     // load audio 
     g_resources.AudioManager.CreateMixerDevice();
 
+
+    MIX_SetMixerGain(g_resources.AudioManager.m_mixer, 0.0f);
+
+    ProjectScript_MIXER_LoadSound("main", "OpenWorld/assets/audio/Menu Theme.wav", true);
+
+    ProjectScript_MIXER_LoadSound("mystery_tower", "OpenWorld/assets/audio/Dark Theme.wav", true);
+
+    ProjectScript_MIXER_LoadSound("fight_theme", "OpenWorld/assets/audio/Battle Theme.wav", true);
+
+
+    ProjectScript_MIXER_LoadSound("activated", "OpenWorld/assets/audio/Enemy Encounter.wav", false);
 
 
     ProjectScript_MIXER_LoadSound("punch", "OpenWorld/assets/audio/Punch.wav", false);
@@ -3078,8 +3334,6 @@ int main(int argc, char *argv[])
 
 
     ProjectScript_MIXER_LoadSound("bite", "OpenWorld/assets/audio/bite.wav", false);
-
-
 
 
  
@@ -3216,7 +3470,7 @@ lastTime = now;
 
 
 
-        while (SDL_PollEvent(&e)) {
+    while (SDL_PollEvent(&e)) {
 if (e.type == SDL_EVENT_QUIT) running = false;
 if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) running = false;
 if (ctx.scene && ctx.scene->script) {

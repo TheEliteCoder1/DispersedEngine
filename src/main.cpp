@@ -21,7 +21,9 @@ bool g_camOrbiting = false;
 float g_camLastMouseX = 0.0f, g_camLastMouseY = 0.0f;
 
 SDL_FRect GamepadCursorIconSrcRect =  {0.0f, 0.0f, 32.0f, 32.0f};
-SDL_FRect GamepadCursorIconDestRect = {0.0f, 0.0f, 1600.0f, 900.0f};
+SDL_FRect GamepadCursorIconDestRect = {0.0f, 0.0f, 32.0f, 32.0f};
+SDL_FRect* GCISRPtr = &GamepadCursorIconSrcRect;
+SDL_FRect* GCIDRPtr = &GamepadCursorIconDestRect;
 
 static glm::vec3 dragStartPos3D(0.0f);
 
@@ -42,7 +44,7 @@ bool showCanvas = true;
 constexpr Engine3D::CanvasMode g_canvasMode = Engine3D::CanvasMode::Mode2D;
 #else
 // Desktop: you can freely switch between 2D and 3D here
-constexpr Engine3D::CanvasMode g_canvasMode = Engine3D::CanvasMode::Mode3D;
+constexpr Engine3D::CanvasMode g_canvasMode = Engine3D::CanvasMode::Mode2D;
 #endif
 
 static glm::vec3 g_lastAddedPos3D(0.0f, 0.0f, 0.0f);
@@ -1317,26 +1319,26 @@ int main(int argc, char* argv[]) {
     // Mesh3DRef's meshW/meshH/meshD (see the renderObj loop above), so the
     // outline and the mesh no longer fight over the same dimensions.
     for (Entity e = 0; e < world.entity_count; ++e) {
-    if (!world.has_position3d[e]) continue;
+        if (!world.has_position3d[e]) continue;
 
-    float w = world.has_rectangle_shape[e] ? world.rectangle_shape_pool[e].w : 100.0f;
-    float h = world.has_rectangle_shape[e] ? world.rectangle_shape_pool[e].h : 100.0f;
-    float d = world.has_depth3d[e] ? world.depth3d_pool[e].depth : 50.0f;
+        float w = world.has_rectangle_shape[e] ? world.rectangle_shape_pool[e].w : 100.0f;
+        float h = world.has_rectangle_shape[e] ? world.rectangle_shape_pool[e].h : 100.0f;
+        float d = world.has_depth3d[e] ? world.depth3d_pool[e].depth : 50.0f;
 
-    // Apply scale
-    float sx = world.has_scale[e] ? world.scale_pool[e].x : 1.0f;
-    float sy = world.has_scale[e] ? world.scale_pool[e].y : 1.0f;
-    w *= sx;
-    h *= sy;
+        // Apply scale
+        float sx = world.has_scale[e] ? world.scale_pool[e].x : 1.0f;
+        float sy = world.has_scale[e] ? world.scale_pool[e].y : 1.0f;
+        w *= sx;
+        h *= sy;
 
-    glm::vec3 center(world.position3d_pool[e].x, world.position3d_pool[e].y, world.position3d_pool[e].z);
-    glm::vec3 half(w * 0.5f, h * 0.5f, d * 0.5f);
+        glm::vec3 center(world.position3d_pool[e].x, world.position3d_pool[e].y, world.position3d_pool[e].z);
+        glm::vec3 half(w * 0.5f, h * 0.5f, d * 0.5f);
 
-    SDL_Color color = {255, 255, 255, 255};
-    if (world.has_selection[e] && world.selection_pool[e].isSelected) {
-    color = world.selection_pool[e].selectionColor;
-    }
-    Engine3D::renderEntityCubeOutline3D(renderer, g_editorCamera3D, center, half, color);
+        SDL_Color color = {255, 255, 255, 255};
+        if (world.has_selection[e] && world.selection_pool[e].isSelected) {
+            color = world.selection_pool[e].selectionColor;
+            }
+        Engine3D::renderEntityCubeOutline3D(renderer, g_editorCamera3D, center, half, color);
     }
 
     // Render Collider3D outlines. Kept as its own pass, in its own color
@@ -1366,20 +1368,20 @@ int main(int argc, char* argv[]) {
 
     // Render GridMap3D entities
     for (Entity e = 0; e < world.entity_count; ++e) {
-    if (!world.has_position3d[e] || !world.has_gridmap3d[e]) continue;
-    auto& gm = world.gridmap3d_pool[e];
-    if (gm.cells.empty()) continue;
+        if (!world.has_position3d[e] || !world.has_gridmap3d[e]) continue;
+        auto& gm = world.gridmap3d_pool[e];
+        if (gm.cells.empty()) continue;
 
-    glm::vec3 entityPos(world.position3d_pool[e].x, world.position3d_pool[e].y, world.position3d_pool[e].z);
-    for (const auto& cell : gm.cells) {
-        float cx = entityPos.x + cell.x * gm.cellWidth + cell.offX;
-        float cy = entityPos.y + cell.y * gm.cellHeight + cell.offY;
-        float cz = entityPos.z + cell.z * gm.cellDepth + cell.offZ;
-        glm::vec3 cellCenter(cx, cy, cz);
-        glm::vec3 cellHalf(gm.cellWidth * 0.5f, gm.cellHeight * 0.5f, gm.cellDepth * 0.5f);
-        Engine3D::renderEntityCubeOutline3D(renderer, g_editorCamera3D, cellCenter, cellHalf, {100, 200, 255, 255});
-    }
-    }
+        glm::vec3 entityPos(world.position3d_pool[e].x, world.position3d_pool[e].y, world.position3d_pool[e].z);
+        for (const auto& cell : gm.cells) {
+            float cx = entityPos.x + cell.x * gm.cellWidth + cell.offX;
+            float cy = entityPos.y + cell.y * gm.cellHeight + cell.offY;
+            float cz = entityPos.z + cell.z * gm.cellDepth + cell.offZ;
+            glm::vec3 cellCenter(cx, cy, cz);
+            glm::vec3 cellHalf(gm.cellWidth * 0.5f, gm.cellHeight * 0.5f, gm.cellDepth * 0.5f);
+            Engine3D::renderEntityCubeOutline3D(renderer, g_editorCamera3D, cellCenter, cellHalf, {100, 200, 255, 255});
+        }
+     }      
     }
     if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode2D) {
     SDL_SetRenderDrawColor(renderer, 30, 30, 35, 255);
@@ -1426,7 +1428,7 @@ int main(int argc, char* argv[]) {
     }
     }
     fileExplorer.tick(delta_time); if (fileExplorer.isOpen()) fileExplorer.render();
-    if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode2D) {
+    if constexpr (g_canvasMode == Engine3D::CanvasMode::Mode3D) {
     if (meshLoaded) {
     testTransform.rotation.y += delta_time * 30.0f;
     testTransform.position.z = 3.0f;
@@ -1434,11 +1436,12 @@ int main(int argc, char* argv[]) {
     canvasViewW, canvasViewH);
     }
     }
-    GamepadCursorIconSrcRect.x = cursorX;
-    GamepadCursorIconSrcRect.y = cursorY;
-    GamepadCursorIconDestRect.w = winW;
-    GamepadCursorIconDestRect.h = winH;
-    SDL_RenderTexture(renderer, g_resources.TextureManager.Get("GamePadCursorIcon"), &GamepadCursorIconSrcRect, &GamepadCursorIconDestRect);
+    // gamepad cursor rendering
+    GCIDRPtr->x = cursorX;
+    GCIDRPtr->y = cursorY;
+    // GCIDRPtr->w  = winW;
+    // GCIDRPtr->h = winH;
+    SDL_RenderTexture(renderer, ProjectScript_IMG_GetTexture("GamePadCursorIcon"), GCISRPtr, GCIDRPtr);
     if (showVirtualKeyboard) virtualKeyboard->render();
     SDL_RenderPresent(renderer);
     }

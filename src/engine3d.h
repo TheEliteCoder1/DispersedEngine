@@ -925,7 +925,7 @@ namespace Engine3D {
         float pitchDeg = -25.0f;
         float fovDeg = 60.0f;
         float nearPlane = 0.1f;
-        float farPlane = 100.0f;
+        float farPlane = 1000.0f;
 
         float moveSpeed = 4.0f;             // world units / sec
         float fastMoveMultiplier = 3.0f;    // while holding Shift

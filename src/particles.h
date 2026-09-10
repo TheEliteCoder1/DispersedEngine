@@ -618,6 +618,93 @@ private:
     }
 };
 
+class ParticleBurstSystem {
+public:
+    struct Burst {
+        std::vector<ParticleInstance> particles;
+        float elapsed = 0.0f;
+        float duration = 1.0f;
+        bool finished = false;
+    };
+    
+    void spawnBurst(float x, float y, const EmitterDef& def, int count) {
+        Burst b;
+        b.duration = def.lifetimeMax + 0.5f;
+        static thread_local std::mt19937 rng{ std::random_device{}() };
+        std::uniform_real_distribution<float> angleDist(0.0f, 360.0f);
+        std::uniform_real_distribution<float> speedDist(def.speedMin, def.speedMax);
+        std::uniform_real_distribution<float> lifeDist(def.lifetimeMin, def.lifetimeMax);
+        std::uniform_real_distribution<float> sizeDist(def.sizeMin, def.sizeMax);
+        
+        for (int i = 0; i < count; ++i) {
+            ParticleInstance p{};
+            p.x = x; p.y = y;
+            float angle = angleDist(rng) * 3.14159265f / 180.0f;
+            float speed = speedDist(rng);
+            p.vx = std::cos(angle) * speed;
+            p.vy = std::sin(angle) * speed;
+            p.maxLife = lifeDist(rng);
+            p.life = p.maxLife;
+            p.startSize = sizeDist(rng);
+            p.endSize = def.endSize;
+            p.size = p.startSize;
+            p.startColor = def.colorStart;
+            p.endColor = def.colorEnd;
+            p.color = p.startColor;
+            p.active = true;
+            b.particles.push_back(p);
+        }
+        bursts.push_back(std::move(b));
+    }
+    
+    void update(float dt) {
+        for (auto& b : bursts) {
+            b.elapsed += dt;
+            for (auto& p : b.particles) {
+                p.life -= dt;
+                if (p.life <= 0.0f) { p.active = false; continue; }
+                p.vy += 50.0f * dt; // gravity
+                p.x += p.vx * dt;
+                p.y += p.vy * dt;
+                float t = 1.0f - std::clamp(p.life / p.maxLife, 0.0f, 1.0f);
+                p.size = lerp(p.startSize, p.endSize, t);
+                p.color.r = (Uint8)lerp((float)p.startColor.r, (float)p.endColor.r, t);
+                p.color.g = (Uint8)lerp((float)p.startColor.g, (float)p.endColor.g, t);
+                p.color.b = (Uint8)lerp((float)p.startColor.b, (float)p.endColor.b, t);
+                p.color.a = (Uint8)lerp((float)p.startColor.a, (float)p.endColor.a, t);
+            }
+            if (b.elapsed >= b.duration) b.finished = true;
+        }
+        bursts.erase(std::remove_if(bursts.begin(), bursts.end(), [](const Burst& b){ return b.finished; }), bursts.end());
+    }
+    
+    void render(SDL_Renderer* renderer, const Tools::Camera& camera, bool screenSpace = false) {
+        std::vector<SDL_Vertex> vertexScratch;
+        std::vector<int> indexScratch;
+        for (auto& b : bursts) {
+            for (auto& p : b.particles) {
+                if (!p.active) continue;
+                float half = std::max(p.size, 0.5f) * 0.5f * (screenSpace ? 1.0f : camera.zoom);
+                SDL_FPoint c = screenSpace ? SDL_FPoint{p.x, p.y} : camera.worldToScreen(p.x, p.y);
+                SDL_FColor col = { p.color.r/255.0f, p.color.g/255.0f, p.color.b/255.0f, p.color.a/255.0f };
+                int base = (int)vertexScratch.size();
+                vertexScratch.push_back({{c.x-half, c.y-half}, col, {0,0}});
+                vertexScratch.push_back({{c.x+half, c.y-half}, col, {1,0}});
+                vertexScratch.push_back({{c.x+half, c.y+half}, col, {1,1}});
+                vertexScratch.push_back({{c.x-half, c.y+half}, col, {0,1}});
+                indexScratch.push_back(base+0); indexScratch.push_back(base+1); indexScratch.push_back(base+2);
+                indexScratch.push_back(base+0); indexScratch.push_back(base+2); indexScratch.push_back(base+3);
+            }
+        }
+        if (!vertexScratch.empty()) {
+            SDL_RenderGeometry(renderer, nullptr, vertexScratch.data(), (int)vertexScratch.size(), indexScratch.data(), (int)indexScratch.size());
+        }
+    }
+
+public:
+    std::vector<Burst> bursts;
+    static float lerp(float a, float b, float t) { return a + (b - a) * t; }
+};
 } // namespace Particles
 
 // ============================================================================
