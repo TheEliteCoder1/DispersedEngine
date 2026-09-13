@@ -20,6 +20,20 @@
             "loop": true,
             "name": "MathHorseMen_BluePulse",
             "speed": 12.0
+        },
+        {
+            "frameHeight": 0.0,
+            "frameWidth": 0.0,
+            "imageFrames": [
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemenFadeOut1.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemenFadeOut2.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemenFadeOut3.svg",
+                "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/BluePulse_MathHorsemenFadeOut4.svg"
+            ],
+            "isPlaying": false,
+            "loop": false,
+            "name": "MathHorseMen_BluePulse_FadeOut",
+            "speed": 4.0
         }
     ]
 }

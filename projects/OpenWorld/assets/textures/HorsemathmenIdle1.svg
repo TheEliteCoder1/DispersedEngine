@@ -23,11 +23,11 @@
      inkscape:pagecheckerboard="0"
      inkscape:deskcolor="#d1d1d1"
      inkscape:document-units="mm"
-     inkscape:zoom="1.9275803"
-     inkscape:cx="78.595947"
-     inkscape:cy="159.00764"
+     inkscape:zoom="30.841285"
+     inkscape:cx="79.130945"
+     inkscape:cy="38.503584"
      inkscape:window-width="1920"
-     inkscape:window-height="967"
+     inkscape:window-height="997"
      inkscape:window-x="-8"
      inkscape:window-y="-8"
      inkscape:window-maximized="1"
@@ -1285,5 +1285,23 @@
        cx="22.478216"
        cy="10.127481"
        r="0.14862131" />
+    <rect
+       style="fill:#060000;stroke-width:0.499999;stroke-opacity:0.248"
+       id="rect1"
+       width="1.0637797"
+       height="0.28310266"
+       x="20.385035"
+       y="5.1940589"
+       ry="0.042822432"
+       transform="rotate(12.030854)" />
+    <rect
+       style="fill:#060000;stroke-width:0.499999;stroke-opacity:0.248"
+       id="rect1-8"
+       width="1.0637797"
+       height="0.28310266"
+       x="19.045435"
+       y="14.299353"
+       ry="0.042822432"
+       transform="rotate(-13.316733)" />
   </g>
 </svg>

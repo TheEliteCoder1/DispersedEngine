@@ -22,8 +22,24 @@ namespace {
 
 
 std::array<Entity, 3> powerupEntities;
+std::array<Entity, 3> woundedEntities;
 bool bluePulseCreated = false;
 bool damagePlayer = false;
+
+// Guards for the attack/idle branches in onUpdate(). Both branches below
+// used to call AnimationState::play(name, /*resetFrame=*/true, ...) once
+// PER FRAME rather than once on transition. Since resetFrame=true resets
+// currentFrame/timer/loopsCompleted back to 0 every time it's called,
+// calling it every frame meant the clip could never advance past frame 0
+// and loopsCompleted could never reach loopLimit -- which looked like a
+// freeze and also silently prevented onLoopCompleted/onAllLoopsCompleted
+// from ever firing (since the loop could never be observed as "completed").
+// These flags make sure play() with resetFrame=true only fires once, on
+// the actual state transition, matching bluePulseCreated's reset pattern.
+bool idleStarted = false;
+bool attackStarted = false;
+
+
 
 
 void BattleScript::onStart() {
@@ -37,9 +53,14 @@ void BattleScript::onStart() {
     // the first battle ever fought and every subsequent battle would find
     // bluePulseCreated already true, permanently skipping pulse creation.
     bluePulseCreated = false;
+    idleStarted = false;
+    attackStarted = false;
     powerupEntities[0] = (Entity)-1;
     powerupEntities[1] = (Entity)-1;
     powerupEntities[2] = (Entity)-1;
+    woundedEntities[0] = (Entity)-1;
+    woundedEntities[1] = (Entity)-1;
+    woundedEntities[2] = (Entity)-1;
 
     // Defaults in case GameContext::battleEncounter wasn't populated (e.g.
     // this scene got loaded directly rather than via GameScript's
@@ -100,6 +121,57 @@ void BattleScript::onStart() {
     hasShownClashText = false;
 }
 
+
+void BattleScript::spawnContenderClash(float screenW, float screenH, const std::string& text) {
+    Tools::AnimatedText at;
+    at.text = text;
+    at.totalDuration = 2.5f;
+    at.popInDuration = 0.5f; // Fly in from right
+    at.holdDuration = 1.0f;  // Slow down / hold in center
+    at.driftDuration = 1.0f; // Drift left and fade
+    
+    // Positions: Start off-screen right, hold center, end off-screen left
+    at.startPos = {screenW + 400.0f, screenH * 0.5f}; 
+    at.holdPos  = {screenW * 0.5f, screenH * 0.5f};   
+    at.endPos   = {-400.0f, screenH * 0.5f};          
+    
+    at.startScale = 1.0f;
+    at.popScale = 1.25f; // Slight scale bump when it hits the center
+    at.holdScale = 1.0f;
+    
+    at.hasBackgroundBar = true;
+    at.barColor = {255, 255, 255, 150};
+    at.textColor = {0, 0, 255, 255};
+    
+    animatedTextSystem.spawn(at);
+}
+
+
+void BattleScript::spawnBottomBarText(float screenW, float screenH, const std::string& text, float duration, SDL_Color textColor, SDL_Color barColor) {
+    Tools::AnimatedText at;
+    at.text = text;
+    at.totalDuration = duration;
+    at.popInDuration = 0.0f;
+    at.holdDuration = duration > 0.5f ? duration - 0.5f : 0.0f;
+    at.driftDuration = duration > 0.5f ? 0.5f : duration;
+    
+    at.startPos = {screenW * 0.5f, screenH * 0.85f};
+    at.holdPos  = {screenW * 0.5f, screenH * 0.85f};
+    at.endPos   = {screenW * 0.5f, screenH * 0.85f};
+    
+    at.startScale = 1.0f;
+    at.popScale = 1.0f;
+    at.holdScale = 1.0f;
+    
+    at.hasBackgroundBar = true;
+    at.barColor = barColor;
+    at.textColor = textColor;
+    at.barWidth = screenW * 0.8f; // Spans the bottom
+    at.barHeight = 60.0f;
+    
+    animatedTextSystem.spawn(at);
+}
+
 void BattleScript::onUpdate(float dt) {
     if (!(ctx && ctx->renderer && ctx->window)) return;
 
@@ -111,7 +183,7 @@ void BattleScript::onUpdate(float dt) {
         // --- Spawn "Contender's Clash!" Text and Particles ---
         if (!hasShownClashText) {
             hasShownClashText = true;
-            animatedText.spawnContenderClash(w, h);
+            spawnContenderClash(w, h);
             
             // Configure golden spark particles
             Particles::EmitterDef sparkDef;
@@ -132,93 +204,80 @@ void BattleScript::onUpdate(float dt) {
         
     }
 
-    if (animatedText.instances.size() == 0 && particleBursts.bursts.size() == 0 && hasShownClashText)
+    if (animatedTextSystem.instances.size() == 0 && particleBursts.bursts.size() == 0 && hasShownClashText)
     {
-        if (ctx->battleEncounter.challengerEntity != (Entity)-1 && ctx->battleEncounter.challengerEntity < ctx->scene->world.entity_count && ctx->scene->world.has_animation_state[ctx->battleEncounter.challengerEntity]) {
-            ctx->scene->world.animation_state_pool[ctx->battleEncounter.challengerEntity].play("attack", false, false);
-        }
 
-        if (!ctx->scene->world.animation_state_pool[ctx->battleEncounter.challengerEntity].active().isPlaying && !bluePulseCreated)
-        {
-            // NOTE: the challenger's on-screen position is NOT
-            // position_pool[challengerEntity] -- that component still holds
-            // whatever overworld coordinates were carried over by
-            // copy_entity() in change_scene(). onDraw() never writes the
-            // battle-layout screen position back into it; it computes
-            // rightX/barY2 fresh each frame purely from window size and
-            // draws the challenger sprite there directly. Anchoring the
-            // pulse off position_pool would place it near the stale
-            // overworld coordinates -- almost always off the visible
-            // window -- even with a valid, correctly-loaded texture. So we
-            // recompute the same rightX/barY2 anchor onDraw() uses, here,
-            // and offset the pulse from that instead.
-            float rightX = w - kSideMargin - kBarWidth;
-            float barY2  = h * 0.5f;
 
-            Entity e = ctx->scene->world.create_entity();
-            ctx->scene->world.add_z_index(e);
-            ctx->scene->world.add_metadata(e);
-            ctx->scene->world.add_position(e);
-            ctx->scene->world.add_rotation(e); // needed for useExplicitRotations to have anywhere to write to -- both CutsceneTrack::writeRotation() and render_entity_animation() gate on has_rotation[e]
-            ctx->scene->world.z_index_pool[e].z = 0;
-            ctx->scene->world.metadata_pool[e].name = "MathHorseMan_BluePulse";
-            ctx->scene->world.position_pool[e] = {rightX - 57.0f, barY2 + 87.0f};
-            ctx->scene->world.add_animation_state(e);
-            std::string fp = "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/MathHorseMen_BluePulse.animres";
-            ctx->scene->world.assign_animation_resource(e, fp);
-            powerupEntities[0] = e; 
-            ctx->scene->world.animation_state_pool[e].play("MathHorseMen_BluePulse");
-            enemyPowerupTracks.target = e;
-            // The approacher's actual on-screen position is NOT
-            // position_pool[approacherEntity] -- same trap as the
-            // challenger/pulse-anchor issue earlier: that component still
-            // holds whatever overworld coordinates were carried over by
-            // copy_entity(). onDraw() never writes the battle-layout
-            // screen position back into it; it draws the approacher at a
-            // hardcoded {leftX, barY + 50.0f} computed fresh each frame.
-            // Aiming the cutscene at position_pool sent the pulse flying
-            // toward wherever the approacher happened to be standing on
-            // the overworld map instead. Recompute the same anchor here.
-            float leftX = kSideMargin;
-            float barY  = h * kBarYFrac;
-            enemyPowerupTracks.points = {
-                {ctx->scene->world.position_pool[e].x, ctx->scene->world.position_pool[e].y},
-                {ctx->scene->world.position_pool[e].x-100.0f, ctx->scene->world.position_pool[e].y-100.0f},
-                {ctx->scene->world.position_pool[e].x-100.0f, ctx->scene->world.position_pool[e].y+50.0f},
-                {leftX + 25.0f, barY + 100.0f}
-            };
-            // durations.size() must equal points.size() - 1 (one entry per
-            // segment). This was missing entirely, which left durations
-            // empty -- Update()'s guard `segIdx >= (int)durations.size()`
-            // (0 >= 0) then tripped on the very first tick after Play(),
-            // marking the track finished before it ever moved a single
-            // frame. That's why the pulse just sat at its spawn position.
-            enemyPowerupTracks.durations = {
-                0.5f,
-                0.5f,
-                1.0f
-            };
-            enemyPowerupTracks.useExplicitRotations = true;
-            // rotations needs one entry per point (4), not per segment (3)
-            // -- as written, the last segment (points[2] -> points[3]) had
-            // no rotations[3] to ease toward, so the bounds check in
-            // Update() (segIdx + 1 < rotations.size()) silently skipped
-            // rotating for that whole final leg.
-            enemyPowerupTracks.rotations = {
-                -45,
-                45,
-                0,
-                0
-            };
-            enemyPowerupTracks.Play();
-            bluePulseCreated = true;
-        }
 
+
+        // if (!attackStarted && ctx->battleEncounter.challengerEntity != (Entity)-1 && ctx->battleEncounter.challengerEntity < ctx->scene->world.entity_count && ctx->scene->world.has_animation_state[ctx->battleEncounter.challengerEntity]) {
+        //     attackStarted = true;
+        //     idleStarted = false; // allow re-entry into the idle branch later if this state ever revisits it
+
+        //     ctx->scene->world.animation_state_pool[ctx->battleEncounter.challengerEntity].play("attack", true, true);
+        //     ctx->scene->world.animation_state_pool[ctx->battleEncounter.challengerEntity].active().loopLimit = 1;
+        
+        //     ctx->scene->world.animation_state_pool[ctx->battleEncounter.challengerEntity].active().onLoopCompleted = [this, w, h]() {
+        //         if (!bluePulseCreated) {
+        //             float rightX = w - kSideMargin - kBarWidth;
+        //             float barY2  = h * 0.5f;
+
+        //             Entity e = ctx->scene->world.create_entity();
+        //             ctx->scene->world.add_z_index(e);
+        //             ctx->scene->world.add_metadata(e);
+        //             ctx->scene->world.add_position(e);
+        //             ctx->scene->world.add_rotation(e); // needed for useExplicitRotations to have anywhere to write to -- both CutsceneTrack::writeRotation() and render_entity_animation() gate on has_rotation[e]
+        //             ctx->scene->world.z_index_pool[e].z = 0;
+        //             ctx->scene->world.metadata_pool[e].name = "MathHorseMan_BluePulse";
+        //             ctx->scene->world.position_pool[e] = {rightX - 57.0f, barY2 + 87.0f};
+        //             ctx->scene->world.add_animation_state(e);
+        //             std::string fp = "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/MathHorseMen_BluePulse.animres";
+        //             ctx->scene->world.assign_animation_resource(e, fp);
+        //             powerupEntities[0] = e; 
+        //             ctx->scene->world.animation_state_pool[e].play("MathHorseMen_BluePulse");
+        //             enemyPowerupTracks.target = e;
+        //             float leftX = kSideMargin;
+        //             float barY  = h * kBarYFrac;
+        //             enemyPowerupTracks.points = {
+        //                 {ctx->scene->world.position_pool[e].x, ctx->scene->world.position_pool[e].y},
+        //                 {ctx->scene->world.position_pool[e].x-100.0f, ctx->scene->world.position_pool[e].y-100.0f},
+        //                 {ctx->scene->world.position_pool[e].x-100.0f, ctx->scene->world.position_pool[e].y+50.0f},
+        //                 {leftX + 25.0f, barY + 100.0f}
+        //             };
+        //             enemyPowerupTracks.durations = {
+        //                 0.5f,
+        //                 0.5f,
+        //                 1.0f
+        //             };
+        //             enemyPowerupTracks.useExplicitRotations = true;
+        //             enemyPowerupTracks.rotations = {
+        //                 -45,
+        //                 45,
+        //                 0,
+        //                 0
+        //             };
+        //             enemyPowerupTracks.Play();
+        //             bluePulseCreated = true;
+        //             ctx->scene->world.animation_state_pool[ctx->battleEncounter.challengerEntity].play("idle", true, true);
+        //         }
+        //     };
+        // }
     } else {
-        if (ctx->battleEncounter.approacherEntity != (Entity)-1 && ctx->battleEncounter.approacherEntity < ctx->scene->world.entity_count && ctx->scene->world.has_animation_state[ctx->battleEncounter.approacherEntity])
-            ctx->scene->world.animation_state_pool[ctx->battleEncounter.approacherEntity].play("idle");
-        if (ctx->battleEncounter.challengerEntity != (Entity)-1 && ctx->battleEncounter.challengerEntity < ctx->scene->world.entity_count && ctx->scene->world.has_animation_state[ctx->battleEncounter.challengerEntity])
-            ctx->scene->world.animation_state_pool[ctx->battleEncounter.challengerEntity].play("idle");
+        // Same fix as the attack branch above: play() defaults to
+        // resetFrame=true, so calling it every frame while the clash
+        // text/particles are still animating was resetting the idle clip
+        // back to frame 0 every frame -- freezing the idle animation for
+        // the entire duration of the text animation. Only (re)start idle
+        // once, the first frame this branch is entered.
+        if (!idleStarted) {
+            idleStarted = true;
+            attackStarted = false; // allow re-entry into the attack branch later if this state ever revisits it
+
+            if (ctx->battleEncounter.approacherEntity != (Entity)-1 && ctx->battleEncounter.approacherEntity < ctx->scene->world.entity_count && ctx->scene->world.has_animation_state[ctx->battleEncounter.approacherEntity])
+                ctx->scene->world.animation_state_pool[ctx->battleEncounter.approacherEntity].play("battle_idle");
+            if (ctx->battleEncounter.challengerEntity != (Entity)-1 && ctx->battleEncounter.challengerEntity < ctx->scene->world.entity_count && ctx->scene->world.has_animation_state[ctx->battleEncounter.challengerEntity])
+                ctx->scene->world.animation_state_pool[ctx->battleEncounter.challengerEntity].play("idle");
+        }
     }
     
     elapsed += dt;
@@ -226,9 +285,11 @@ void BattleScript::onUpdate(float dt) {
     // Tick the  systems
     leftHealthbar.update(dt);
     rightHealthbar.update(dt);
-    animatedText.update(dt);
+    animatedTextSystem.update(dt);
     particleBursts.update(dt);
     enemyPowerupTracks.Update(dt);
+
+    
 
     if (enemyPowerupTracks.finished && !enemyPowerupTracks.wasFinished)
     {
@@ -240,18 +301,37 @@ void BattleScript::onUpdate(float dt) {
                 damagePlayer = true;
                 auto& approacherAnim = ctx->scene->world.animation_state_pool[ctx->battleEncounter.approacherEntity];
                 
-                approacherAnim.play("hurt");
-                approacherAnim.active().limitLoopsTo(3); 
+                approacherAnim.play("hurt", true, true);
+                approacherAnim.active().loopLimit = 1;
 
-                approacherAnim.active().onLoopCompleted = [this]() {
-                    leftHealthbar.triggerShake(10.0f, 1.0f);
+                approacherAnim.active().onLoopCompleted = [this, h]() {
                     leftHealthbar.damage(10.0f);
+                    leftHealthbar.triggerShake(5.0f, 0.5f);
                     Tools::ActivateQuickShock(ctx->gamepad);
+                    Entity e = ctx->scene->world.create_entity();
+                    ctx->scene->world.add_z_index(e);
+                    ctx->scene->world.add_metadata(e);
+                    ctx->scene->world.add_position(e);
+                    ctx->scene->world.z_index_pool[e].z = 0;
+                    ctx->scene->world.metadata_pool[e].name = "battleScar";
+                    float leftX = kSideMargin;
+                    float barY  = h * kBarYFrac;
+                    ctx->scene->world.position_pool[e] = {leftX+25.0f, barY+100.0f};
+                    ctx->scene->world.add_texture_ref(e);
+                    ctx->scene->world.texture_ref_pool[e].resourceName = "battleScar";
+                    woundedEntities[0] = e; 
+                };
+
+                approacherAnim.active().onAllLoopsCompleted = [this]() {
+                    ctx->scene->world.animation_state_pool[ctx->battleEncounter.approacherEntity].play("battle_idle");
+                    ctx->scene->world.animation_state_pool[powerupEntities[0]].play("MathHorseMen_BluePulse_FadeOut", true, false);
                 };
 
                 break;
         }
     }
+
+
 }
 
 void BattleScript::onDraw() {
@@ -350,11 +430,11 @@ void BattleScript::onDraw() {
             render_entity_animation(ctx->renderer, world, e, world.position_pool[e].x, world.position_pool[e].y, ctx->camera.zoom);
     }
 
-    // if (ctx->scene->world.animation_state_pool[ctx->battleEncounter.approacherEntity].active().loopsCompleted <= 3 && damagePlayer)
-    // {
-        // leftHealthbar.damage(10.0f);
-        // Tools::ActivateQuickShock(ctx->gamepad);
-    // }      
+    for (Entity e : woundedEntities)
+    {
+        if (e != (Entity)-1)
+            render_entity_texture(ctx->renderer, world, e, world.position_pool[e].x, world.position_pool[e].y, ctx->camera.zoom);
+    }
 
 
     // --- Name labels above each bar ---------------------------------------
@@ -374,7 +454,7 @@ void BattleScript::onDraw() {
     }
 
     particleBursts.render(ctx->renderer, ctx->camera, true); 
-    animatedText.render(ctx->renderer, ctx->textEngine, font);
+    animatedTextSystem.render(ctx->renderer, ctx->textEngine, font);
     
 }
 
@@ -387,7 +467,5 @@ void BattleScript::showAttackResultText(const std::string& text) {
     if (!ctx || !ctx->window) return;
     int winW, winH;
     SDL_GetWindowSize(ctx->window, &winW, &winH);
-    
-    // Spawns a static bar at the bottom with the text centered
-    animatedText.spawnBottomBarText((float)winW, (float)winH, text, 2.5f, {255,255,255,255}, {0,0,0,180});
+    spawnBottomBarText((float)winW, (float)winH, text, 2.5f, {255,255,255,255}, {0,0,0,180});
 }

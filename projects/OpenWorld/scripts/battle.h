@@ -41,7 +41,7 @@ public:
 private:
     float elapsed = 0.0f;
 
-    Tools::AnimatedTextSystem animatedText;
+    Tools::AnimatedTextSystem animatedTextSystem;
     Particles::ParticleBurstSystem particleBursts;
     bool hasShownClashText = false;
 
@@ -61,6 +61,11 @@ private:
     Tools::CutsceneTrack enemyPowerupTracks;
     int playerPowerupTracksFinished = 0;
     int enemyPowerupTracksFinished = 0;
+
+    void spawnContenderClash(float screenW, float screenH, const std::string& text = "Contender's Clash!"); 
+
+    void spawnBottomBarText(float screenW, float screenH, const std::string& text, float duration = 2.0f, SDL_Color textColor = {255,255,255,255}, SDL_Color barColor = {0,0,0,160});
+
 
     // Cached from ctx->battleEncounter.biomeTexture in onStart(), since that
     // struct is cleared (battleEncounter.valid = false) right after being

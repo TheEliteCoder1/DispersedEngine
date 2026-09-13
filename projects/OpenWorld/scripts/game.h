@@ -262,13 +262,10 @@ public:
 
  };
 
-    // your default speed is 300.0f
-    float normalSpeed = 1000.0f;
-    float moveSpeed = 1000.0f;
-
-
-
-    float slowSpeed = 150.0f;
+    // your default speed is 300.0f, and slow peed is 150.0f
+    float normalSpeed = 2000.0f;
+    float moveSpeed = 2000.0f;
+    float slowSpeed = 2000.0f;
 
 
 

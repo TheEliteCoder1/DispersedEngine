@@ -22,8 +22,8 @@
                 "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenIdle2.svg",
                 "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenIdle3.svg"
             ],
-            "isPlaying": true,
-            "loop": true,
+            "isPlaying": false,
+            "loop": false,
             "name": "idle",
             "speed": 6.0
         },
@@ -35,8 +35,8 @@
                 "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenActive2.svg",
                 "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenActive3.svg"
             ],
-            "isPlaying": true,
-            "loop": true,
+            "isPlaying": false,
+            "loop": false,
             "name": "active",
             "speed": 6.0
         },
@@ -51,8 +51,8 @@
                 "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenAttack5.svg",
                 "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/assets/textures/HorsemathmenAttack6.svg"
             ],
-            "isPlaying": true,
-            "loop": true,
+            "isPlaying": false,
+            "loop": false,
             "name": "attack",
             "speed": 6.0
         }

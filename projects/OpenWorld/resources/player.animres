@@ -112,12 +112,28 @@
                 "assets\\textures\\player-hurt-3.svg",
                 "assets\\textures\\player-hurt-4.svg",
                 "assets\\textures\\player-hurt-5.svg",
-                "assets\\textures\\player-hurt-6.svg"
+                "assets\\textures\\player-hurt-6.svg",
+                "assets\\textures\\player-hurt-7.svg",
+                "assets\\textures\\player-hurt-8.svg"
             ],
             "isPlaying": false,
             "loop": true,
             "name": "hurt",
             "speed": 8.0
+        },
+        {
+            "frameHeight": 128.0,
+            "frameWidth": 64.0,
+            "imageFrames": [
+                "assets\\textures\\player-battle-1.svg",
+                "assets\\textures\\player-battle-2.svg",
+                "assets\\textures\\player-battle-3.svg",
+                "assets\\textures\\player-battle-4.svg"
+            ],
+            "isPlaying": false,
+            "loop": true,
+            "name": "battle_idle",
+            "speed": 4.0
         }
     ]
 }

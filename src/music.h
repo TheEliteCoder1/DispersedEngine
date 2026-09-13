@@ -68,7 +68,7 @@ namespace MusicAndSfx {
                 SDL_DestroyProperties(props);
             }
 
-            void PlayLoopingSfx(const std::string& name, float volume = 1.0f, float pitch = 1.0f)
+            void PlayLoopingSfx(const std::string& name, float volume = 1.0f, float pitch = 1.0f, int loop_count = -1)
             {
                 auto sample = m_samples.find(name);
                 if(sample == m_samples.end()) return;
@@ -84,7 +84,7 @@ namespace MusicAndSfx {
                 MIX_SetTrackFrequencyRatio(track, pitch);
 
                 SDL_PropertiesID props = SDL_CreateProperties();
-                SDL_SetNumberProperty(props, MIX_PROP_PLAY_LOOPS_NUMBER, -1);   // infinite loops
+                SDL_SetNumberProperty(props, MIX_PROP_PLAY_LOOPS_NUMBER, loop_count);   // infinite loops
 
                 MIX_SetTrackLoops(track, -1);   // keep for safety
                 m_activeSfx[name] = track;
@@ -116,7 +116,7 @@ namespace MusicAndSfx {
             }
 
             // Plays a song with an option to loop indefinitely
-            void PlaySong(const std::string& name, bool loop = true, float volume = 0.5f, float pitch = 1.0f) {
+            void PlaySong(const std::string& name, bool loop = true, float volume = 0.5f, float pitch = 1.0f, int loop_count = -1) {
                 auto it = m_samples.find(name);
                 if (it == m_samples.end()) return;
 
@@ -130,7 +130,7 @@ namespace MusicAndSfx {
                 SDL_PropertiesID props = SDL_CreateProperties();
                 if (loop) {
                     // Tell SDL3_mixer to repeat this track infinitely
-                    SDL_SetNumberProperty(props, MIX_PROP_PLAY_LOOPS_NUMBER, -1);
+                    SDL_SetNumberProperty(props, MIX_PROP_PLAY_LOOPS_NUMBER, loop_count);
                 }
 
                 m_activeSongs[name] = track;

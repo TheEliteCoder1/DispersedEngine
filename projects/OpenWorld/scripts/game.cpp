@@ -1657,9 +1657,6 @@ void GameScript::handleSensorTouch(b2ShapeId sensorShape, b2ShapeId visitorShape
         return;
 
 
-
-
-
     // Verify puddle
     if (!ctx->scene->world.has_metadata[sensorEntity])
         return;
@@ -3285,9 +3282,7 @@ int main(int argc, char *argv[])
 
     ProjectScript_IMG_LoadTexture("foodbarIcon", "OpenWorld/assets/textures/foodbarIcon.svg");
 
-
-
-    ProjectScript_IMG_LoadTexture("waterbarIcon", "OpenWorld/assets/textures/waterbarIcon.svg");
+    ProjectScript_IMG_LoadTexture("battleScar", "OpenWorld/assets/textures/battleScar.svg");
 
     ProjectScript_IMG_LoadTexture("path", "OpenWorld/assets/textures/path.svg");
 

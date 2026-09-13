@@ -395,7 +395,10 @@ namespace Components {
 
         // Use std::function so it can capture variables like `ctx` or `this`
         std::function<void()> onLoopCompleted;
+        // onOneTimeStarted dosent exist, so just use counted loops for 1 time
         std::function<void()> onLoopStarted;
+        std::function<void()> onAllLoopsCompleted;
+        std::function<void()> onOneTimeFinished;
 
         void limitLoopsTo(int n) {
             loop = true;
@@ -468,6 +471,7 @@ namespace Components {
                         clips[i].isPlaying = true;
                     }
                     clips[i].loop = loop;
+
                     return true;
                 }
             }
@@ -1165,60 +1169,11 @@ namespace Tools {
     }
 
     class AnimatedTextSystem {
-    public:
+    
+        public:
+
         void spawn(const AnimatedText& config) {
             instances.push_back(config);
-        }
-        
-        // Spawns the specific "Contender's Clash!" effect (Prodigy style)
-        void spawnContenderClash(float screenW, float screenH, const std::string& text = "Contender's Clash!") {
-            AnimatedText at;
-            at.text = text;
-            at.totalDuration = 2.5f;
-            at.popInDuration = 0.5f; // Fly in from right
-            at.holdDuration = 1.0f;  // Slow down / hold in center
-            at.driftDuration = 1.0f; // Drift left and fade
-            
-            // Positions: Start off-screen right, hold center, end off-screen left
-            at.startPos = {screenW + 400.0f, screenH * 0.5f}; 
-            at.holdPos  = {screenW * 0.5f, screenH * 0.5f};   
-            at.endPos   = {-400.0f, screenH * 0.5f};          
-            
-            at.startScale = 1.0f;
-            at.popScale = 1.15f; // Slight scale bump when it hits the center
-            at.holdScale = 1.0f;
-            
-            at.hasBackgroundBar = true;
-            at.barColor = {0, 0, 0, 180};
-            at.textColor = {255, 220, 100, 255}; // Gold/Yellow
-            
-            spawn(at);
-        }
-        
-        // Spawns a static bottom bar text (e.g. for attack results)
-        void spawnBottomBarText(float screenW, float screenH, const std::string& text, float duration = 2.0f, SDL_Color textColor = {255,255,255,255}, SDL_Color barColor = {0,0,0,160}) {
-            AnimatedText at;
-            at.text = text;
-            at.totalDuration = duration;
-            at.popInDuration = 0.0f;
-            at.holdDuration = duration > 0.5f ? duration - 0.5f : 0.0f;
-            at.driftDuration = duration > 0.5f ? 0.5f : duration;
-            
-            at.startPos = {screenW * 0.5f, screenH * 0.85f};
-            at.holdPos  = {screenW * 0.5f, screenH * 0.85f};
-            at.endPos   = {screenW * 0.5f, screenH * 0.85f};
-            
-            at.startScale = 1.0f;
-            at.popScale = 1.0f;
-            at.holdScale = 1.0f;
-            
-            at.hasBackgroundBar = true;
-            at.barColor = barColor;
-            at.textColor = textColor;
-            at.barWidth = screenW * 0.8f; // Spans the bottom
-            at.barHeight = 60.0f;
-            
-            spawn(at);
         }
 
         void update(float dt) {
@@ -1675,6 +1630,58 @@ namespace Tools {
                 }
             }
         }
+    };
+
+    // only for texture ref component not for animations (change transparency manually)
+    class TextureTween
+    {
+        public:
+            SDL_Texture* texture = nullptr;
+            float duration = 0.0f;
+            float elapsedTime = 0.0f;
+            bool active = true;
+            bool fadingIn = true;
+
+            std::function<void()> onComplete;
+
+            TextureTween(
+                float duration, bool fadingIn
+            ) : duration(duration), fadingIn(fadingIn) 
+            {   
+            }
+
+            void enableTextureTransparency()
+            {
+                // initial state
+                SDL_SetTextureAlphaMod(texture, fadingIn ? 0 : 255);
+            }
+
+            void update(float dt)
+            {
+                if (!active || !texture || !onComplete) return;
+
+
+                // update progress with elapsed 
+                // time from delta time
+                // and use the duratiom
+                elapsedTime += dt;
+                float progress = elapsedTime / duration;
+                if (progress >= 1.0f)
+                {
+                    progress = 1.0f;
+                    active = false;
+                }
+
+                float alphaFloat = fadingIn ? progress : (1.0f - progress);
+                Uint8 alphaUint = (Uint8)(alphaFloat * 255.0f);
+
+                SDL_SetTextureAlphaMod(texture, alphaUint);
+
+                if (!active && onComplete != nullptr)
+                {
+                    onComplete();
+                }
+            }
     };
 
     class Healthbar {
@@ -9314,6 +9321,9 @@ inline void animation_system(ECSWorld& world, float dt)
                             clip.currentFrame = frameCount - 1;
                             clip.isPlaying = false;
                             clip.timer = 0.0f;
+                            if (clip.onAllLoopsCompleted) {
+                                clip.onAllLoopsCompleted();
+                            }
                         } else {
                             clip.currentFrame = 0;
                             if (clip.onLoopStarted) {
@@ -9324,6 +9334,9 @@ inline void animation_system(ECSWorld& world, float dt)
                         clip.currentFrame = frameCount - 1; // hold on the last frame
                         clip.isPlaying = false;
                         clip.timer = 0.0f;
+                        if (clip.onOneTimeFinished) {
+                            clip.onOneTimeFinished();
+                        }
                     }
                 } else {
                     clip.currentFrame++;

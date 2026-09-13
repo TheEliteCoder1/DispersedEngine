@@ -6,3 +6,4 @@
 // -ECS uses (Entity)-1 which is the same as (uint32_t)-1 for CPU patterns by setting highest possible value as default.
 // -This dosen't lead to bloat or extra allocations - it's just a well known commonly used CPU based pattern.
 // use inline to avoid duplicate definition linker erorrs for methods and functions
+// -If a header has methods or functions with optional parameters you dont respecify in the implementation/cpp file.
