@@ -9,22 +9,53 @@
 REGISTER_SCRIPT(BattleScript, "battle")
 
 namespace {
-    // Battle-arena layout constants. Kept local to this file since nothing
-    // outside battle.cpp needs them (mirrors how game.h only exposes the
-    // *shared* bar constants — healthbarOffsetY, barOffsetX, etc. — that
-    // GameContext/other scripts actually reach into).
+    // Battle-arena layout constants, expressed at the SAME 1280x720
+    // reference resolution Engine::AutoScale (engine.h) uses everywhere
+    // else. Kept local to this file since nothing outside battle.cpp needs
+    // them (mirrors how game.h only exposes the *shared* bar constants —
+    // healthbarOffsetY, barOffsetX, etc. — that GameContext/other scripts
+    // actually reach into).
     constexpr float kBarWidth   = 220.0f;
     constexpr float kBarHeight  = 22.0f;
     constexpr float kBarYFrac   = 0.6f;   // bar sits near the center of the screen
-    constexpr float kSideMargin = 350.0f;  // distance from the left/right screen edges
+    constexpr float kSideMargin = 200.0f;  // distance from the left/right screen edges, AT THE REFERENCE RESOLUTION
     constexpr float kNameGap    = 26.0f;   // vertical space for the name label above the bar
+
+    // A previous version of this file (correctly) noticed that
+    // kSideMargin/kBarWidth are flat pixel numbers with no relationship to
+    // the window, and "fixed" it by CLAMPING the margin so leftX could
+    // never cross rightX. That stopped the crossover, but on any window
+    // much narrower than the ~920px the clamp kicks in at, it also
+    // shrinks the margin all the way down toward 0 -- collapsing both
+    // combatants toward the same spot instead of keeping them apart
+    // (exactly the "challenger isn't far enough from the player" symptom
+    // on the small window screenshot).
+    //
+    // The actual fix is the same reference-resolution technique
+    // Engine::ComputeAutoScale() already uses for texture/animation size
+    // (engine.h) and Healthbar/Minimap now use for their own dimensions:
+    // treat every one of these pixel numbers as tuned for a 1280x720
+    // canvas, and multiply ALL of them -- margins, bar width, vertical
+    // offsets, the option cards' resting offsets, etc. -- by the SAME
+    // uniform scale factor every frame. Because
+    // 2*kSideMargin + kBarWidth (920px) is comfortably less than the
+    // 1280px reference width, scaling everything by the same factor can
+    // never make rightX cross leftX at ANY window size (the margin and
+    // the bar width shrink at exactly the same rate the window does), and
+    // unlike a clamp, the two combatants stay proportionally spaced apart
+    // instead of collapsing together on a small window.
+    float UiScale(float windowW, float windowH) {
+        return Engine::ComputeAutoScaleFromSize((int)windowW, (int)windowH);
+    }
 }
+
 
 
 std::array<Entity, 3> powerupEntities;
 std::array<Entity, 3> woundedEntities;
-bool bluePulseCreated = false;
-bool damagePlayer = false;
+std::array<Entity, 2> optionEntities;
+std::array<Entity, 1> optionInfoEntities;
+
 
 // Guards for the attack/idle branches in onUpdate(). Both branches below
 // used to call AnimationState::play(name, /*resetFrame=*/true, ...) once
@@ -37,9 +68,12 @@ bool damagePlayer = false;
 // These flags make sure play() with resetFrame=true only fires once, on
 // the actual state transition, matching bluePulseCreated's reset pattern.
 bool idleStarted = false;
+bool enemyAttackStarted = false;
 bool attackStarted = false;
-
-
+bool bluePulseCreated = false;
+bool shownOption1 = false;
+bool shownOption2 = false;
+bool showOptionTitle = false;
 
 
 void BattleScript::onStart() {
@@ -55,12 +89,19 @@ void BattleScript::onStart() {
     bluePulseCreated = false;
     idleStarted = false;
     attackStarted = false;
+    enemyAttackStarted = false;
+    shownOption1 = false;
+    shownOption2 = false;
+    showOptionTitle = false;
     powerupEntities[0] = (Entity)-1;
     powerupEntities[1] = (Entity)-1;
     powerupEntities[2] = (Entity)-1;
     woundedEntities[0] = (Entity)-1;
     woundedEntities[1] = (Entity)-1;
     woundedEntities[2] = (Entity)-1;
+    optionEntities[0] = (Entity)-1;
+    optionEntities[1] = (Entity)-1;
+    optionInfoEntities[0] = (Entity)-1;
 
     // Defaults in case GameContext::battleEncounter wasn't populated (e.g.
     // this scene got loaded directly rather than via GameScript's
@@ -106,6 +147,7 @@ void BattleScript::onStart() {
 
     ECSWorld* cutsceneWorld = &ctx->scene->world;
     enemyPowerupTracks.world = cutsceneWorld;
+    playerDecisionTracks.world = cutsceneWorld;
 
     // NOTE: we do NOT select the "idle" clip here. onStart() runs from
     // inside change_scene(), which is BEFORE GameScript (game.cpp) gets a
@@ -117,7 +159,7 @@ void BattleScript::onStart() {
     // is exactly why the combatants render but never animate. See
     // onUpdate() below, which does this once the real ids are in place.
 
-    g_resources.AudioManager.PlaySong("fight_theme", 0.65f, 1.0f);
+    g_resources.AudioManager.PlaySong("fight_theme", true, 0.65f, 1.0f);
     hasShownClashText = false;
 }
 
@@ -178,6 +220,12 @@ void BattleScript::onUpdate(float dt) {
     int winW, winH;
     SDL_GetWindowSize(ctx->window, &winW, &winH);
     float w = (float)winW, h = (float)winH;
+    // Same reference-resolution factor onDraw() uses -- see the
+    // UiScale()/kSideMargin comment near the top of this file. Every
+    // magic-number pixel offset below (the option cards' -128/+128, the
+    // wound scar's +25/+100, etc.) gets multiplied by this so they stay
+    // proportionally where they were authored, at any window size.
+    float uiScale = UiScale(w, h);
 
     if (elapsed <= 0.0f) {
         // --- Spawn "Contender's Clash!" Text and Particles ---
@@ -206,12 +254,29 @@ void BattleScript::onUpdate(float dt) {
 
     if (animatedTextSystem.instances.size() == 0 && particleBursts.bursts.size() == 0 && hasShownClashText)
     {
+        if (!shownOption1) {
+            Entity attackCard = ctx->scene->world.create_entity();
+            ctx->scene->world.add_z_index(attackCard);
+            ctx->scene->world.add_metadata(attackCard);
+            ctx->scene->world.add_position(attackCard);
+            ctx->scene->world.z_index_pool[attackCard].z = 0;
+            ctx->scene->world.metadata_pool[attackCard].name = "AttackCard";
+            ctx->scene->world.add_texture_ref(attackCard);
+            ctx->scene->world.texture_ref_pool[attackCard].resourceName = "AttackCard";
+            optionEntities[0] = attackCard;
+            playerDecisionTracks.target = optionEntities[0];
+            ctx->scene->world.position_pool[optionEntities[0]] = {(w * 0.5f) - 128.0f * uiScale, h + 128.0f * uiScale};
+            playerDecisionTracks.points = {
+                {(w * 0.5f) - 128.0f * uiScale, h + 128.0f * uiScale},
+                {(w * 0.5f) - 128.0f * uiScale, h * 0.5f}
+            };
+            playerDecisionTracks.durations = {1.0f};
+            playerDecisionTracks.Play();
+            shownOption1 = true;
+        }
 
-
-
-
-        // if (!attackStarted && ctx->battleEncounter.challengerEntity != (Entity)-1 && ctx->battleEncounter.challengerEntity < ctx->scene->world.entity_count && ctx->scene->world.has_animation_state[ctx->battleEncounter.challengerEntity]) {
-        //     attackStarted = true;
+        // if (!enemyAttackStarted && ctx->battleEncounter.challengerEntity != (Entity)-1 && ctx->battleEncounter.challengerEntity < ctx->scene->world.entity_count && ctx->scene->world.has_animation_state[ctx->battleEncounter.challengerEntity]) {
+        //     enemyAttackStarted = true;
         //     idleStarted = false; // allow re-entry into the idle branch later if this state ever revisits it
 
         //     ctx->scene->world.animation_state_pool[ctx->battleEncounter.challengerEntity].play("attack", true, true);
@@ -219,7 +284,8 @@ void BattleScript::onUpdate(float dt) {
         
         //     ctx->scene->world.animation_state_pool[ctx->battleEncounter.challengerEntity].active().onLoopCompleted = [this, w, h]() {
         //         if (!bluePulseCreated) {
-        //             float rightX = w - kSideMargin - kBarWidth;
+        //             float pulseUiScale = UiScale(w, h);
+        //             float rightX = w - (kSideMargin * pulseUiScale) - (kBarWidth * pulseUiScale);
         //             float barY2  = h * 0.5f;
 
         //             Entity e = ctx->scene->world.create_entity();
@@ -229,20 +295,20 @@ void BattleScript::onUpdate(float dt) {
         //             ctx->scene->world.add_rotation(e); // needed for useExplicitRotations to have anywhere to write to -- both CutsceneTrack::writeRotation() and render_entity_animation() gate on has_rotation[e]
         //             ctx->scene->world.z_index_pool[e].z = 0;
         //             ctx->scene->world.metadata_pool[e].name = "MathHorseMan_BluePulse";
-        //             ctx->scene->world.position_pool[e] = {rightX - 57.0f, barY2 + 87.0f};
+        //             ctx->scene->world.position_pool[e] = {rightX - 57.0f * pulseUiScale, barY2 + 87.0f * pulseUiScale};
         //             ctx->scene->world.add_animation_state(e);
         //             std::string fp = "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/MathHorseMen_BluePulse.animres";
         //             ctx->scene->world.assign_animation_resource(e, fp);
         //             powerupEntities[0] = e; 
         //             ctx->scene->world.animation_state_pool[e].play("MathHorseMen_BluePulse");
         //             enemyPowerupTracks.target = e;
-        //             float leftX = kSideMargin;
+        //             float leftX = kSideMargin * pulseUiScale;
         //             float barY  = h * kBarYFrac;
         //             enemyPowerupTracks.points = {
         //                 {ctx->scene->world.position_pool[e].x, ctx->scene->world.position_pool[e].y},
-        //                 {ctx->scene->world.position_pool[e].x-100.0f, ctx->scene->world.position_pool[e].y-100.0f},
-        //                 {ctx->scene->world.position_pool[e].x-100.0f, ctx->scene->world.position_pool[e].y+50.0f},
-        //                 {leftX + 25.0f, barY + 100.0f}
+        //                 {ctx->scene->world.position_pool[e].x - 100.0f * pulseUiScale, ctx->scene->world.position_pool[e].y - 100.0f * pulseUiScale},
+        //                 {ctx->scene->world.position_pool[e].x - 100.0f * pulseUiScale, ctx->scene->world.position_pool[e].y + 50.0f * pulseUiScale},
+        //                 {leftX + 25.0f * pulseUiScale, barY + 100.0f * pulseUiScale}
         //             };
         //             enemyPowerupTracks.durations = {
         //                 0.5f,
@@ -271,12 +337,72 @@ void BattleScript::onUpdate(float dt) {
         // once, the first frame this branch is entered.
         if (!idleStarted) {
             idleStarted = true;
-            attackStarted = false; // allow re-entry into the attack branch later if this state ever revisits it
+            enemyAttackStarted = false; // allow re-entry into the attack branch later if this state ever revisits it
+            attackStarted = false;
 
             if (ctx->battleEncounter.approacherEntity != (Entity)-1 && ctx->battleEncounter.approacherEntity < ctx->scene->world.entity_count && ctx->scene->world.has_animation_state[ctx->battleEncounter.approacherEntity])
                 ctx->scene->world.animation_state_pool[ctx->battleEncounter.approacherEntity].play("battle_idle");
             if (ctx->battleEncounter.challengerEntity != (Entity)-1 && ctx->battleEncounter.challengerEntity < ctx->scene->world.entity_count && ctx->scene->world.has_animation_state[ctx->battleEncounter.challengerEntity])
                 ctx->scene->world.animation_state_pool[ctx->battleEncounter.challengerEntity].play("idle");
+        }
+    }
+
+    if (playerDecisionTracks.finished && !playerDecisionTracks.wasFinished)
+    {
+        playerDecisionTracks.wasFinished = true;
+        playerDecisionTracksFinished++;
+        switch(playerDecisionTracksFinished)
+        {
+            case 1:
+                if (!shownOption2) {
+                    Entity shieldCard = ctx->scene->world.create_entity();
+                    ctx->scene->world.add_z_index(shieldCard);
+                    ctx->scene->world.add_metadata(shieldCard);
+                    ctx->scene->world.add_position(shieldCard);
+                    ctx->scene->world.z_index_pool[shieldCard].z = 0;
+                    ctx->scene->world.metadata_pool[shieldCard].name = "ShieldCard";
+                    ctx->scene->world.position_pool[shieldCard] = {(w * 0.5f), h + 128.0f * uiScale};
+                    ctx->scene->world.add_texture_ref(shieldCard);
+                    ctx->scene->world.texture_ref_pool[shieldCard].resourceName = "ShieldCard";
+                    optionEntities[1] = shieldCard;
+                    playerDecisionTracks.target = optionEntities[1];
+                    playerDecisionTracks.points = {
+                        {(w * 0.5f), h + 128.0f * uiScale},
+                        {(w * 0.5f), h * 0.5f}
+                    };
+                    playerDecisionTracks.durations = {1.0f};
+                    playerDecisionTracks.Play();
+                    shownOption2 = true;
+                }
+                break;
+            case 2:
+                if (!showOptionTitle) {
+                    Entity optionTitleText = ctx->scene->world.create_entity();
+                    ctx->scene->world.add_z_index(optionTitleText);
+                    ctx->scene->world.add_metadata(optionTitleText);
+                    ctx->scene->world.add_position(optionTitleText);
+                    ctx->scene->world.z_index_pool[optionTitleText].z = 0;
+                    ctx->scene->world.metadata_pool[optionTitleText].name = "OptionTitleText";
+                    ctx->scene->world.position_pool[optionTitleText] = {(w * 0.5f) - 120.0f * uiScale, -128.0f * uiScale };
+                    ctx->scene->world.add_animation_state(optionTitleText);
+                    std::string fp = "C:/Users/daeli/Documents/DispersedEngine/projects/OpenWorld/resources/combatOptions.animres";
+                    ctx->scene->world.assign_animation_resource(optionTitleText, fp);
+                    SDL_Log("[Battle] title anim loaded? %d", (int)ctx->scene->world.has_animation_state[optionTitleText]);
+                    optionInfoEntities[0] = optionTitleText;
+                    playerDecisionTracks.target = optionInfoEntities[0];
+                    playerDecisionTracks.points = {
+                        {(w * 0.5f)  - 120.0f * uiScale, -128.0f * uiScale},
+                        {(w * 0.5f)  - 120.0f * uiScale, (h * 0.5f) - 128.0f * uiScale}
+                    };
+                    playerDecisionTracks.durations = {1.0f};
+                    playerDecisionTracks.Play();
+                    ctx->scene->world.animation_state_pool[optionTitleText].play("default");
+                    showOptionTitle = true;
+                    
+                }
+                break;
+            case 3:
+                break;
         }
     }
     
@@ -288,8 +414,23 @@ void BattleScript::onUpdate(float dt) {
     animatedTextSystem.update(dt);
     particleBursts.update(dt);
     enemyPowerupTracks.Update(dt);
+    playerDecisionTracks.Update(dt);
 
-    
+    // Once an option card has finished sliding in, keep re-pinning it to
+    // it's final position so resizing the window keeps elements intact
+    if (optionEntities[0] != (Entity)-1 &&
+        !(playerDecisionTracks.target == optionEntities[0] && !playerDecisionTracks.finished)) {
+        ctx->scene->world.position_pool[optionEntities[0]] = {(w * 0.5f) - 128.0f * uiScale, h * 0.5f};
+    }
+    if (optionEntities[1] != (Entity)-1 &&
+        !(playerDecisionTracks.target == optionEntities[1] && !playerDecisionTracks.finished)) {
+        ctx->scene->world.position_pool[optionEntities[1]] = {(w * 0.5f), h * 0.5f};
+    }
+    if (optionInfoEntities[0] != (Entity)-1 &&
+        !(playerDecisionTracks.target == optionInfoEntities[0] && !playerDecisionTracks.finished)) {
+        ctx->scene->world.position_pool[optionInfoEntities[0]] = {(w * 0.5f)  - 120.0f * uiScale, (h * 0.5f) - 128.0f * uiScale};
+    }
+
 
     if (enemyPowerupTracks.finished && !enemyPowerupTracks.wasFinished)
     {
@@ -298,13 +439,12 @@ void BattleScript::onUpdate(float dt) {
         switch(enemyPowerupTracksFinished)
         {
             case 1:
-                damagePlayer = true;
                 auto& approacherAnim = ctx->scene->world.animation_state_pool[ctx->battleEncounter.approacherEntity];
                 
                 approacherAnim.play("hurt", true, true);
                 approacherAnim.active().loopLimit = 1;
 
-                approacherAnim.active().onLoopCompleted = [this, h]() {
+                approacherAnim.active().onLoopCompleted = [this, w, h]() {
                     leftHealthbar.damage(10.0f);
                     leftHealthbar.triggerShake(5.0f, 0.5f);
                     Tools::ActivateQuickShock(ctx->gamepad);
@@ -314,9 +454,14 @@ void BattleScript::onUpdate(float dt) {
                     ctx->scene->world.add_position(e);
                     ctx->scene->world.z_index_pool[e].z = 0;
                     ctx->scene->world.metadata_pool[e].name = "battleScar";
-                    float leftX = kSideMargin;
+                    // Same reference-resolution scaling as onDraw() --
+                    // keeps the scar lined up with the (now proportionally
+                    // scaled, never-crossing) approacher position at any
+                    // window size.
+                    float scarUiScale = UiScale(w, h);
+                    float leftX = kSideMargin * scarUiScale;
                     float barY  = h * kBarYFrac;
-                    ctx->scene->world.position_pool[e] = {leftX+25.0f, barY+100.0f};
+                    ctx->scene->world.position_pool[e] = {leftX + 25.0f * scarUiScale, barY + 100.0f * scarUiScale};
                     ctx->scene->world.add_texture_ref(e);
                     ctx->scene->world.texture_ref_pool[e].resourceName = "battleScar";
                     woundedEntities[0] = e; 
@@ -387,10 +532,17 @@ void BattleScript::onDraw() {
 
 
     // --- Health bars: approacher on the left, challenger on the right ----
+    // uiScale compares the CURRENT window to the 1280x720 reference these
+    // numbers were tuned at (see the UiScale()/kSideMargin comment up
+    // top) -- multiplying every one of them by it is what keeps the two
+    // combatants proportionally spaced apart (never crossing, never
+    // collapsing together) and the name-label gap/vertical offsets
+    // visually consistent at any window size.
+    float uiScale = UiScale(w, h);
     float barY   = h * kBarYFrac;
     float barY2 = h * 0.5f;
-    float leftX  = kSideMargin;
-    float rightX = w - kSideMargin - kBarWidth;
+    float leftX  = kSideMargin * uiScale;
+    float rightX = w - (kSideMargin * uiScale) - (kBarWidth * uiScale);
 
     leftHealthbar.render(ctx->renderer, leftX, barY);
     rightHealthbar.render(ctx->renderer, rightX, barY2);
@@ -413,13 +565,13 @@ void BattleScript::onDraw() {
 
     if (approacher != (Entity)-1 && approacher < world.entity_count && world.has_animation_state[approacher])
     {
-        Components::Position screenPos = {leftX, barY + 50.0f};
+        Components::Position screenPos = {leftX, barY + 50.0f * uiScale};
         render_entity_animation(ctx->renderer, world, approacher, screenPos.x, screenPos.y, ctx->camera.zoom);
     }
 
     if (challenger != (Entity)-1 && challenger < world.entity_count && world.has_animation_state[challenger])
     {
-        Components::Position screenPos = {rightX, barY2 + 50.0f};
+        Components::Position screenPos = {rightX, barY2 + 50.0f * uiScale};
         render_entity_animation(ctx->renderer, world, challenger, screenPos.x, screenPos.y, ctx->camera.zoom);
     }
 
@@ -436,21 +588,45 @@ void BattleScript::onDraw() {
             render_entity_texture(ctx->renderer, world, e, world.position_pool[e].x, world.position_pool[e].y, ctx->camera.zoom);
     }
 
+    for (Entity e : optionEntities)
+    {
+        if (e != (Entity)-1)
+            render_entity_texture(ctx->renderer, world, e, world.position_pool[e].x, world.position_pool[e].y, ctx->camera.zoom);
+    }
+
+    for (Entity e : optionInfoEntities)
+    {
+        if (e != (Entity)-1)
+            render_entity_animation(ctx->renderer, world, e, world.position_pool[e].x, world.position_pool[e].y, ctx->camera.zoom);
+    }
+
 
     // --- Name labels above each bar ---------------------------------------
     // Reuses "gameFont", already loaded once in main() (game.cpp) — no need
     // to load it again here.
     TTF_Font* font = ProjectScript_TTF_GetFont("gameFont");
     if (font && ctx->textEngine) {
+        // TTF_CreateText()/TTF_DrawRendererText() (the TTF_Text API) has no
+        // scale parameter in this codebase (see engine.h's own comment on
+        // this: "since TTF_SetTextScale isn't available"), so it was
+        // always drawn at native font size regardless of uiScale. Switching
+        // to the same render-to-surface-then-draw-a-scaled-texture
+        // technique engine.h already uses for AnimatedTextSystem and the
+        // code editor's syntax highlighting lets these labels scale too.
         auto drawLabel = [&](const std::string& text, float x, float y) {
-            TTF_Text* t = TTF_CreateText(ctx->textEngine, font, text.c_str(), 0);
-            if (!t) return;
-            TTF_SetTextColor(t, 235, 235, 245, 255);
-            TTF_DrawRendererText(t, x, y);
-            TTF_DestroyText(t);
+            SDL_Color color = {235, 235, 245, 255};
+            SDL_Surface* surf = TTF_RenderText_Blended(font, text.c_str(), text.size(), color);
+            if (!surf) return;
+            SDL_Texture* tex = SDL_CreateTextureFromSurface(ctx->renderer, surf);
+            if (tex) {
+                SDL_FRect dst = { x, y, surf->w * uiScale, surf->h * uiScale };
+                SDL_RenderTexture(ctx->renderer, tex, nullptr, &dst);
+                SDL_DestroyTexture(tex);
+            }
+            SDL_DestroySurface(surf);
         };
-        drawLabel(leftName,  leftX,  barY - kNameGap);
-        drawLabel(rightName, rightX, barY2 - kNameGap);
+        drawLabel(leftName,  leftX,  barY - kNameGap * uiScale);
+        drawLabel(rightName, rightX, barY2 - kNameGap * uiScale);
     }
 
     particleBursts.render(ctx->renderer, ctx->camera, true); 

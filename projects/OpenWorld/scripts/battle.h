@@ -59,8 +59,11 @@ private:
 
     Tools::CutsceneTrack playerPowerupTracks;
     Tools::CutsceneTrack enemyPowerupTracks;
+    Tools::CutsceneTrack playerDecisionTracks;
+
     int playerPowerupTracksFinished = 0;
     int enemyPowerupTracksFinished = 0;
+    int playerDecisionTracksFinished = 0;
 
     void spawnContenderClash(float screenW, float screenH, const std::string& text = "Contender's Clash!"); 
 

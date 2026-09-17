@@ -137,6 +137,73 @@ struct EngineResources {
 
 inline EngineResources g_resources;
 
+// =======================================================================
+// Auto-scale: a Unity-Canvas-Scaler-style "reference resolution" system.
+// One uniform scale factor, computed by comparing the CURRENT window to
+// a reference resolution, gets folded into rendering wherever a fixed
+// pixel size would otherwise never respond to a resize -- texture/
+// animation draw size, the Healthbar's bar dimensions, the Minimap's
+// radius/margin, etc. -- with zero changes required in the project
+// scripts that use them.
+//
+// This has to live up here, before Healthbar/Minimap/Camera/etc. are
+// defined below, since those classes call directly into it from their
+// own render()/getMapRect() methods.
+//
+// Disabled by default so it never affects the level editor's own canvas
+// previews (which have their own camera.zoom + canvas-size system and
+// call some of these same render functions). An exported game's main()
+// should opt in once at startup:
+//
+//     Engine::SetAutoScaleReference(1280.0f, 720.0f); // resolution the art was authored at
+//     Engine::SetAutoScaleEnabled(true);
+// =======================================================================
+namespace Engine {
+    inline float gAutoScaleRefWidth  = 1280.0f;
+    inline float gAutoScaleRefHeight = 720.0f;
+    inline bool  gAutoScaleEnabled   = false;
+
+    // Call once at startup (or whenever the "authored resolution" needs to
+    // change) -- NOT per frame and NOT per entity.
+    inline void SetAutoScaleReference(float refWidth, float refHeight) {
+        gAutoScaleRefWidth  = refWidth;
+        gAutoScaleRefHeight = refHeight;
+    }
+
+    inline void SetAutoScaleEnabled(bool enabled) {
+        gAutoScaleEnabled = enabled;
+    }
+
+    inline bool IsAutoScaleEnabled() { return gAutoScaleEnabled; }
+
+    // Uniform scale (std::min of the two axis ratios) so things grow or
+    // shrink together without stretching. Takes plain ints so any caller
+    // that already has a window size on hand (Minimap::render() is handed
+    // windowW/windowH directly, for instance) can use it with no extra
+    // lookups.
+    inline float ComputeAutoScaleFromSize(int w, int h) {
+        if (!gAutoScaleEnabled) return 1.0f;
+        if (w <= 0 || h <= 0 || gAutoScaleRefWidth <= 0.0f || gAutoScaleRefHeight <= 0.0f) return 1.0f;
+        return std::min((float)w / gAutoScaleRefWidth, (float)h / gAutoScaleRefHeight);
+    }
+
+    // Convenience overload for callers that only have a renderer (e.g.
+    // Healthbar::render()) -- pulls the window straight off the renderer
+    // via SDL_GetRenderWindow() (SDL3) so they don't need to plumb a
+    // window pointer through just for this. SDL_GetWindowSize() just
+    // returns SDL's already-cached size for that window, so calling this
+    // once per draw call is cheap -- there's no need to hand-cache it.
+    inline float ComputeAutoScale(SDL_Renderer* renderer) {
+        if (!gAutoScaleEnabled || !renderer) return 1.0f;
+        SDL_Window* window = SDL_GetRenderWindow(renderer);
+        if (!window) return 1.0f;
+        int w = 0, h = 0;
+        SDL_GetWindowSize(window, &w, &h);
+        return ComputeAutoScaleFromSize(w, h);
+    }
+}
+
+
 inline std::filesystem::path getProjectsPathFS(const std::string& relativePath = "") {
     return std::filesystem::path(getProjectsPath(relativePath));
 }
@@ -1772,6 +1839,16 @@ namespace Tools {
         {
             if (currentHealth <= 0) return;
 
+            // Same Engine::ComputeAutoScale() used everywhere else in the
+            // engine -- a no-op (1.0f) unless a project's main() opted in
+            // via Engine::SetAutoScaleEnabled(true). Previously barWidth/
+            // barHeight were whatever was passed into the constructor,
+            // forever, so the bar itself never grew or shrank with the
+            // window no matter how big or small it got.
+            float uiScale = Engine::ComputeAutoScale(renderer);
+            float scaledWidth  = barWidth  * uiScale;
+            float scaledHeight = barHeight * uiScale;
+
             // 1. Calculate X-axis shake offset
             float shakeOffset = 0.0f;
             if (shakeDuration > 0.0f) {
@@ -1784,20 +1861,20 @@ namespace Tools {
                 // over-amplified the offset for most of the shake, and a
                 // shorter one decayed too fast.
                 float decay = (shakeMaxDuration > 0.0f) ? (shakeDuration / shakeMaxDuration) : 0.0f;
-                shakeOffset = std::sin(shakeTime * 50.0f) * shakeIntensity * decay;
+                shakeOffset = std::sin(shakeTime * 50.0f) * (shakeIntensity * uiScale) * decay;
             }
 
             // 2. Apply offset to X axis ONLY
             float shakenX = screenX + shakeOffset;
 
             // Background rect
-            SDL_FRect bgRect = { shakenX, screenY, barWidth, barHeight };
+            SDL_FRect bgRect = { shakenX, screenY, scaledWidth, scaledHeight };
             SDL_SetRenderDrawColor(renderer, 40, 40, 40, 255);
             SDL_RenderRect(renderer, &bgRect);
 
             // Fill rect
-            float fillWidth = getPercentage() * barWidth;
-            SDL_FRect fillRect = { shakenX, screenY, fillWidth, barHeight };
+            float fillWidth = getPercentage() * scaledWidth;
+            SDL_FRect fillRect = { shakenX, screenY, fillWidth, scaledHeight };
 
             SDL_Color color = getHealthColor(getPercentage());
 
@@ -2032,8 +2109,19 @@ namespace Tools {
         }
         
         SDL_FRect getMapRect(int windowW, int windowH) const {
-            float mapSize = radius * 2.0f;
-            return { (float)windowW - mapSize - margin, (float)windowH - mapSize - margin, mapSize, mapSize };
+            // Previously radius/margin were pure pixel constants with no
+            // relationship to window size at all, so the minimap neither
+            // grew/shrank (rescale) nor kept a consistent relative distance
+            // from the corner (reposition) on any window size other than
+            // whatever it happened to be tuned for. Folding in the same
+            // Engine::ComputeAutoScale() used elsewhere fixes both: it's a
+            // no-op (1.0f) unless a project's main() has opted in via
+            // Engine::SetAutoScaleEnabled(true).
+            float uiScale = Engine::ComputeAutoScaleFromSize(windowW, windowH);
+            float scaledRadius = radius * uiScale;
+            float scaledMargin = margin * uiScale;
+            float mapSize = scaledRadius * 2.0f;
+            return { (float)windowW - mapSize - scaledMargin, (float)windowH - mapSize - scaledMargin, mapSize, mapSize };
         }
         
         void render(SDL_Renderer* renderer, const ECSWorld& world, Entity playerEntity, const std::vector<Entity>& importantEntities, int windowW, int windowH) {
@@ -9347,6 +9435,11 @@ inline void animation_system(ECSWorld& world, float dt)
 }
 
 
+// (Engine::AutoScale now lives near the top of this file, right after
+// g_resources, so Healthbar and Minimap can call into it too -- see
+// render_entity_texture()/render_entity_animation() below for where it
+// gets folded into cameraZoom.)
+
 inline bool render_entity_texture(SDL_Renderer* renderer, const ECSWorld& world, Entity i, float screenX, float screenY, float cameraZoom = 1.0f)
 {
     SDL_FRect srcRect = {0,0,0,0};
@@ -9360,9 +9453,14 @@ inline bool render_entity_texture(SDL_Renderer* renderer, const ECSWorld& world,
     float tw, th;
     SDL_GetTextureSize(tex, &tw, &th);
     
-    // UPDATED: Multiply by cameraZoom so textures scale with the camera
-    float scaleX = (world.has_scale[i] ? world.scale_pool[i].x : 1.0f) * cameraZoom;
-    float scaleY = (world.has_scale[i] ? world.scale_pool[i].y : 1.0f) * cameraZoom;
+    // UPDATED: Multiply by cameraZoom so textures scale with the camera,
+    // and by Engine::ComputeAutoScale() so they also automatically scale
+    // with the window relative to the reference resolution (see the
+    // Engine::AutoScale block above) -- returns 1.0f (a no-op) unless a
+    // project's main() has explicitly opted in.
+    float autoScale = Engine::ComputeAutoScale(renderer);
+    float scaleX = (world.has_scale[i] ? world.scale_pool[i].x : 1.0f) * cameraZoom * autoScale;
+    float scaleY = (world.has_scale[i] ? world.scale_pool[i].y : 1.0f) * cameraZoom * autoScale;
     float rot = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
 
     SDL_FRect dst = { screenX, screenY, tw * scaleX, th * scaleY };
@@ -9416,8 +9514,12 @@ inline bool render_entity_animation(SDL_Renderer* renderer, const ECSWorld& worl
     if (clip.frameWidth > 0.0f) tw = clip.frameWidth;
     if (clip.frameHeight > 0.0f) th = clip.frameHeight;
 
-    float scaleX = (world.has_scale[i] ? world.scale_pool[i].x : 1.0f) * cameraZoom;
-    float scaleY = (world.has_scale[i] ? world.scale_pool[i].y : 1.0f) * cameraZoom;
+    // Same Engine::ComputeAutoScale() fold-in as render_entity_texture()
+    // above -- a no-op (1.0f) unless a project's main() opted in via
+    // Engine::SetAutoScaleEnabled(true).
+    float autoScale = Engine::ComputeAutoScale(renderer);
+    float scaleX = (world.has_scale[i] ? world.scale_pool[i].x : 1.0f) * cameraZoom * autoScale;
+    float scaleY = (world.has_scale[i] ? world.scale_pool[i].y : 1.0f) * cameraZoom * autoScale;
     float rot    = world.has_rotation[i] ? world.rotation_pool[i].degrees : 0.0f;
 
     SDL_FRect dst = { screenX, screenY, tw * scaleX, th * scaleY };

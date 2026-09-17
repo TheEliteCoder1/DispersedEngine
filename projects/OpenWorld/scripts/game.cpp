@@ -349,9 +349,13 @@ static void RenderFrame(SDL_Renderer* renderer, SDL_Window* window, GameContext&
 
 
 
+            // Scaled the same way as the icon in GameScript::onDraw()'s
+            // destRect3 (healthbarOffsetY) so the bar and its icon stay
+            // aligned with each other at every window size.
+            float healthbarUiScale = Engine::ComputeAutoScale(renderer);
             script->healthbar.render(renderer,
                 playerScreen.x,
-                playerScreen.y + healthbarOffsetY
+                playerScreen.y + healthbarOffsetY * healthbarUiScale
             );
 
 
@@ -996,7 +1000,7 @@ void GameScript::onStart() {
 
 
 
-    ctx->camera.zoom = 1.45f;
+    ctx->camera.zoom = 1.2f;
 
 
 
@@ -1401,7 +1405,7 @@ void GameScript::onStart() {
     healthbar.startHeartbeat = [&]() { ProjectScript_MIXER_PlayLoopingSound("heartbeat", 0.7f, 1.0f); };
     healthbar.stopHeartbeat = [&]() { ProjectScript_MIXER_StopSound("heartbeat"); };
 
-    g_resources.AudioManager.PlaySong("main", 1.0f, true, 0.65f);
+    g_resources.AudioManager.PlaySong("main", true, 1.0f, 0.65f, -1);
 }
 
 
@@ -1800,9 +1804,18 @@ float WaterBar::getPercentage() const { return currentValue / maxValue;
 void WaterBar::render(SDL_Renderer* renderer, float screenX, float screenY) {
     if (currentValue <= 0) return;
 
+    // Previously this drew at a flat barWidth/barHeight no matter what the
+    // window was doing, while engine.h's Healthbar (used for the player's
+    // health) now scales itself via Engine::ComputeAutoScale() every
+    // frame -- so on any window that wasn't the reference resolution, the
+    // water/food bars visibly stopped matching the health bar's size.
+    // Calling the exact same engine-wide resolver here keeps all three in
+    // lockstep at every window size.
+    float uiScale = Engine::ComputeAutoScale(renderer);
+    float scaledWidth  = barWidth  * uiScale;
+    float scaledHeight = barHeight * uiScale;
 
-
-    SDL_FRect bgRect = { screenX, screenY, barWidth, barHeight };
+    SDL_FRect bgRect = { screenX, screenY, scaledWidth, scaledHeight };
 
 
 
@@ -1814,11 +1827,11 @@ void WaterBar::render(SDL_Renderer* renderer, float screenX, float screenY) {
 
 
 
-    float fillWidth = getPercentage() * barWidth;
+    float fillWidth = getPercentage() * scaledWidth;
 
 
 
-    SDL_FRect fillRect = { screenX, screenY, fillWidth, barHeight };
+    SDL_FRect fillRect = { screenX, screenY, fillWidth, scaledHeight };
 
 
 
@@ -1836,9 +1849,12 @@ void FoodBar::render(SDL_Renderer* renderer, float screenX, float screenY)
 {
     if (currentValue <= 0) return;
 
+    // Same fix as WaterBar::render() above.
+    float uiScale = Engine::ComputeAutoScale(renderer);
+    float scaledWidth  = barWidth  * uiScale;
+    float scaledHeight = barHeight * uiScale;
 
-
-    SDL_FRect bgRect = { screenX, screenY, barWidth, barHeight };
+    SDL_FRect bgRect = { screenX, screenY, scaledWidth, scaledHeight };
 
 
 
@@ -1850,11 +1866,11 @@ void FoodBar::render(SDL_Renderer* renderer, float screenX, float screenY)
 
 
 
-    float fillWidth = getPercentage() * barWidth;
+    float fillWidth = getPercentage() * scaledWidth;
 
 
 
-    SDL_FRect fillRect = { screenX, screenY, fillWidth, barHeight };
+    SDL_FRect fillRect = { screenX, screenY, fillWidth, scaledHeight };
 
 
 
@@ -3019,18 +3035,31 @@ void GameScript::onDraw() {
 
 
         if (!vanishEffects.isActive(player)) {
-            
-            waterbar.render(ctx->renderer, playerScreen.x, playerScreen.y + waterbarOffsetY);
+
+            // barOffsetX/waterbarOffsetY/foodbarOffsetY/healthbarOffsetY and
+            // the icons' 26x26 size were all tuned to sit flush against the
+            // bars at the reference resolution. Now that the bars
+            // themselves scale via Engine::ComputeAutoScale() (see
+            // WaterBar::render()/FoodBar::render()/Healthbar::render()),
+            // every offset built from those constants needs the same
+            // factor -- both where the bar itself is drawn and where its
+            // icon is drawn -- or the bar and its icon drift apart from
+            // each other as the window moves away from the reference size.
+            float uiScale = Engine::ComputeAutoScale(ctx->renderer);
+
+            waterbar.render(ctx->renderer, playerScreen.x, playerScreen.y + waterbarOffsetY * uiScale);
 
 
 
-            foodbar.render(ctx->renderer, playerScreen.x, playerScreen.y + foodbarOffsetY);
+            foodbar.render(ctx->renderer, playerScreen.x, playerScreen.y + foodbarOffsetY * uiScale);
 
 
 
 
-            
-            SDL_FRect destRect1 = {playerScreen.x - barOffsetX, playerScreen.y + waterbarOffsetY, 26,26};
+            float iconSize = 26.0f * uiScale;
+            float scaledBarOffsetX = barOffsetX * uiScale;
+
+            SDL_FRect destRect1 = {playerScreen.x - scaledBarOffsetX, playerScreen.y + waterbarOffsetY * uiScale, iconSize, iconSize};
 
 
 
@@ -3039,7 +3068,7 @@ void GameScript::onDraw() {
 
 
 
-            SDL_FRect destRect2 = {playerScreen.x - barOffsetX, playerScreen.y + foodbarOffsetY, 26,26};
+            SDL_FRect destRect2 = {playerScreen.x - scaledBarOffsetX, playerScreen.y + foodbarOffsetY * uiScale, iconSize, iconSize};
 
 
 
@@ -3048,7 +3077,7 @@ void GameScript::onDraw() {
 
 
 
-            SDL_FRect destRect3 = {playerScreen.x - barOffsetX, playerScreen.y + healthbarOffsetY, 26,26};
+            SDL_FRect destRect3 = {playerScreen.x - scaledBarOffsetX, playerScreen.y + healthbarOffsetY * uiScale, iconSize, iconSize};
 
 
 
@@ -3135,12 +3164,9 @@ void GameScript::onEnd() {
 int main(int argc, char *argv[])
 {
     const float windowWidth = 1600.0f;
-
-
-
     const float windowHeight = 900.0f;
 
-
+    
 
  
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD)) {
@@ -3188,6 +3214,11 @@ int main(int argc, char *argv[])
 
 
     SDL_Renderer *renderer = SDL_CreateRenderer(window, nullptr);
+
+
+    // resolution the art was authored at
+    Engine::SetAutoScaleReference(1280.0f, 720.0f);
+    Engine::SetAutoScaleEnabled(true);
 
 
 
@@ -3291,6 +3322,10 @@ int main(int argc, char *argv[])
     ProjectScript_IMG_LoadTexture("GamePadCursorIcon", "OpenWorld/assets/textures/GamepadCursor.svg");
 
     ProjectScript_IMG_LoadTexture("MathHorseMan_BluePulse", "OpenWorld/assets/textures/BluePulse_MathHorsemen.svg");
+
+    ProjectScript_IMG_LoadTexture("AttackCard", "OpenWorld/assets/textures/AttackCard.svg");
+
+    ProjectScript_IMG_LoadTexture("ShieldCard", "OpenWorld/assets/textures/ShieldCard.svg");
 
     // load audio 
     g_resources.AudioManager.CreateMixerDevice();

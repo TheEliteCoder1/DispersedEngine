@@ -1,0 +1,31 @@
+{
+    "activeClipIndex": 0,
+    "clips": [
+        {
+            "frameHeight": 64.0,
+            "frameWidth": 156.0,
+            "imageFrames": [
+                "assets/textures/ActionsText1.svg",
+                "assets/textures/ActionsText2.svg",
+                "assets/textures/ActionsText3.svg",
+                "assets/textures/ActionsText4.svg",
+                "assets/textures/ActionsText5.svg",
+                "assets/textures/ActionsText6.svg",
+                "assets/textures/ActionsText7.svg",
+                "assets/textures/ActionsText8.svg",
+                "assets/textures/ActionsText9.svg",
+                "assets/textures/ActionsText10.svg",
+                "assets/textures/ActionsText11.svg",
+                "assets/textures/ActionsText12.svg",
+                "assets/textures/ActionsText13.svg",
+                "assets/textures/ActionsText14.svg",
+                "assets/textures/ActionsText15.svg",
+                "assets/textures/ActionsText16.svg"
+            ],
+            "isPlaying": true,
+            "loop": true,
+            "name": "default",
+            "speed": 18.0
+        }
+    ]
+}
